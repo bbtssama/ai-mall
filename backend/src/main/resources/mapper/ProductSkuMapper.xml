@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.goods.mapper.ProductSkuMapper">
+
+    <sql id="baseCols">
+        id, product_id, sku_name, price, stock, sales, version, created_at
+    </sql>
+
+    <select id="selectById" resultType="com.aimall.goods.bean.ProductSku">
+        SELECT <include refid="baseCols"/>
+        FROM t_product_sku
+        WHERE id = #{id}
+    </select>
+
+    <select id="selectByProductId" resultType="com.aimall.goods.bean.ProductSku">
+        SELECT <include refid="baseCols"/>
+        FROM t_product_sku
+        WHERE product_id = #{productId}
+    </select>
+
+    <select id="selectByIds" resultType="com.aimall.goods.bean.ProductSku">
+        SELECT <include refid="baseCols"/>
+        FROM t_product_sku
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <!-- 乐观扣减：数据库行锁 + stock>= 条件保证不超卖；返回 0 行 = 库存不足 -->
+    <update id="deductStock">
+        UPDATE t_product_sku
+        SET stock = stock - #{quantity},
+            sales = sales + #{quantity}
+        WHERE id = #{id} AND stock >= #{quantity}
+    </update>
+
+    <!-- 回补库存（取消订单等场景） -->
+    <update id="addStock">
+        UPDATE t_product_sku
+        SET stock = stock + #{quantity}
+        WHERE id = #{id}
+    </update>
+
+</mapper>

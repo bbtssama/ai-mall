@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.ai.mapper.MessageMapper">
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_message (conversation_id, role, content, extra_json)
+        VALUES (#{conversationId}, #{role}, #{content}, #{extraJson})
+    </insert>
+
+    <select id="selectByConversationId" resultType="com.aimall.ai.bean.Message">
+        SELECT id, conversation_id, role, content, extra_json, created_at
+        FROM t_message
+        WHERE conversation_id = #{conversationId}
+        ORDER BY created_at ASC, id ASC
+    </select>
+
+</mapper>

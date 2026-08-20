@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.ai.mapper.ConversationMapper">
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_conversation (user_id, biz_type, title)
+        VALUES (#{userId}, #{bizType}, #{title})
+    </insert>
+
+    <select id="selectById" resultType="com.aimall.ai.bean.Conversation">
+        SELECT id, user_id, biz_type, title, created_at
+        FROM t_conversation
+        WHERE id = #{id}
+    </select>
+
+    <select id="selectByUserId" resultType="com.aimall.ai.bean.Conversation">
+        SELECT id, user_id, biz_type, title, created_at
+        FROM t_conversation
+        WHERE user_id = #{userId}
+        ORDER BY created_at DESC, id DESC
+    </select>
+
+</mapper>

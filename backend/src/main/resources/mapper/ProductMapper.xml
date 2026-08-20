@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.goods.mapper.ProductMapper">
+
+    <!-- 列表：聚合 MIN(price) 作为"起售价"，LEFT JOIN 保证无 SKU 商品不丢行 -->
+    <select id="selectOnSalePage" resultType="com.aimall.goods.bean.Product">
+        SELECT p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at,
+               MIN(s.price) AS min_price
+        FROM t_product p
+        LEFT JOIN t_product_sku s ON s.product_id = p.id
+        WHERE p.status = 1
+        GROUP BY p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at
+        ORDER BY p.id DESC
+        LIMIT #{offset}, #{size}
+    </select>
+
+    <select id="countOnSale" resultType="long">
+        SELECT COUNT(*) FROM t_product WHERE status = 1
+    </select>
+
+    <select id="selectById" resultType="com.aimall.goods.bean.Product">
+        SELECT id, spu_name, sub_title, category_id, main_img, detail, status, created_at
+        FROM t_product
+        WHERE id = #{id}
+    </select>
+
+    <!-- AI 预置知识：全部上架商品（含 detail 与起售价），商品量小全量加载 -->
+    <select id="selectAllOnSale" resultType="com.aimall.goods.bean.Product">
+        SELECT p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.detail, p.status, p.created_at,
+               MIN(s.price) AS min_price
+        FROM t_product p
+        LEFT JOIN t_product_sku s ON s.product_id = p.id
+        WHERE p.status = 1
+        GROUP BY p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.detail, p.status, p.created_at
+    </select>
+
+</mapper>

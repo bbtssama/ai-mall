@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.order.mapper.OrderMapper">
+
+    <sql id="baseCols">
+        id, order_no, user_id, total_amount, status, receiver_name, receiver_phone,
+        receiver_address, pay_type, pay_time, cancel_time, version, created_at
+    </sql>
+
+    <select id="selectById" resultType="com.aimall.order.bean.Order">
+        SELECT <include refid="baseCols"/>
+        FROM t_order
+        WHERE id = #{id}
+    </select>
+
+    <select id="selectByOrderNo" resultType="com.aimall.order.bean.Order">
+        SELECT <include refid="baseCols"/>
+        FROM t_order
+        WHERE order_no = #{orderNo}
+    </select>
+
+    <!-- 走 (user_id, created_at) 联合索引 -->
+    <select id="selectByUserIdPage" resultType="com.aimall.order.bean.Order">
+        SELECT <include refid="baseCols"/>
+        FROM t_order
+        WHERE user_id = #{userId}
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{offset}, #{size}
+    </select>
+
+    <select id="countByUserId" resultType="long">
+        SELECT COUNT(*) FROM t_order WHERE user_id = #{userId}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_order (order_no, user_id, total_amount, status, receiver_name,
+                             receiver_phone, receiver_address)
+        VALUES (#{orderNo}, #{userId}, #{totalAmount}, #{status}, #{receiverName},
+                #{receiverPhone}, #{receiverAddress})
+    </insert>
+
+    <!-- 状态机 CAS：防并发重复流转。取消时回填 cancel_time -->
+    <update id="updateStatus">
+        UPDATE t_order
+        SET status = #{toStatus},
+            <if test="toStatus == 'CANCELLED'">cancel_time = #{cancelTime},</if>
+            version = version + 1
+        WHERE id = #{id} AND status = #{fromStatus}
+    </update>
+
+</mapper>

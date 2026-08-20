@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.goods.mapper.CartMapper">
+
+    <!-- 购物车条目：join sku/product 一次查出展示所需的全部信息 -->
+    <select id="selectItemsByUserId" resultType="com.aimall.goods.dto.CartItemVO">
+        SELECT c.id          AS id,
+               c.sku_id      AS skuId,
+               c.quantity    AS quantity,
+               s.sku_name    AS skuName,
+               s.price       AS price,
+               p.id          AS productId,
+               p.spu_name    AS productName,
+               p.main_img    AS mainImg
+        FROM t_cart c
+        JOIN t_product_sku s ON s.id = c.sku_id
+        JOIN t_product p ON p.id = s.product_id
+        WHERE c.user_id = #{userId}
+        ORDER BY c.updated_at DESC
+    </select>
+
+    <select id="selectByUserIdAndSkuId" resultType="com.aimall.goods.bean.Cart">
+        SELECT id, user_id, sku_id, quantity, created_at, updated_at
+        FROM t_cart
+        WHERE user_id = #{userId} AND sku_id = #{skuId}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_cart (user_id, sku_id, quantity)
+        VALUES (#{userId}, #{skuId}, #{quantity})
+    </insert>
+
+    <update id="updateQuantity">
+        UPDATE t_cart
+        SET quantity = #{quantity}
+        WHERE id = #{id} AND user_id = #{userId}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM t_cart WHERE id = #{id} AND user_id = #{userId}
+    </delete>
+
+    <delete id="deleteByUserId">
+        DELETE FROM t_cart WHERE user_id = #{userId}
+    </delete>
+
+    <delete id="deleteByUserIdAndSkuIds">
+        DELETE FROM t_cart
+        WHERE user_id = #{userId}
+          AND sku_id IN
+        <foreach collection="skuIds" item="skuId" open="(" separator="," close=")">
+            #{skuId}
+        </foreach>
+    </delete>
+
+</mapper>

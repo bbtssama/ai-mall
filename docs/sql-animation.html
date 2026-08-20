@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL 执行过程动画 —— 商品列表带起售价</title>
+<style>
+/* ============================================================
+   配色：深色科技感 —— 深蓝底 + 亮青主色 + 琥珀色强调（价格/MIN）
+   商品主色：p1 靛紫 / p2 青蓝 / p3 粉紫 / p4 灰（下架）
+   ============================================================ */
+*{box-sizing:border-box}
+:root{
+  --bg:#0b1220;            /* 页面底色 */
+  --panel:#111b2e;         /* 面板底色 */
+  --panel2:#16223c;        /* 行卡片底色 */
+  --panel3:#0d1526;        /* 内嵌表格底色 */
+  --line:rgba(148,163,184,.16);
+  --text:#e6edf7;
+  --text2:#93a5bf;
+  --accent:#38bdf8;        /* 主强调色：青蓝 */
+  --accent-soft:rgba(56,189,248,.14);
+  --ok:#34d399;            /* 保留/通过：绿 */
+  --bad:#f87171;           /* 剔除：红 */
+  --min:#fbbf24;           /* MIN 价格：琥珀 */
+  --mono:Consolas,"Cascadia Code",ui-monospace,Menlo,monospace;
+}
+html,body{margin:0;padding:0}
+body{
+  font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,-apple-system,sans-serif;
+  color:var(--text);min-height:100vh;
+  background:
+    radial-gradient(1100px 560px at 85% -10%, rgba(29,78,150,.35), transparent 60%),
+    radial-gradient(900px 520px at -8% 110%, rgba(49,64,128,.32), transparent 55%),
+    var(--bg);
+}
+.page{max-width:1280px;margin:0 auto;padding:20px 24px 46px}
+
+/* ---------- 顶部标题 + 角标 ---------- */
+.topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.topbar h1{margin:0;font-size:23px;letter-spacing:.5px;
+  background:linear-gradient(92deg,#7dd3fc,#a5b4fc 55%,#f0abfc);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.desc{color:var(--text2);font-size:13px;line-height:1.7;margin:9px 0 0;max-width:880px}
+.badge{font-size:12px;color:#7dd3fc;border:1px solid rgba(125,211,252,.45);
+  background:rgba(56,189,248,.08);padding:5px 14px;border-radius:999px;white-space:nowrap;margin-top:2px}
+
+/* ---------- 步骤进度条 ---------- */
+.progress-wrap{display:flex;align-items:center;gap:14px;margin:20px 0 16px;flex-wrap:wrap}
+.progress{display:flex;align-items:center;flex:1;min-width:280px}
+.prog-item{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:none;cursor:pointer;padding:0;color:var(--text2)}
+.prog-dot{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:700;border:2px solid rgba(148,163,184,.35);background:var(--panel);transition:.3s}
+.prog-label{font-size:12px;white-space:nowrap}
+.prog-item:hover .prog-dot{border-color:var(--accent)}
+.prog-item.active .prog-dot{background:var(--accent);border-color:var(--accent);color:#04121f;box-shadow:0 0 14px rgba(56,189,248,.6)}
+.prog-item.active .prog-label{color:#7dd3fc;font-weight:700}
+.prog-item.done .prog-dot{background:rgba(52,211,153,.18);border-color:var(--ok);color:var(--ok)}
+.prog-item.done .prog-label{color:var(--ok)}
+.prog-link{flex:1;height:2px;min-width:14px;background:rgba(148,163,184,.25);margin:0 6px;border-radius:2px;position:relative;top:-13px}
+.step-count{font-size:13px;color:var(--text2);font-family:var(--mono);white-space:nowrap}
+
+/* ---------- 主区：左 SQL 面板 + 右舞台 ---------- */
+.main{display:flex;gap:16px;align-items:flex-start}
+.sql-panel{flex:0 0 400px;position:sticky;top:14px;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.sql-head{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  padding:11px 14px;border-bottom:1px solid var(--line);font-size:12px;color:var(--text2)}
+.clause-chip{font-size:11px;color:#7dd3fc;background:var(--accent-soft);
+  border:1px solid rgba(56,189,248,.35);padding:3px 9px;border-radius:999px;white-space:nowrap}
+.sql-body{padding:10px 6px 12px;font-family:var(--mono);font-size:12.5px;line-height:1.85}
+.sql-line{display:flex;gap:10px;padding:3px 10px;border-radius:8px;border-left:3px solid transparent;
+  transition:background .3s,opacity .3s;opacity:.55;white-space:pre-wrap;word-break:break-word}
+.sql-num{color:#475569;user-select:none;flex:0 0 14px;text-align:right}
+.sql-line.active{opacity:1;background:linear-gradient(90deg,rgba(56,189,248,.16),rgba(56,189,248,.02));
+  border-left-color:var(--accent);animation:sqlGlow 2.4s ease-in-out infinite}
+@keyframes sqlGlow{0%,100%{box-shadow:0 0 10px rgba(56,189,248,.18),inset 0 0 12px rgba(56,189,248,.04)}
+  50%{box-shadow:0 0 20px rgba(56,189,248,.42),inset 0 0 14px rgba(56,189,248,.08)}}
+.sql-line .kw{color:#7dd3fc;font-weight:700}
+.sql-line .fn{color:var(--min);font-weight:700}
+.sql-line .tbl-kw{color:#c4b5fd}
+.sql-line .param{color:#fb923c;font-weight:700;border-bottom:1px dashed #fb923c}
+.sql-note{padding:9px 14px;font-size:11.5px;color:#64748b;border-top:1px solid var(--line)}
+
+/* ---------- 舞台 ---------- */
+.stage-panel{flex:1 1 auto;min-width:0}
+#stage{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:16px 18px;min-height:540px;position:relative}
+.step-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:16px;font-weight:700;margin-bottom:12px}
+.count-pill{font-size:12px;font-weight:600;color:#7dd3fc;background:var(--accent-soft);
+  border:1px solid rgba(56,189,248,.35);padding:3px 10px;border-radius:999px}
+.where-sub{color:var(--text2);font-size:13px;margin-bottom:12px;line-height:1.7}
+.where-sub b{color:var(--text)}
+
+/* ---------- 第 1 步：连接区 ---------- */
+.join-area{position:relative;display:flex;gap:14px;align-items:stretch;margin-bottom:6px}
+.join-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.tbl-wrap{flex:1;min-width:0}
+.tbl-title{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);margin-bottom:8px;flex-wrap:wrap}
+.tbl-name{font-family:var(--mono);color:#7dd3fc;font-weight:700;font-size:13px}
+.join-mid{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;flex:0 0 92px}
+.join-mid .lm{font-family:var(--mono);color:var(--accent);font-weight:700;font-size:12px;
+  border:1px solid rgba(56,189,248,.45);background:var(--accent-soft);padding:4px 10px;border-radius:8px;white-space:nowrap}
+.join-mid .jk{font-family:var(--mono);color:var(--text2);font-size:11px;text-align:center;line-height:1.5}
+.tbl{background:var(--panel3);border:1px solid var(--line);border-radius:10px;padding:8px}
+.join-line{fill:none;stroke:var(--ln,#38bdf8);stroke-width:2;opacity:0;
+  stroke-dasharray:600;stroke-dashoffset:600;filter:drop-shadow(0 0 5px var(--ln,#38bdf8))}
+@keyframes drawLine{to{stroke-dashoffset:0;opacity:.9}}
+
+/* ---------- 通用数据行卡片 ---------- */
+.prow,.srow2,.jrow,.data-row{display:flex;align-items:center;gap:9px;background:var(--panel2);
+  border:1px solid var(--line);border-left:4px solid var(--pc,#38bdf8);border-radius:9px;
+  padding:0 11px;height:44px;margin-bottom:7px;font-size:13px;overflow:hidden}
+.data-row{height:46px;transition:all .45s ease}
+.id-chip{flex:0 0 auto;background:var(--pc,#38bdf8);color:#08101f;font-weight:800;
+  border-radius:6px;padding:2px 8px;font-size:12px;font-family:var(--mono)}
+.id-chip.sku{background:#334155;color:#cbd5e1}
+.pname,.sku-name,.j-name,.s-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.status-chip{flex:0 0 auto;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid}
+.status-chip.ok{color:var(--ok);border-color:rgba(52,211,153,.45)}
+.status-chip.off{color:#94a3b8;border-color:rgba(148,163,184,.4)}
+.sku-price,.j-price,.s-price{flex:0 0 auto;font-family:var(--mono);font-weight:700;color:var(--min)}
+.match-hint{display:none;flex:0 0 auto;gap:4px}
+.match-hint i{font-style:normal;font-family:var(--mono);font-size:11px;color:var(--pc,#38bdf8);
+  background:var(--pc-soft,#0d1526);padding:1px 6px;border-radius:6px}
+.join-plus{flex:0 0 auto;color:var(--accent);font-weight:900;font-size:15px}
+
+/* ---------- 第 1 步：连接结果 ---------- */
+.result-block{margin-top:8px}
+.result-title{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:700;margin-bottom:9px;flex-wrap:wrap}
+.res-key{font-family:var(--mono);font-size:11px;color:var(--accent);background:var(--accent-soft);
+  border:1px solid rgba(56,189,248,.35);padding:2px 8px;border-radius:999px}
+.result-rows{display:flex;flex-direction:column}
+
+/* ---------- 第 2 步：WHERE 过滤 ---------- */
+.mark{flex:0 0 auto;font-size:12px;font-weight:700;border-radius:999px;padding:2px 8px}
+.mark.keep{color:#061a12;background:var(--ok)}
+.mark.drop{color:#fff;background:var(--bad)}
+.data-row.kept{border-color:rgba(52,211,153,.7);box-shadow:0 0 10px rgba(52,211,153,.15)}
+.data-row.removed{border-color:rgba(248,113,113,.8);background:rgba(248,113,113,.12)}
+.data-row.removed .strike{text-decoration:line-through;text-decoration-color:var(--bad);color:#fda4af}
+.data-row.gone{height:0!important;margin-bottom:0;border-width:0;opacity:0;
+  transform:scale(.94);transition:all .55s ease}
+
+/* ---------- 汇总横幅 ---------- */
+.where-summary,.group-summary{margin-top:14px;text-align:center}
+.big-count{font-size:14px;color:var(--text);background:rgba(56,189,248,.07);
+  border:1px solid rgba(56,189,248,.3);border-radius:12px;padding:10px 14px;display:inline-block;line-height:1.7}
+.big-count b{color:var(--accent);font-family:var(--mono);font-size:16px}
+.hint{color:var(--text2);font-size:12.5px;margin-top:8px;line-height:1.7}
+.hidden{display:none}
+
+/* ---------- 第 3 步：分组卡片 ---------- */
+.groups{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:4px}
+.group-card{background:rgba(255,255,255,.03);border:1px solid var(--line);
+  border-top:3px solid var(--pc,#38bdf8);border-radius:12px;padding:10px;min-width:0}
+.gc-head{display:flex;align-items:center;gap:7px;margin-bottom:9px;font-size:12.5px;flex-wrap:wrap}
+.gc-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gc-count{font-size:11px;color:var(--text2)}
+.gc-formula{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--min);white-space:nowrap}
+.gc-rows .data-row{margin-bottom:6px}
+.min-highlight{border-color:var(--min)!important;background:rgba(251,191,36,.1);
+  box-shadow:0 0 0 1px rgba(251,191,36,.5),0 0 14px rgba(251,191,36,.3);
+  animation:glowPulse 1.4s ease-in-out infinite}
+.min-tag{flex:0 0 auto;font-size:11px;font-weight:800;color:#08101f;background:var(--min);
+  border-radius:6px;padding:2px 7px;font-family:var(--mono)}
+.data-row.row-collapse{height:0!important;margin-bottom:0;opacity:0;transform:scale(.9);
+  border-width:0;transition:all .5s ease}
+.gc-sum{margin-top:2px}
+@keyframes glowPulse{0%,100%{box-shadow:0 0 0 1px rgba(251,191,36,.5),0 0 10px rgba(251,191,36,.25)}
+  50%{box-shadow:0 0 0 1px rgba(251,191,36,.8),0 0 20px rgba(251,191,36,.5)}}
+
+/* ---------- 汇总行（第 3~5 步共用） ---------- */
+.srow-min-label{flex:0 0 auto;font-size:11px;color:#7dd3fc;border:1px solid rgba(125,211,252,.4);
+  border-radius:999px;padding:2px 8px;background:var(--accent-soft);white-space:nowrap}
+.rank{flex:0 0 auto;font-family:var(--mono);font-size:11px;color:var(--text2)}
+.rank.hot{color:var(--min);font-weight:800}
+
+/* ---------- 第 4 步：排序 ---------- */
+.order-bar{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px}
+.order-bar .arrow{color:var(--accent);font-weight:800}
+
+/* ---------- 第 5 步：分页 ---------- */
+.page-formula{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.chip{font-family:var(--mono);font-size:12px;color:var(--text2);background:var(--panel3);
+  border:1px solid var(--line);padding:4px 10px;border-radius:8px}
+.chip.strong{color:var(--accent);border-color:rgba(56,189,248,.5)}
+.chip.param{color:#fb923c;border-color:rgba(251,146,60,.5)}
+.page-zone{border:1px dashed rgba(56,189,248,.4);border-radius:12px;padding:10px;margin-bottom:10px}
+.page-zone .zone-tag{font-size:12px;color:#7dd3fc;margin-bottom:8px}
+.page-zone.next{border-color:rgba(148,163,184,.3);background:rgba(148,163,184,.04)}
+.page-zone.next .zone-tag{color:var(--text2)}
+.page-zone.next .data-row{opacity:.45;filter:grayscale(.6)}
+.final-banner{margin-top:6px;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.4);
+  border-radius:12px;padding:11px 14px;font-size:13.5px;line-height:1.9}
+.final-banner b{color:var(--ok);font-family:var(--mono)}
+
+/* ---------- 入场动画 ---------- */
+@keyframes popIn{from{opacity:0;transform:translateY(12px) scale(.96)}to{opacity:1;transform:none}}
+.pop-in{animation:popIn .45s ease both}
+
+/* ---------- “这一步在干嘛” ---------- */
+.explain{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:14px 16px;margin-top:14px;min-height:96px}
+.exp-title{font-size:14px;font-weight:800;color:#7dd3fc;margin-bottom:7px}
+.explain p{margin:0;font-size:13.5px;line-height:1.85;color:var(--text)}
+.exp-why{margin-top:8px;font-size:12.5px;line-height:1.8;color:#a8b9d6;
+  border-top:1px dashed rgba(148,163,184,.2);padding-top:8px}
+.exp-why b{color:#f0abfc}
+
+/* ---------- 控制按钮 ---------- */
+.controls{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;justify-content:center}
+.btn{cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;
+  border:1px solid rgba(148,163,184,.35);background:var(--panel2);color:var(--text);
+  padding:10px 20px;border-radius:11px;transition:.25s;min-width:120px}
+.btn:hover:not(:disabled){border-color:var(--accent);color:#7dd3fc;
+  box-shadow:0 0 12px rgba(56,189,248,.25);transform:translateY(-1px)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.primary{background:linear-gradient(135deg,#0ea5e9,#2563eb);border-color:transparent;color:#fff;
+  box-shadow:0 4px 16px rgba(37,99,235,.35)}
+.btn.primary:hover:not(:disabled){box-shadow:0 6px 22px rgba(56,189,248,.5)}
+.btn.auto{background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.5);color:var(--min)}
+.btn.auto.running{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.5);color:#fda4af}
+.btn.ghost{min-width:auto;padding:10px 14px;font-size:13px}
+.foot{text-align:center;color:#64748b;font-size:12px;margin-top:26px;letter-spacing:.5px}
+
+/* ---------- 响应式 ---------- */
+@media (max-width:1080px){
+  .main{flex-direction:column}
+  .sql-panel{flex:none;width:100%;position:static}
+}
+@media (max-width:860px){
+  .join-area{flex-direction:column}
+  .join-svg{display:none}
+  .match-hint{display:flex}
+  .join-mid{flex-direction:row;flex:0 0 auto;justify-content:flex-start}
+  .groups{grid-template-columns:1fr}
+  .topbar h1{font-size:19px}
+  .controls .btn{flex:1;min-width:0}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ===== 顶部：标题 + 说明 + 角标 ===== -->
+  <header class="topbar">
+    <div>
+      <h1>SQL 执行过程动画 —— 商品列表带起售价</h1>
+      <p class="desc">场景：首页商品列表 ——「只显示在售商品，每个商品显示最低起售价，分页返回」。
+        演示数据：4 个商品 × 各 2 个规格 = 8 行连接结果。SQL 分 5 步执行，点「下一步」逐步观看数据如何变化（也可按 → / ← 方向键）。</p>
+    </div>
+    <div class="badge">ai-mall · MyBatis Mapper 教学演示</div>
+  </header>
+
+  <!-- ===== 步骤进度条 ===== -->
+  <div class="progress-wrap">
+    <div class="progress" id="progressBar"></div>
+    <div class="step-count" id="stepCount"></div>
+  </div>
+
+  <!-- ===== 主区：SQL 面板 + 舞台 ===== -->
+  <div class="main">
+    <aside class="sql-panel">
+      <div class="sql-head">
+        <span>SQL 语句（高亮行 = 正在执行的子句）</span>
+        <span class="clause-chip" id="clauseChip"></span>
+      </div>
+      <div class="sql-body" id="sqlBody"></div>
+      <div class="sql-note">提示：点击进度条上的步骤可跳转 · ← / → 方向键切换步骤</div>
+    </aside>
+
+    <section class="stage-panel">
+      <div id="stage"></div>
+      <div class="explain" id="explain"></div>
+      <div class="controls">
+        <button id="prevBtn" class="btn">← 上一步</button>
+        <button id="replayBtn" class="btn ghost" title="重播当前步骤的动画">↻ 重播本步</button>
+        <button id="autoBtn" class="btn auto">▶ 自动播放</button>
+        <button id="nextBtn" class="btn primary">下一步 →</button>
+      </div>
+    </section>
+  </div>
+
+  <footer class="foot">ai-mall · MyBatis Mapper 教学演示 —— 单文件 HTML（无外部依赖），双击即可打开运行</footer>
+</div>
+
+<script>
+/* ============================================================
+   数据区：两个表 + 每步的讲解文案
+   ============================================================ */
+const PRODUCTS = [
+  { id:'p1', name:'AirSound Pro 真无线降噪耳机', status:1 },
+  { id:'p2', name:'闪充宝 65W 氮化镓充电器',     status:1 },
+  { id:'p3', name:'云朵亲肤保湿唇釉',           status:1 },
+  { id:'p4', name:'轻氧智能手环 6',             status:0 }   // 下架！
+];
+const SKUS = [
+  { id:'s1', pid:'p1', name:'曜石黑',   price:399 },
+  { id:'s2', pid:'p1', name:'奶白色',   price:399 },
+  { id:'s3', pid:'p2', name:'单头版',   price:89  },
+  { id:'s4', pid:'p2', name:'三口套装', price:129 },
+  { id:'s5', pid:'p3', name:'豆沙色',   price:69  },
+  { id:'s6', pid:'p3', name:'蜜桃色',   price:69  },
+  { id:'s7', pid:'p4', name:'标准版',   price:199 },
+  { id:'s8', pid:'p4', name:'表带礼盒', price:249 },
+];
+
+/* 每个商品一个主色调；下架的 p4 用灰色 */
+const PROD_COLOR = { p1:'#818cf8', p2:'#22d3ee', p3:'#f472b6', p4:'#64748b' };
+function hexA(hex, a){                       // #rrggbb -> rgba()，用于浅色底
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n>>16},${(n>>8)&255},${n&255},${a})`;
+}
+const PROD_SOFT = {};
+Object.keys(PROD_COLOR).forEach(k => PROD_SOFT[k] = hexA(PROD_COLOR[k], .16));
+
+/* LEFT JOIN 语义的连接结果：每个商品的每一行去匹配 product_id 相同的 SKU
+   （4 商品 × 2 规格 = 8 行） */
+function joinedRows(){
+  const rows = [];
+  for (const p of PRODUCTS)
+    for (const s of SKUS)
+      if (s.pid === p.id) rows.push({ p, s });
+  return rows;
+}
+
+/* 5 步的状态定义：标题 / 进度条文字 / 高亮哪几行 SQL / 讲解 */
+const STEPS = [
+  { key:'join',  cls:'连接', head:'🔗 第 1 步 · FROM + LEFT JOIN（两表连接）',
+    sqlLines:[3,4], clause:'正在执行：FROM / LEFT JOIN —— 表连接',
+    do:'FROM 先读入商品表 t_product，LEFT JOIN 再把每个商品去规格表 t_product_sku 里匹配 product_id 相同的行，拼成「商品 + 规格」的连接结果。一个商品有多个规格（如 p1 有 2 个 SKU），所以它在连接结果里出现多行：4 个商品 × 2 个规格 = 8 行。',
+    why:'用 LEFT JOIN 而不是 INNER JOIN：左边表（商品）的所有行都必须保留——即使某个商品暂时没有任何 SKU，也要出现在结果里，只是 SKU 字段为 NULL。这就是「保证即使没 SKU 的商品也保留」。' },
+  { key:'where', cls:'过滤', head:'🚦 第 2 步 · WHERE p.status = 1（过滤下架商品）',
+    sqlLines:[5], clause:'正在执行：WHERE —— 条件过滤',
+    do:'WHERE 在连接结果上逐行检查 p.status 是否为 1（在售）。p1 / p2 / p3 的 6 行通过检查被保留；下架的 p4 有 2 行，被标红、划掉并淡出。8 行 → 6 行。',
+    why:'过滤发生在聚合之前：先把不满足条件的行丢掉，后面的 GROUP BY 和 MIN 就只作用于在售商品，下架的 p4 不会参与计算，也就不会出现在首页。' },
+  { key:'group', cls:'聚合', head:'🧮 第 3 步 · GROUP BY + MIN(s.price)（分组聚合）',
+    sqlLines:[2,6], clause:'正在执行：GROUP BY + MIN —— 分组聚合',
+    do:'GROUP BY 把 6 行按商品 p.id 分成 3 组，每组用 MIN(s.price) 求「最低起售价」：p1 → MIN(399, 399) = 399，p2 → MIN(89, 129) = 89，p3 → MIN(69, 69) = 69。每组合并成 1 行，6 行 → 3 行。',
+    why:'GROUP BY 之后的 SELECT 列只有两种合法：① 分组键（p.id、spu_name 等，所以它们必须原样写进 GROUP BY）；② 聚合函数（MIN / MAX / SUM / COUNT 等）。这就是「商品信息 + 最低价」能同时查出来的原因。' },
+  { key:'order', cls:'排序', head:'↕️ 第 4 步 · ORDER BY p.id DESC（排序）',
+    sqlLines:[7], clause:'正在执行：ORDER BY —— 排序',
+    do:'把聚合得到的 3 行按 p.id 从大到小排序：p3 (id=3) → p2 (id=2) → p1 (id=1)。行内容不变，只是顺序调整。',
+    why:'数据库只保证聚合结果的每一行都出现，但不保证顺序；所以要在最后显式 ORDER BY，让首页的展示顺序可控（这里 id 越大越新、越靠前）。' },
+  { key:'limit', cls:'分页', head:'📄 第 5 步 · LIMIT #{offset}, #{size}（分页返回）',
+    sqlLines:[8], clause:'正在执行：LIMIT —— 分页',
+    do:'LIMIT offset, size 实现分页：offset = (page − 1) × size。演示 page=1、size=2 → offset=0，跳过 0 行取 2 行，返回 p3、p2；p1 留给第 2 页（offset=2）。',
+    why:'首页不能一次返回全部商品，必须分页。注意 #{offset}、#{size} 是 MyBatis 预编译占位符：只绑定参数值、不拼接 SQL，既正确又防 SQL 注入。' },
+];
+
+/* SQL 语句原文（8 行），供高亮展示 */
+const SQL_LINES = [
+  'SELECT p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at,',
+  '       MIN(s.price) AS min_price',
+  'FROM   t_product p',
+  'LEFT JOIN t_product_sku s ON s.product_id = p.id',
+  'WHERE  p.status = 1',
+  'GROUP BY p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at',
+  'ORDER BY p.id DESC',
+  'LIMIT  #{offset}, #{size}',
+];
+
+/* ============================================================
+   状态机：step 0..4，全局定时器管理
+   ============================================================ */
+let step = 0;              // 当前步骤索引
+let timers = [];           // 本步动画的所有 setTimeout
+let autoplayTimer = null;  // 自动播放的 setInterval
+
+function later(fn, ms){ const id = setTimeout(fn, ms); timers.push(id); return id; }
+function clearTimers(){ timers.forEach(clearTimeout); timers = []; }
+
+/* 渲染全部：进度条 / SQL 高亮 / 舞台 / 讲解 / 按钮状态 */
+function renderAll(){
+  clearTimers();
+  renderProgress();
+  renderSQL();
+  renderStage();
+  renderExplain();
+  renderControls();
+}
+
+/* 跳转到某一步（0..4） */
+function goTo(n){
+  if (n < 0 || n > 4) return;
+  step = n;
+  renderAll();
+}
+function nextStep(){ if (step < 4) goTo(step + 1); }
+function prevStep(){ if (step > 0) goTo(step - 1); }
+function replayStep(){ renderAll(); }          // 重播当前步骤动画
+
+/* 自动播放：每 2 秒前进一步，到第 5 步自动停止 */
+function toggleAuto(){
+  if (autoplayTimer){
+    clearInterval(autoplayTimer); autoplayTimer = null;
+  } else {
+    autoplayTimer = setInterval(() => {
+      if (step >= 4){ stopAuto(); return; }
+      goTo(step + 1);
+    }, 2000);
+  }
+  renderControls();
+}
+function stopAuto(){
+  if (autoplayTimer){ clearInterval(autoplayTimer); autoplayTimer = null; }
+  renderControls();
+}
+
+/* ============================================================
+   进度条 + SQL 高亮
+   ============================================================ */
+function renderProgress(){
+  const bar = document.getElementById('progressBar');
+  bar.innerHTML = STEPS.map((s, i) => {
+    const cls = i < step ? 'done' : (i === step ? 'active' : '');
+    return `<button class="prog-item ${cls}" onclick="goTo(${i})">
+              <span class="prog-dot">${i < step ? '✓' : i + 1}</span>
+              <span class="prog-label">${s.cls}</span>
+            </button>${i < 4 ? '<span class="prog-link"></span>' : ''}`;
+  }).join('');
+  document.getElementById('stepCount').textContent = `第 ${step + 1} / 5 步`;
+}
+
+/* 给 SQL 文本加关键词高亮（关键字 / 表名 / 函数 / 预编译参数） */
+function hlLine(l){
+  let s = l;
+  ['SELECT','FROM','LEFT JOIN','ON','WHERE','GROUP BY','ORDER BY','LIMIT','AS']
+    .forEach(k => { s = s.split(k).join(`<span class="kw">${k}</span>`); });
+  s = s.replace(/#\{[^}]*\}/g, m => `<span class="param">${m}</span>`);
+  s = s.replace(/(t_product_sku|t_product)/g, m => `<span class="tbl-kw">${m}</span>`);
+  s = s.replace(/MIN\(/g, '<span class="fn">MIN</span>(');
+  return s;
+}
+
+function renderSQL(){
+  const act = STEPS[step].sqlLines;                    // 当前高亮的行号
+  document.getElementById('sqlBody').innerHTML = SQL_LINES.map((l, i) =>
+    `<div class="sql-line ${act.includes(i + 1) ? 'active' : ''}">
+       <span class="sql-num">${i + 1}</span><span>${hlLine(l)}</span>
+     </div>`).join('');
+  document.getElementById('clauseChip').textContent = STEPS[step].clause;
+}
+
+/* ============================================================
+   舞台分发
+   ============================================================ */
+function renderStage(){
+  const stage = document.getElementById('stage');
+  stage.innerHTML = '<div class="stage-inner" id="stageInner"></div>';
+  const builders = { join: stageJoin, where: stageWhere, group: stageGroup, order: stageOrder, limit: stageLimit };
+  builders[STEPS[step].key]();
+}
+
+function renderExplain(){
+  const s = STEPS[step];
+  document.getElementById('explain').innerHTML =
+    `<div class="exp-title">💡 这一步在干嘛</div>
+     <p>${s.do}</p>
+     <div class="exp-why"><b>为什么要这么做：</b>${s.why}</div>`;
+}
+
+function renderControls(){
+  const prev = document.getElementById('prevBtn');
+  const next = document.getElementById('nextBtn');
+  const auto = document.getElementById('autoBtn');
+  prev.disabled = (step === 0);
+  next.disabled = (step === 4);
+  next.textContent = step === 4 ? '已完成 ✓' : '下一步 →';
+  auto.classList.toggle('running', !!autoplayTimer);
+  auto.textContent = autoplayTimer ? '⏸ 暂停自动播放' : '▶ 自动播放';
+}
+
+/* ============================================================
+   小部件：商品行 / SKU 行 / 汇总行
+   ============================================================ */
+function productRowHTML(p){
+  const matches = SKUS.filter(s => s.pid === p.id);       // 该商品匹配到的规格
+  return `<div class="prow" id="prow-${p.id}" style="--pc:${PROD_COLOR[p.id]};--pc-soft:${PROD_SOFT[p.id]}">
+    <span class="id-chip">${p.id}</span>
+    <span class="pname">${p.name}</span>
+    <span class="status-chip ${p.status ? 'ok' : 'off'}">${p.status ? '在售' : '下架'}</span>
+    <span class="match-hint">${matches.map(s => `<i>→ ${s.id}</i>`).join('')}</span>
+  </div>`;
+}
+function skuRowHTML(s){
+  return `<div class="srow2" id="srow-${s.id}" style="--pc:${PROD_COLOR[s.pid]};--pc-soft:${PROD_SOFT[s.pid]}">
+    <span class="id-chip sku">${s.id}</span>
+    <span class="sku-name">${s.name}</span>
+    <span class="sku-price">¥${s.price}</span>
+  </div>`;
+}
+/* 聚合后的汇总行（含最低起售价）；delay 用于分步入场 */
+function summaryRowHTML(p, minPrice, delay){
+  const st = `--pc:${PROD_COLOR[p.id]};--pc-soft:${PROD_SOFT[p.id]}${delay != null ? `;animation-delay:${delay}s` : ''}`;
+  return `<div class="data-row srow pop-in" style="${st}">
+    <span class="id-chip">${p.id}</span>
+    <span class="s-name">${p.name}</span>
+    <span class="srow-min-label">最低起售价</span>
+    <span class="s-price">¥${minPrice}</span>
+  </div>`;
+}
+
+/* ============================================================
+   第 1 步：FROM + LEFT JOIN
+   两表并排 → SVG 连线“磁吸”匹配 → 结果 8 行逐行弹出
+   ============================================================ */
+function stageJoin(){
+  const inner = document.getElementById('stageInner');
+  const jrs = joinedRows();
+  inner.innerHTML = `
+    <div class="step-head">${STEPS[0].head}<span class="count-pill">4 商品 × 2 规格 → 8 行</span></div>
+    <div class="where-sub">SQL 先执行 <b>FROM t_product p</b>（读入商品表），再执行 <b>LEFT JOIN t_product_sku s</b>：
+      拿 p 的每一行去匹配 s 中 <b>product_id = p.id</b> 的行 —— 匹配上的规格会被「吸」过来拼成一行。</div>
+    <div class="join-area" id="joinArea">
+      <div class="tbl-wrap">
+        <div class="tbl-title"><span class="tbl-name">t_product</span><span>p · 商品表 · 4 行</span></div>
+        <div class="tbl">${PRODUCTS.map(productRowHTML).join('')}</div>
+      </div>
+      <div class="join-mid">
+        <span class="lm">LEFT JOIN</span>
+        <span class="jk">ON s.product_id<br>= p.id</span>
+      </div>
+      <div class="tbl-wrap">
+        <div class="tbl-title"><span class="tbl-name">t_product_sku</span><span>s · 规格表 · 8 行</span></div>
+        <div class="tbl">${SKUS.map(skuRowHTML).join('')}</div>
+      </div>
+      <svg id="joinSvg" class="join-svg"></svg>
+    </div>
+    <div class="result-block">
+      <div class="result-title">连接结果 <span class="res-key">ON s.product_id = p.id</span><span class="count-pill">8 行</span></div>
+      <div class="result-rows" id="joinResult"></div>
+    </div>`;
+  drawJoinLines();
+  const box = document.getElementById('joinResult');
+  jrs.forEach((jr, i) => {                              // 结果行逐条弹出
+    const el = document.createElement('div');
+    el.className = 'data-row jrow pop-in';
+    el.style.setProperty('--pc', PROD_COLOR[jr.p.id]);
+    el.style.setProperty('--pc-soft', PROD_SOFT[jr.p.id]);
+    el.style.animationDelay = (1.5 + i * 0.16) + 's';   // 等连线画完再逐条出现
+    el.innerHTML = `
+      <span class="id-chip">${jr.p.id}</span>
+      <span class="j-name">${jr.p.name}</span>
+      <span class="join-plus">+</span>
+      <span class="id-chip sku">${jr.s.id}</span>
+      <span class="j-name">${jr.s.name}</span>
+      <span class="j-price">¥${jr.s.price}</span>`;
+    box.appendChild(el);
+  });
+}
+
+/* 根据两表真实位置，在 SVG 上画“磁吸”连线（自动适配横排/窄屏竖排） */
+function drawJoinLines(){
+  const svg = document.getElementById('joinSvg');
+  if (!svg || !svg.getBoundingClientRect().width) return;   // 窄屏隐藏 SVG 时跳过
+  svg.innerHTML = '';
+  const area = document.getElementById('joinArea');
+  const ar = area.getBoundingClientRect();
+  /* 把每个 SKU 连同它的两个锚点行一起存下来，避免回调里引用越界变量 */
+  const pairs = SKUS.map(s => ({
+    sku: s,
+    a: document.getElementById('prow-' + s.pid),
+    b: document.getElementById('srow-' + s.id)
+  }));
+  pairs.forEach(({ sku, a, b }, idx) => {
+    if (!a || !b) return;
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    let x1, y1, x2, y2;
+    if (rb.left > ra.right){                       // 横排：右缘 → 左缘
+      x1 = ra.right; y1 = ra.top + ra.height / 2;
+      x2 = rb.left;  y2 = rb.top + rb.height / 2;
+    } else {                                       // 竖排：下缘 → 上缘
+      x1 = ra.left + ra.width / 2; y1 = ra.bottom;
+      x2 = rb.left + rb.width / 2; y2 = rb.top;
+    }
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const mx = (x1 + x2) / 2;
+    path.setAttribute('d', `M${x1 - ar.left},${y1 - ar.top} C${mx - ar.left},${y1 - ar.top} ${mx - ar.left},${y2 - ar.top} ${x2 - ar.left},${y2 - ar.top}`);
+    path.setAttribute('class', 'join-line');
+    path.style.setProperty('--ln', PROD_COLOR[sku.pid]);
+    path.style.animation = 'drawLine .5s ease ' + (0.15 * idx) + 's forwards';
+    svg.appendChild(path);
+  });
+}
+
+/* ============================================================
+   第 2 步：WHERE p.status = 1
+   逐行检查 → 保留行打绿勾，下架行标红划掉再淡出
+   ============================================================ */
+function stageWhere(){
+  const inner = document.getElementById('stageInner');
+  const jrs = joinedRows();
+  inner.innerHTML = `
+    <div class="step-head">${STEPS[1].head}<span class="count-pill">8 行 → 6 行</span></div>
+    <div class="where-sub">WHERE 逐行检查 <b>p.status = 1</b>：只保留「在售」商品的行；下架的 <b>p4</b> 两行会被标红、划掉并淡出。</div>
+    <div class="result-rows" id="whereRows"></div>
+    <div class="where-summary hidden" id="whereSummary">
+      <div class="big-count">8 行 → 检查 status → 保留 <b>6</b> 行（p1/p2/p3） · 剔除 <b>2</b> 行（p4 下架）</div>
+      <div class="hint">概念：<b>先 WHERE 过滤、再聚合</b> —— 被剔除的 p4 不会再参与后面的 MIN 计算。</div>
+    </div>`;
+  const box = document.getElementById('whereRows');
+  jrs.forEach((jr, i) => {
+    const el = document.createElement('div');
+    el.className = 'data-row jrow pop-in';
+    el.id = 'wr-' + i;
+    el.style.setProperty('--pc', PROD_COLOR[jr.p.id]);
+    el.style.setProperty('--pc-soft', PROD_SOFT[jr.p.id]);
+    el.style.animationDelay = (i * 0.1) + 's';
+    el.innerHTML = `
+      <span class="id-chip">${jr.p.id}</span>
+      <span class="j-name strike">${jr.p.name}</span>
+      <span class="join-plus">+</span>
+      <span class="id-chip sku">${jr.s.id}</span>
+      <span class="j-name strike">${jr.s.name}</span>
+      <span class="j-price">¥${jr.s.price}</span>
+      <span class="status-chip ${jr.p.status ? 'ok' : 'off'}">status=${jr.p.status}</span>
+      <span class="mark" id="mk-${i}"></span>`;
+    box.appendChild(el);
+  });
+  /* 逐行做检查（间隔 420ms），保留 / 剔除分两路动画 */
+  jrs.forEach((jr, i) => {
+    later(() => {
+      const row = document.getElementById('wr-' + i);
+      const mk = document.getElementById('mk-' + i);
+      if (jr.p.status === 1){
+        row.classList.add('kept');
+        mk.className = 'mark keep'; mk.textContent = '✓ 保留';
+      } else {
+        row.classList.add('removed');
+        mk.className = 'mark drop'; mk.textContent = '✗ status=0 下架';
+        later(() => row.classList.add('gone'), 550);     // 标红 550ms 后淡出折叠
+      }
+    }, 300 + i * 420);
+  });
+  later(() => document.getElementById('whereSummary').classList.remove('hidden'),
+        300 + jrs.length * 420 + 750);
+}
+
+/* ============================================================
+   第 3 步：GROUP BY + MIN(s.price)
+   FLIP 动画：6 行交错排列 → 归拢进 3 个同色分组卡片 → 高亮 MIN → 每组合并成 1 行
+   ============================================================ */
+function stageGroup(){
+  const inner = document.getElementById('stageInner');
+  const prods = ['p1','p2','p3'];
+  const all = joinedRows().filter(jr => jr.p.status === 1);      // WHERE 后的 6 行
+  /* 交错排列（p1,p2,p3 的第 1 个规格，再第 2 个规格），让“归拢”运动更明显 */
+  const flat = [];
+  for (let i = 0; i < 2; i++) for (const pid of prods){
+    const g = all.filter(jr => jr.p.id === pid);
+    if (g[i]) flat.push(g[i]);
+  }
+  inner.innerHTML = `
+    <div class="step-head">${STEPS[2].head}<span class="count-pill">6 行 → 3 行</span></div>
+    <div class="where-sub">把 6 行按 <b>p.id</b> 分成 3 组，每组用 <b>MIN(s.price)</b> 求最低起售价，每组合并成 1 行。
+      同色系的行会「归拢」进同一个分组卡片里。</div>
+    <div class="result-rows" id="flatRows"></div>
+    <div class="groups" id="groups"></div>
+    <div class="group-summary hidden" id="groupSummary"></div>`;
+
+  /* 先渲染交错平铺的 6 行 */
+  const fb = document.getElementById('flatRows');
+  flat.forEach((jr, idx) => {
+    const el = document.createElement('div');
+    el.className = 'data-row jrow pop-in';
+    el.id = 'fr-' + idx;
+    el.style.setProperty('--pc', PROD_COLOR[jr.p.id]);
+    el.style.setProperty('--pc-soft', PROD_SOFT[jr.p.id]);
+    el.style.animationDelay = (idx * 0.12) + 's';
+    el.innerHTML = `
+      <span class="id-chip">${jr.p.id}</span>
+      <span class="j-name">${jr.p.name}</span>
+      <span class="join-plus">+</span>
+      <span class="id-chip sku">${jr.s.id}</span>
+      <span class="j-name">${jr.s.name}</span>
+      <span class="j-price">¥${jr.s.price}</span>`;
+    fb.appendChild(el);
+  });
+
+  /* 等入场动画结束后做 FLIP 归拢（FLIP = First/Last/Invert/Play） */
+  later(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (step !== 2) return;                              // 快速切步时放弃本次动画
+    const before = flat.map((jr, idx) => document.getElementById('fr-' + idx).getBoundingClientRect());
+    /* 建 3 个同色分组卡片，把行元素搬进去 */
+    const groupsEl = document.getElementById('groups');
+    prods.forEach(pid => {
+      const members = flat.filter(jr => jr.p.id === pid);
+      const card = document.createElement('div');
+      card.className = 'group-card';
+      card.id = 'gc-' + pid;
+      card.style.setProperty('--pc', PROD_COLOR[pid]);
+      card.style.setProperty('--pc-soft', PROD_SOFT[pid]);
+      card.innerHTML = `
+        <div class="gc-head">
+          <span class="id-chip">${pid}</span>
+          <span class="gc-name">${members[0].p.name}</span>
+          <span class="gc-count">${members.length} 个规格</span>
+          <span class="gc-formula"></span>
+        </div>
+        <div class="gc-rows"></div>
+        <div class="gc-sum hidden"></div>`;
+      members.forEach(jr => card.querySelector('.gc-rows').appendChild(document.getElementById('fr-' + flat.indexOf(jr))));
+      groupsEl.appendChild(card);
+    });
+    document.getElementById('flatRows').classList.add('hidden');   // 平铺容器退场
+    /* Invert：先瞬移到旧位置，再 Play 过渡回原位 */
+    const after = flat.map((jr, idx) => document.getElementById('fr-' + idx).getBoundingClientRect());
+    flat.forEach((jr, idx) => {
+      const el = document.getElementById('fr-' + idx);
+      el.style.transition = 'none';
+      el.style.transform = `translate(${before[idx].left - after[idx].left}px, ${before[idx].top - after[idx].top}px)`;
+    });
+    void document.getElementById('fr-0').offsetWidth;               // 强制回流
+    flat.forEach((jr, idx) => {
+      const el = document.getElementById('fr-' + idx);
+      el.style.transition = 'transform .6s cubic-bezier(.22,.75,.25,1)';
+      el.style.transform = 'translate(0,0)';
+    });
+    /* 高亮每组的最小价格 */
+    later(() => {
+      prods.forEach(pid => {
+        const members = flat.filter(jr => jr.p.id === pid);
+        const min = Math.min(...members.map(jr => jr.s.price));
+        const minRow = members.find(jr => jr.s.price === min);
+        const el = document.getElementById('fr-' + flat.indexOf(minRow));
+        el.classList.add('min-highlight');
+        const tag = document.createElement('span');
+        tag.className = 'min-tag'; tag.textContent = 'MIN';
+        el.appendChild(tag);
+        document.getElementById('gc-' + pid).querySelector('.gc-formula').textContent =
+          `MIN(${members.map(jr => jr.s.price).join(', ')}) = ${min}`;
+      });
+    }, 800);
+    /* 每组合并成 1 行（内部行淡出，汇总行出现） */
+    later(() => {
+      flat.forEach(jr => document.getElementById('fr-' + flat.indexOf(jr)).classList.add('row-collapse'));
+      prods.forEach(pid => {
+        const members = flat.filter(jr => jr.p.id === pid);
+        const min = Math.min(...members.map(jr => jr.s.price));
+        const card = document.getElementById('gc-' + pid);
+        const sum = card.querySelector('.gc-sum');
+        sum.innerHTML = summaryRowHTML(PRODUCTS.find(p => p.id === pid), min);
+        sum.classList.remove('hidden');
+      });
+      const gs = document.getElementById('groupSummary');
+      gs.innerHTML = `<div class="big-count">6 行 → 按商品分 3 组 → 每组合并 1 行 → <b>3 行</b>（已算出各商品最低起售价）</div>
+        <div class="hint">概念：GROUP BY 之后的 SELECT 列只能是 <b>分组键</b> 或 <b>聚合函数</b> —— 商品信息列都在 GROUP BY 里所以能原样带出，MIN(s.price) 是聚合函数。</div>`;
+      gs.classList.remove('hidden');
+    }, 2400);
+  })), 1250);
+}
+
+/* ============================================================
+   第 4 步：ORDER BY p.id DESC
+   FLIP 重排：p1,p2,p3 → p3,p2,p1
+   ============================================================ */
+function stageOrder(){
+  const inner = document.getElementById('stageInner');
+  const mins = { p1:399, p2:89, p3:69 };
+  const beforeOrder = ['p1','p2','p3'], afterOrder = ['p3','p2','p1'];
+  inner.innerHTML = `
+    <div class="step-head">${STEPS[3].head}<span class="count-pill">3 行重排</span></div>
+    <div class="where-sub">把聚合得到的 3 行按 <b>p.id 从大到小</b> 排序：
+      <span class="order-bar"><span>排序前 p1 → p2 → p3</span><span class="arrow">⟶</span><span>排序后 p3 → p2 → p1</span></span></div>
+    <div class="result-rows" id="orderRows"></div>
+    <div class="where-summary hidden" id="orderSummary"></div>`;
+  const box = document.getElementById('orderRows');
+  beforeOrder.forEach((pid, i) => {
+    const el = document.createElement('div');
+    el.className = 'data-row srow pop-in';
+    el.id = 'or-' + pid;
+    el.style.setProperty('--pc', PROD_COLOR[pid]);
+    el.style.setProperty('--pc-soft', PROD_SOFT[pid]);
+    el.style.animationDelay = (i * 0.12) + 's';
+    el.innerHTML = `
+      <span class="id-chip">${pid}</span>
+      <span class="s-name">${PRODUCTS.find(p => p.id === pid).name}</span>
+      <span class="rank">p.id = ${pid.slice(1)}</span>
+      <span class="srow-min-label">最低起售价</span>
+      <span class="s-price">¥${mins[pid]}</span>`;
+    box.appendChild(el);
+  });
+  /* 等入场结束，FLIP 重排为降序 */
+  later(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (step !== 3) return;                              // 快速切步时放弃本次动画
+    const rects = {};
+    beforeOrder.forEach(pid => rects[pid] = document.getElementById('or-' + pid).getBoundingClientRect());
+    afterOrder.forEach(pid => box.appendChild(document.getElementById('or-' + pid)));
+    const newRects = {};
+    afterOrder.forEach(pid => newRects[pid] = document.getElementById('or-' + pid).getBoundingClientRect());
+    afterOrder.forEach(pid => {
+      const el = document.getElementById('or-' + pid);
+      el.style.transition = 'none';
+      el.style.transform = `translate(${rects[pid].left - newRects[pid].left}px, ${rects[pid].top - newRects[pid].top}px)`;
+    });
+    void document.getElementById('or-' + afterOrder[0]).offsetWidth;
+    afterOrder.forEach(pid => {
+      const el = document.getElementById('or-' + pid);
+      el.style.transition = 'transform .6s cubic-bezier(.22,.75,.25,1)';
+      el.style.transform = 'translate(0,0)';
+    });
+    later(() => {
+      afterOrder.forEach((pid, i) => {
+        const rankEl = document.getElementById('or-' + pid).querySelector('.rank');
+        rankEl.textContent = `第 ${i + 1} 名 · id=${pid.slice(1)}`;
+        if (i === 0) rankEl.classList.add('hot');
+      });
+      const s = document.getElementById('orderSummary');
+      s.innerHTML = `<div class="big-count">排序完成：<b>p3 (id=3)</b> → <b>p2 (id=2)</b> → <b>p1 (id=1)</b> —— id 越大越新、越靠前</div>
+        <div class="hint">概念：聚合只保证「每组合成一行」，<b>不保证顺序</b>；所以要最后用 ORDER BY 明确排序，首页展示顺序才可控。</div>`;
+      s.classList.remove('hidden');
+    }, 700);
+  })), 800);
+}
+
+/* ============================================================
+   第 5 步：LIMIT #{offset}, #{size}
+   分页公式 + 第 1 页返回 2 行，第 3 行留到第 2 页
+   ============================================================ */
+function stageLimit(){
+  const inner = document.getElementById('stageInner');
+  const mins = { p1:399, p2:89, p3:69 };
+  const order = ['p3','p2','p1'];
+  inner.innerHTML = `
+    <div class="step-head">${STEPS[4].head}<span class="count-pill">3 行 → 本页 2 行</span></div>
+    <div class="where-sub">分页公式：<b>offset = (page − 1) × size</b>。演示 <b>page = 1、size = 2</b>：
+      跳过 offset = 0 行，从第 1 行开始取 2 行。</div>
+    <div class="page-formula">
+      <span class="chip">page = 1</span>
+      <span class="chip">size = 2</span>
+      <span class="chip strong">offset = (1−1) × 2 = 0</span>
+      <span class="chip">取第 1 ~ 2 行</span>
+      <span class="chip param">#{ } = 预编译参数（只传值不拼 SQL，防注入）</span>
+    </div>
+    <div class="page-zone">
+      <div class="zone-tag">✓ 第 1 页 · offset=0 · 本页返回</div>
+      ${summaryRowHTML(PRODUCTS.find(p => p.id === order[0]), mins[order[0]], .1)}
+      ${summaryRowHTML(PRODUCTS.find(p => p.id === order[1]), mins[order[1]], .25)}
+    </div>
+    <div class="page-zone next">
+      <div class="zone-tag">→ 第 2 页 · offset=2 · 下次请求才返回</div>
+      ${summaryRowHTML(PRODUCTS.find(p => p.id === order[2]), mins[order[2]], .4)}
+    </div>
+    <div class="final-banner pop-in" style="animation-delay:.75s">
+      ✔ 最终返回 <b>2 行</b>：p3 云朵亲肤保湿唇釉（¥69）、p2 闪充宝 65W 氮化镓充电器（¥89）。<br>
+      全部结果共 <b>3 行</b>，分 2 页返回；首页只渲染这 2 行，滑到底部再请求 offset=2 的下一页。
+    </div>`;
+}
+
+/* ============================================================
+   初始化
+   ============================================================ */
+document.getElementById('prevBtn').addEventListener('click', prevStep);
+document.getElementById('nextBtn').addEventListener('click', nextStep);
+document.getElementById('autoBtn').addEventListener('click', toggleAuto);
+document.getElementById('replayBtn').addEventListener('click', replayStep);
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' '){ e.preventDefault(); nextStep(); }
+  else if (e.key === 'ArrowLeft'){ prevStep(); }
+});
+/* 窗口缩放时重画第 1 步的连线 */
+window.addEventListener('resize', () => { if (step === 0) drawJoinLines(); });
+
+renderAll();   // 打开页面即进入第 1 步
+</script>
+</body>
+</html>

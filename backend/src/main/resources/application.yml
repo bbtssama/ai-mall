@@ -1,0 +1,47 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ai-mall-backend
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 开发库：192.168.6.102（与 order-system-v2 / blog-system 同一台 MySQL）
+    url: jdbc:mysql://192.168.6.102:3306/ai_mall?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:root123}
+  ai:
+    openai:
+      # OpenCode Go 中转（opencode.ai/zen/go 订阅，OpenAI 兼容协议）。
+      # 注意：base-url 不带 /v1，Spring AI 会自动拼接 /v1/chat/completions。
+      # 官方 DeepSeek 直连可改回 https://api.deepseek.com（模型 deepseek-chat）。
+      base-url: https://opencode.ai/zen/go
+      # 生产环境请用环境变量 DEEPSEEK_API_KEY 覆盖
+      api-key: ${DEEPSEEK_API_KEY:sk-AMtI0Eb8zJULhdamGBBPAfOlgxp9awncoZnQvWStAmEsimOoRa0sBkibRgfvKY0L}
+      chat:
+        options:
+          model: deepseek-v4-pro
+          temperature: 0.7
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+sa-token:
+  # token 名称（前端请求头），默认 Authorization；Sa-Token 会兼容 "Bearer " 前缀
+  token-name: Authorization
+  timeout: 604800          # token 有效期 7 天（秒）
+  active-timeout: -1       # 无活跃期限制
+  is-concurrent: true      # 允许多端登录
+  is-share: false
+  token-style: uuid
+  is-log: false
+
+logging:
+  level:
+    com.aimall: info
