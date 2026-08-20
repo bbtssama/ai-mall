@@ -31,7 +31,7 @@
         </el-table-column>
         <el-table-column label="小计" width="120">
           <template #default="{ row }">
-            <span class="subtotal">¥{{ row.subtotal }}</span>
+            <span class="subtotal">¥{{ subtotalOf(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="100">
@@ -81,7 +81,9 @@ const checkoutVisible = ref(false)
 const submitting = ref(false)
 const checkout = ref({ receiverName: '', receiverPhone: '', receiverAddress: '' })
 
-const totalAmount = computed(() => items.value.reduce((s, i) => s + Number(i.subtotal), 0))
+// 后端 CartItemVO 的 subtotal 是方法、不会序列化进 JSON，故前端基于 price*quantity 实时计算
+function subtotalOf(i) { return Number(i.price) * Number(i.quantity) || 0 }
+const totalAmount = computed(() => items.value.reduce((s, i) => s + subtotalOf(i), 0))
 const totalCount = computed(() => items.value.reduce((s, i) => s + i.quantity, 0))
 
 async function load() {
