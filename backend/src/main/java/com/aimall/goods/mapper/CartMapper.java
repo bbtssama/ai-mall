@@ -17,6 +17,9 @@ public interface CartMapper {
     /** 用户购物车条目（join sku/product），带商品名、主图 */
     List<CartItemVO> selectItemsByUserId(@Param("userId") Long userId);
 
+    /** 按购物车主键 + 用户查单条条目（join sku/product），带 userId 条件天然校验归属 */
+    CartItemVO selectItemById(@Param("id") Long id, @Param("userId") Long userId);
+
     Cart selectByUserIdAndSkuId(@Param("userId") Long userId, @Param("skuId") Long skuId);
 
     /** 返回受影响行数，主键回填 cart.id */

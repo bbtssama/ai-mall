@@ -20,6 +20,22 @@
         ORDER BY c.updated_at DESC
     </select>
 
+    <!-- 单条购物车条目：按主键 + 用户查，复用上面的 join 逻辑，带归属校验 -->
+    <select id="selectItemById" resultType="com.aimall.goods.dto.CartItemVO">
+        SELECT c.id          AS id,
+               c.sku_id      AS skuId,
+               c.quantity    AS quantity,
+               s.sku_name    AS skuName,
+               s.price       AS price,
+               p.id          AS productId,
+               p.spu_name    AS productName,
+               p.main_img    AS mainImg
+        FROM t_cart c
+        JOIN t_product_sku s ON s.id = c.sku_id
+        JOIN t_product p ON p.id = s.product_id
+        WHERE c.id = #{id} AND c.user_id = #{userId}
+    </select>
+
     <select id="selectByUserIdAndSkuId" resultType="com.aimall.goods.bean.Cart">
         SELECT id, user_id, sku_id, quantity, created_at, updated_at
         FROM t_cart
