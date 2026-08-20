@@ -28,7 +28,7 @@
         </foreach>
     </select>
 
-    <!-- 乐观扣减：数据库行锁 + stock>= 条件保证不超卖；返回 0 行 = 库存不足 -->
+    <!-- CAS 扣减：InnoDB 对 id 命中行加排他锁后执行 stock>=? 判断，保证不超卖；影响行数 0 = 库存不足（注意：本 SQL 未使用 version 字段） -->
     <update id="deductStock">
         UPDATE t_product_sku
         SET stock = stock - #{quantity},

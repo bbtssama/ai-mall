@@ -12,7 +12,7 @@ public interface OrderService {
 
     /**
      * 创建订单（事务）：
-     * 校验 SKU/上架/库存 → 乐观扣库存 → 生成订单号 → 落订单+明细 → 清理购物车
+     * 校验 SKU/上架/库存 → CAS 扣库存（WHERE stock>=?） → 生成订单号 → 落订单+明细 → 清理购物车
      */
     OrderVO create(CreateOrderRequest req);
 

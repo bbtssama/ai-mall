@@ -5,10 +5,11 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 购物车条目实体（t_cart，V1 MySQL 版；V3 迁 Redis Hash）
+ * 购物车条目实体（t_cart，V1 MySQL 版）
  *
  * <p>含义：一个用户把某个"商品规格(SKU)"放了几件进购物车，就是一条记录。
  * 例如 user=1 把 sku=2（奶白色耳机）放 2 件 → 一条 (1, 2, 2)。</p>
+ * <p>规划：V3 拟将购物车迁移至 Redis Hash 以提升读写性能。</p>
  */
 @Data
 public class Cart {

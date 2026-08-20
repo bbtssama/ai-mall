@@ -33,7 +33,7 @@ public class ProductSku {
     /** 累计销量（下单时累加） */
     private Integer sales;
 
-    /** 乐观锁版本号（V3 秒杀使用） */
+    /** 版本号（预留字段；当前 V1 未被用作乐观锁条件，扣库存靠 WHERE stock>=?，状态流转见 Order.version） */
     private Integer version;
 
     private LocalDateTime createdAt;

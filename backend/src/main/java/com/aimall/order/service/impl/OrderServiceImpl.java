@@ -51,7 +51,7 @@ public class OrderServiceImpl implements OrderService {
             throw new BusinessException(ResultCode.CART_EMPTY, "订单条目不能为空");
         }
 
-        // 1. 逐项校验 + 乐观扣库存（任一失败抛异常，@Transactional 整体回滚）
+        // 1. 逐项校验 + CAS 扣库存（任一失败抛异常，@Transactional 整体回滚）
         List<OrderItem> orderItems = new ArrayList<>(items.size());
         BigDecimal total = BigDecimal.ZERO;
         for (OrderItemRequest it : items) {
@@ -67,7 +67,7 @@ public class OrderServiceImpl implements OrderService {
                 throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH,
                         "商品[" + product.getSpuName() + "]库存不足");
             }
-            // 数据库层乐观扣减（WHERE stock >= ?），返回 0 = 并发下库存已被抢光
+            // 数据库层 CAS 扣减（WHERE stock >= ?）：InnoDB 对命中行加排他锁，返回 0 = 并发下库存不足
             if (skuMapper.deductStock(sku.getId(), it.getQuantity()) == 0) {
                 throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH,
                         "商品[" + product.getSpuName() + "]库存不足");

@@ -7,7 +7,7 @@ import com.aimall.goods.dto.UpdateCartRequest;
 import java.util.List;
 
 /**
- * 购物车服务（V1 MySQL 版，V3 迁 Redis Hash）
+ * 购物车服务（V1 MySQL 版；规划：V3 拟迁 Redis Hash）
  */
 public interface CartService {
 

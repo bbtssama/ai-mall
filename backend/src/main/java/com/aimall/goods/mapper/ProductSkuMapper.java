@@ -20,8 +20,9 @@ public interface ProductSkuMapper {
     List<ProductSku> selectByIds(@Param("ids") List<Long> ids);
 
     /**
-     * 乐观扣减库存：stock >= quantity 才扣，防超卖。
+     * CAS 扣减库存：stock >= quantity 才扣，防超卖。
      * 返回 0 表示库存不足（不下单/下单失败）。
+     * 注：本 SQL 未使用 version 字段，防超卖依靠 WHERE stock>=? 条件 + InnoDB 行锁。
      */
     int deductStock(@Param("id") Long id, @Param("quantity") int quantity);
 

@@ -70,7 +70,7 @@ public class CartServiceImpl implements CartService {
         // 同时 user_id 条件天然校验归属；查不到则抛异常兜底，避免返回 null。
         return cartMapper.selectItemById(cartId, userId);
 
-        // 原实现（已弃用，保留以供对比）：查出全量购物车列表后，在内存中过滤出本次操作的 SKU 条目。
+        // 原实现（已弃用，保留以供对比；完整改动历史见 git）：查出全量购物车列表后，在内存中过滤出本次操作的 SKU 条目。
         // 缺点是 SKU 多时每次加购都要拉全量列表，且返回最新条目的语义依赖 ORDER BY updated_at DESC。
         // // 返回最新条目
         // return cartMapper.selectItemsByUserId(userId).stream()
@@ -81,7 +81,7 @@ public class CartServiceImpl implements CartService {
 
     @Override
     public void update(Long id, UpdateCartRequest req) {
-        // deleteById 同理：update 带 userId 条件，行数 0 = 非本人条目
+        // update/remove 同理：均带 userId 条件，影响行数 0 = 非本人条目
         if (cartMapper.updateQuantity(id, currentUserId(), req.getQuantity()) == 0) {
             throw new BusinessException(ResultCode.CART_ITEM_NOT_FOUND);
         }

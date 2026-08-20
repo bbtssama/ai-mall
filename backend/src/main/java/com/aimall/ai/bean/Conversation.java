@@ -20,7 +20,7 @@ public class Conversation {
     /** 所属用户 id（这个会话属于谁，关联 t_user.id） */
     private Long userId;
 
-    /** 会话类型：CHAT / CHAT_GOODS（V2 起 SHOPPING 导购） */
+    /** 会话类型：当前仅 "CHAT"（V2 规划增加导购类 bizType，如 CHAT_GOODS/SHOPPING） */
     private String bizType;
 
     /** 会话标题（默认取第一句问题前 20 字） */

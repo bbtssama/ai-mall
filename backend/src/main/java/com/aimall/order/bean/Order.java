@@ -54,7 +54,7 @@ public class Order {
     /** 取消时间（取消订单时回填） */
     private LocalDateTime cancelTime;
 
-    /** 乐观锁版本号（状态机 CAS 更新时自增，防并发重复流转） */
+    /** 版本号（updateStatus 每次状态流转自增标记；防并发重复流转的真正依据是 WHERE status=? 条件，本字段非乐观锁） */
     private Integer version;
 
     private LocalDateTime createdAt;
