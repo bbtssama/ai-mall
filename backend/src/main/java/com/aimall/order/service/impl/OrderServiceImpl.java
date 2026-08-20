@@ -99,9 +99,11 @@ public class OrderServiceImpl implements OrderService {
         orderItems.forEach(oi -> oi.setOrderId(order.getId()));
         orderItemMapper.batchInsert(orderItems);
 
-        // 4. 清理购物车中本次下单的 SKU（直接购买场景下购物车本就没有，删除为幂等空操作）
-        cartMapper.deleteByUserIdAndSkuIds(userId,
-                items.stream().map(OrderItemRequest::getSkuId).toList());
+        // 4. 仅购物车结算时才清理对应 SKU（直接购买不清理，避免误删购物车中已有的同 SKU 项）
+        if (Boolean.TRUE.equals(req.getFromCart())) {
+            cartMapper.deleteByUserIdAndSkuIds(userId,
+                    items.stream().map(OrderItemRequest::getSkuId).toList());
+        }
 
         return buildVO(order.getId(), userId);
     }

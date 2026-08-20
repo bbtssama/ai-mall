@@ -25,4 +25,11 @@ public class CreateOrderRequest {
 
     @NotBlank(message = "收货地址不能为空")
     private String receiverAddress;
+
+    /**
+     * 是否从购物车结算下单。
+     * true = 购物车结算，下单成功后清理购物车中对应 SKU；
+     * false/null = 商品页直接购买，不清理购物车。
+     */
+    private Boolean fromCart;
 }

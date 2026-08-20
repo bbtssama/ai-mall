@@ -120,6 +120,7 @@ async function submitOrder() {
   try {
     const order = await orderApi.create({
       items: items.value.map(i => ({ skuId: i.skuId, quantity: i.quantity })),
+      fromCart: true,
       ...checkout.value
     })
     ElMessage.success(`下单成功：${order.orderNo}`)

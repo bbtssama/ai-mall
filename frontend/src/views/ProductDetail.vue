@@ -79,6 +79,7 @@ async function buyNow() {
   // 直接购买：跳过购物车下单
   const order = await orderApi.create({
     items: [{ skuId: selectedSku.value.id, quantity: quantity.value }],
+    fromCart: false,
     receiverName: '演示用户',
     receiverPhone: '13800138000',
     receiverAddress: '上海市浦东新区 xx 路 100 号'
