@@ -52,6 +52,8 @@ public class OrderServiceImpl implements OrderService {
         }
 
         // 1. 逐项校验 + CAS 扣库存（任一失败抛异常，@Transactional 整体回滚）
+        //    说明：扣库存放在最前，可尽早暴露库存不足（快速失败）；但热点行锁仍持有至本方法事务提交，
+        //    后续写订单/明细/清购物车都在锁覆盖范围内。要进一步缩短锁时长可把扣库存拆为独立短事务。
         List<OrderItem> orderItems = new ArrayList<>(items.size());
         BigDecimal total = BigDecimal.ZERO;
         for (OrderItemRequest it : items) {

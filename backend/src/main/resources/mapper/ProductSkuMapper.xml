@@ -28,7 +28,10 @@
         </foreach>
     </select>
 
-    <!-- CAS 扣减：InnoDB 对 id 命中行加排他锁后执行 stock>=? 判断，保证不超卖；影响行数 0 = 库存不足（注意：本 SQL 未使用 version 字段） -->
+    <!-- CAS 扣减：InnoDB 对 id 命中行加排他锁后执行 stock>=? 判断，保证不超卖；影响行数 0 = 库存不足（注意：本 SQL 未使用 version 字段）
+         并发说明：其他线程的 UPDATE 会阻塞等待此 X 锁（默认最多 innodb_lock_wait_timeout=50s），拿到锁后再按最新库存判断 stock>=?。
+         锁持有范围：本语句到所在事务 COMMIT 之间（含后续写订单/明细/清购物车）均持有该热点行锁；
+         若要进一步缩短锁时长，应将扣库存拆为独立短事务，或引入 Redis 预扣。 -->
     <update id="deductStock">
         UPDATE t_product_sku
         SET stock = stock - #{quantity},
