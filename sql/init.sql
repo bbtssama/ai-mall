@@ -67,11 +67,25 @@ CREATE TABLE t_product_sku (
     price      DECIMAL(10,2) NOT NULL COMMENT '售价',
     stock      INT           NOT NULL DEFAULT 0 COMMENT '库存',
     sales      INT           NOT NULL DEFAULT 0 COMMENT '销量',
+    image      VARCHAR(255)  DEFAULT NULL COMMENT '规格图 URL（选中该规格时主图切换；无则用商品图集）',
     version    INT           NOT NULL DEFAULT 0 COMMENT '乐观锁版本号（V3 秒杀/防超卖使用）',
     created_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (id),
     KEY idx_product (product_id)
 ) ENGINE = InnoDB COMMENT ='商品 SKU 表';
+
+-- 商品/规格图集：sku_id 为空是商品级图（默认图集，可滚动），非空是该规格专属图
+DROP TABLE IF EXISTS t_product_image;
+CREATE TABLE t_product_image (
+    id         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    product_id BIGINT       NOT NULL COMMENT '商品 id',
+    sku_id     BIGINT       DEFAULT NULL COMMENT '规格 id（NULL=商品级图）',
+    url        VARCHAR(255) NOT NULL COMMENT '图片外链',
+    sort       INT          NOT NULL DEFAULT 0 COMMENT '排序（小在前）',
+    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (id),
+    KEY idx_product (product_id, sku_id)
+) ENGINE = InnoDB COMMENT ='商品图集表(SKU级可选)';
 
 -- V1 购物车：MySQL 存储；V3 迁 Redis Hash(user_id -> sku_id -> count)
 DROP TABLE IF EXISTS t_cart;

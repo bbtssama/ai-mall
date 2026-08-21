@@ -6,10 +6,16 @@
     </el-breadcrumb>
 
     <div v-if="product" class="detail-wrap">
-      <!-- 左：主图 -->
+      <!-- 左：图集（多图可滚动；选中规格切换为规格专属图集） -->
       <div class="gallery">
         <div class="main-img">
-          <img :src="product.mainImg" @error="onImgError" />
+          <img :src="activeImage" @error="onImgError" />
+        </div>
+        <div class="thumb-strip" v-if="currentImages.length > 1">
+          <div v-for="(img, idx) in currentImages" :key="idx" class="thumb-item"
+               :class="{ active: img === activeImage }" @click="activeImage = img">
+            <img :src="img" :alt="'图' + (idx + 1)" loading="lazy" @error="onImgError" />
+          </div>
         </div>
       </div>
 
@@ -79,7 +85,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { productApi, cartApi } from '../api'
@@ -94,10 +100,26 @@ const loading = ref(false)
 const selectedSku = ref(null)
 const quantity = ref(1)
 const openPanels = ref(['detail'])
+const activeImage = ref('')
 
 const CATEGORY = { 101: '数码影音', 102: '数码配件', 103: '美妆护肤', 104: '生活家居' }
 const categoryName = computed(() => (product.value ? (CATEGORY[product.value.categoryId] || '未分类') : ''))
 const soldTotal = computed(() => (product.value?.skus || []).reduce((s, x) => s + (x.sales || 0), 0))
+
+// 当前展示图集：规格专属图置前 + 商品图集补足（合并去重），保证可滚动且规格优先
+const currentImages = computed(() => {
+  const sku = selectedSku.value
+  const skuImgs = sku && sku.images && sku.images.length ? sku.images : []
+  const prodImgs = product.value?.images && product.value.images.length ? product.value.images : []
+  const merged = [...skuImgs, ...prodImgs]
+  return [...new Set(merged)]
+})
+
+// 切换规格 → 主图切回该图集第一张；无则维持
+watch(selectedSku, () => {
+  const imgs = currentImages.value
+  if (imgs.length) activeImage.value = imgs[0]
+})
 
 async function load() {
   loading.value = true
@@ -109,6 +131,7 @@ async function load() {
       const ok = (product.value.skus || []).find(s => s.stock > 0)
       if (ok) selectedSku.value = ok
     }
+    activeImage.value = currentImages.value[0] || product.value?.mainImg || ''
   } finally {
     loading.value = false
   }
@@ -145,6 +168,15 @@ onMounted(load)
   background: #f7f7f7; border: 1px solid var(--clr-border-light);
 }
 .main-img img { width: 100%; height: 100%; object-fit: cover; }
+.thumb-strip { display: flex; gap: 8px; margin-top: 10px; overflow-x: auto; padding-bottom: 2px; }
+.thumb-item {
+  flex: 0 0 64px; width: 64px; height: 64px; border-radius: var(--radius-sm);
+  overflow: hidden; cursor: pointer; border: 2px solid transparent; opacity: .8;
+  transition: all .15s;
+}
+.thumb-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-item:hover { opacity: 1; }
+.thumb-item.active { border-color: var(--clr-primary); opacity: 1; }
 
 .buy-panel { flex: 1; min-width: 0; }
 .name { font-size: 22px; font-weight: 700; color: var(--clr-text); margin: 0 0 6px; }

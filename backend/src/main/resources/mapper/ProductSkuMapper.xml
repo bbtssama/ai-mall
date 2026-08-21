@@ -4,7 +4,7 @@
 <mapper namespace="com.aimall.goods.mapper.ProductSkuMapper">
 
     <sql id="baseCols">
-        id, product_id, sku_name, price, stock, sales, version, created_at
+        id, product_id, sku_name, price, stock, sales, image, version, created_at
     </sql>
 
     <select id="selectById" resultType="com.aimall.goods.bean.ProductSku">

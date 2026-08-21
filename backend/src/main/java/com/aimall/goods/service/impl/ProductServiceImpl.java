@@ -9,6 +9,7 @@ import com.aimall.goods.dto.SkuVO;
 import com.aimall.goods.bean.Product;
 import com.aimall.goods.bean.ProductSku;
 import com.aimall.goods.mapper.ProductMapper;
+import com.aimall.goods.mapper.ProductImageMapper;
 import com.aimall.goods.mapper.ProductSkuMapper;
 import com.aimall.goods.service.ProductService;
 import lombok.RequiredArgsConstructor;
@@ -22,6 +23,7 @@ public class ProductServiceImpl implements ProductService {
 
     private final ProductMapper productMapper;
     private final ProductSkuMapper skuMapper;
+    private final ProductImageMapper productImageMapper;
 
     @Override
     public PageResult<ProductVO> pageOnSale(ProductQuery query) {
@@ -44,7 +46,17 @@ public class ProductServiceImpl implements ProductService {
         }
         ProductVO vo = toListVO(product);
         vo.setDetail(product.getDetail());
-        vo.setSkus(skuMapper.selectByProductId(id).stream().map(this::toSkuVO).toList());
+        // 商品图集（sku_id IS NULL，含主图本身）；若图集为空则回退单张主图
+        List<String> productImages = productImageMapper.selectProductImages(id);
+        vo.setImages(productImages.isEmpty() ? List.of(product.getMainImg()) : productImages);
+        // SKU 列表：规格专属图集（可能为空）
+        vo.setSkus(skuMapper.selectByProductId(id).stream().map(sku -> {
+            SkuVO sv = toSkuVO(sku);
+            sv.setImage(sku.getImage());
+            List<String> skuImages = productImageMapper.selectSkuImages(id, sku.getId());
+            sv.setImages(skuImages);
+            return sv;
+        }).toList());
         return vo;
     }
 

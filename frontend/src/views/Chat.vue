@@ -1,15 +1,8 @@
 <template>
-  <el-card shadow="never" class="chat-card">
-    <template #header>
-      <div class="chat-head">
-        <span>🤖 AI 种草助手</span>
-        <div class="chat-actions">
-          <el-button size="small" @click="newConversation">新会话</el-button>
-        </div>
-      </div>
-    </template>
-
-    <div class="chat-body">
+  <div class="chat-page">
+    <h2 class="page-title">AI 种草助手</h2>
+    <div class="chat-card mall-card">
+      <div class="chat-body">
       <!-- 会话列表 -->
       <div class="conv-list" v-if="conversations.length">
         <div v-for="c in conversations" :key="c.id" class="conv-item"
@@ -40,11 +33,14 @@
       <div class="input-area">
         <el-input v-model="input" type="textarea" :rows="2" resize="none"
                   placeholder="输入问题，Enter 发送（Shift+Enter 换行）"
-                  @keydown.enter.exact.prevent="send" :disabled="streaming" />
-        <el-button type="danger" :loading="streaming" @click="send">发送</el-button>
+                  @keyup.enter.exact.prevent="send" :disabled="streaming" />
+        <div class="input-actions">
+          <el-button @click="newConversation">新会话</el-button>
+          <el-button type="danger" :loading="streaming" @click="send">发送</el-button>
+        </div>
       </div>
     </div>
-  </el-card>
+  </div>
 </template>
 
 <script setup>

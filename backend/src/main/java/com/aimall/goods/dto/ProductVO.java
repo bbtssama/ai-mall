@@ -22,6 +22,9 @@ public class ProductVO {
     /** 起售价（列表聚合） */
     private BigDecimal minPrice;
 
+    /** 商品图集（多张，可滚动；有规格专属图时前端以规格图集优先） */
+    private List<String> images;
+
     /** SKU 列表（详情接口携带） */
     private List<SkuVO> skus;
 }

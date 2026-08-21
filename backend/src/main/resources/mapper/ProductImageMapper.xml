@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.goods.mapper.ProductImageMapper">
+
+    <select id="selectProductImages" resultType="string">
+        SELECT url FROM t_product_image
+        WHERE product_id = #{productId} AND sku_id IS NULL
+        ORDER BY sort ASC, id ASC
+    </select>
+
+    <select id="selectSkuImages" resultType="string">
+        SELECT url FROM t_product_image
+        WHERE product_id = #{productId} AND sku_id = #{skuId}
+        ORDER BY sort ASC, id ASC
+    </select>
+
+</mapper>

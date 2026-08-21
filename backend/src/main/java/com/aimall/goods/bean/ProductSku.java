@@ -33,6 +33,9 @@ public class ProductSku {
     /** 累计销量（下单时累加） */
     private Integer sales;
 
+    /** 规格图 URL（选中该规格时主图切换；无则用商品图集） */
+    private String image;
+
     /** 版本号（预留字段；当前 V1 未被用作乐观锁条件，扣库存靠 WHERE stock>=?，状态流转见 Order.version） */
     private Integer version;
 
