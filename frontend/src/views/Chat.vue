@@ -40,8 +40,8 @@
             <span class="img-remove" @click="clearImage">×</span>
           </div>
           <el-input v-model="input" type="textarea" :rows="2" resize="none"
-                    placeholder="输入问题，Enter 发送（Shift+Enter 换行）；也可发图识别商品"
-                    @keyup.enter.exact.prevent="send" :disabled="streaming" />
+                    placeholder="输入问题，Enter 发送（Shift+Enter 换行）；也可粘贴/选择图片识别商品"
+                    @keyup.enter.exact.prevent="send" @paste="onPaste" :disabled="streaming" />
         </div>
         <div class="input-actions">
           <el-upload :show-file-list="false" accept="image/*" :auto-upload="false" @change="onPickImage">
@@ -159,6 +159,24 @@ function onPickImage(file) {
   const reader = new FileReader()
   reader.onload = (e) => { previewImg.value = e.target.result }
   reader.readAsDataURL(raw)
+}
+
+// 输入框粘贴图片（Ctrl+V）→ 进预览，走图片识别链路；剪贴板无图则正常粘贴文本
+function onPaste(e) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.type && item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) {
+        e.preventDefault()
+        const reader = new FileReader()
+        reader.onload = (ev) => { previewImg.value = ev.target.result }
+        reader.readAsDataURL(file)
+      }
+      break
+    }
+  }
 }
 
 function clearImage() { previewImg.value = '' }
