@@ -47,8 +47,9 @@
                                :max="row.productStatus === 1 ? Math.max(row.maxBuyable, 1) : 99"
                                :disabled="row.productStatus !== 1 || row.skuStock === 0"
                                size="small" @change="updateQty(row)" />
-              <el-button v-if="row.productStatus === 1 && row.outOfStock" size="small" type="warning" plain
-                         @click="fixQty(row)">设为 {{ row.maxBuyable }}</el-button>
+              <!-- 仅"超库存但仍有货"时提供修正按钮；售罄(maxBuyable=0)设 0 无意义，不显示 -->
+              <el-button v-if="row.productStatus === 1 && row.outOfStock && row.maxBuyable > 0"
+                         size="small" type="warning" plain @click="fixQty(row)">设为 {{ row.maxBuyable }}</el-button>
             </div>
           </template>
         </el-table-column>
@@ -215,11 +216,18 @@ async function updateQty(row) {
   }
 }
 
-// 一键把数量修正到可售库存（超库存引导）
+// 一键把数量修正到可售库存（超库存引导）。
+// 注意：不走 updateQty（其售罄/下架早退会拦截修正）；这里就是要处理超库存非法项，直接调接口。
 async function fixQty(row) {
-  row.quantity = row.maxBuyable
-  await updateQty(row)
-  ElMessage.success(`已将数量调整为 ${row.maxBuyable} 件`)
+  try {
+    // 后端 update 本身会封顶到可售库存，这里按前端 maxBuyable 传即可
+    await cartApi.update(row.id, { quantity: row.maxBuyable })
+    await load()
+    ElMessage.success(`已将数量调整为 ${row.maxBuyable} 件`)
+  } catch (e) {
+    ElMessage.error('调整失败，请重试')
+    load()
+  }
 }
 
 async function remove(row) {

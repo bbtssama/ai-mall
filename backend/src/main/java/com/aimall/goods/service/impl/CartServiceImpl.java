@@ -76,7 +76,7 @@ public class CartServiceImpl implements CartService {
         }
         // 改数封顶到可售库存（京东/淘宝式：购物车内 "+" 到库存上限即点不动）
         int target = req.getQuantity();
-        int cap = item.maxBuyable();
+        int cap = item.getMaxBuyable();
         if (target > cap) {
             target = cap;
         }
