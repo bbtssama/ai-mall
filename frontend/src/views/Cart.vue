@@ -43,8 +43,9 @@
         <el-table-column label="数量/库存" width="160">
           <template #default="{ row }">
             <div class="qty-cell">
-              <el-input-number v-model="row.quantity" :min="1"
-                               :max="row.productStatus === 1 ? Math.max(row.maxBuyable, 1) : 99"
+              <!-- max 固定为 99（不跟库存挂钩），避免库存下降时 el-input-number 把
+                   超库存的真实数量 clamp 成库存；超库存的正确反馈交给下方 outOfStock 提示与'设为N' -->
+              <el-input-number v-model="row.quantity" :min="1" :max="99"
                                :disabled="row.productStatus !== 1 || row.skuStock === 0"
                                size="small" @change="updateQty(row)" />
               <!-- 显式展示实时库存：正常显示库存数；下架/售罄以状态 tag 呈现 -->
@@ -214,9 +215,16 @@ async function load() {
 
 async function updateQty(row) {
   if (row.productStatus !== 1 || row.skuStock === 0) return
+  // 用户改数若超过可购库存：不提交，恢复原值并提示（京东式“点+到库存即停”）。
+  // 这样不覆盖“库存下降导致的既有超库存量”(该量由 outOfStock 提示 + '设为N' 处理)。
+  if (row.quantity > row.maxBuyable) {
+    ElMessage.warning(`该商品最多可购 ${row.maxBuyable} 件`)
+    await load() // 恢复为购物车真实数量
+    return
+  }
   try {
     await cartApi.update(row.id, { quantity: row.quantity })
-    // 更新后重新拉（后端已按库存封顶，行是否仍合法以服务端为准）
+    // 更新后重新拉（行是否仍合法以服务端为准）
     await load()
   } catch (e) {
     load()
