@@ -152,16 +152,47 @@ async function send() {
   }
 }
 
-// 选择图片 → 读为 dataURL 预览
-function onPickImage(file) {
-  const raw = file.raw
-  if (!raw || !raw.type.startsWith('image/')) return
-  const reader = new FileReader()
-  reader.onload = (e) => { previewImg.value = e.target.result }
-  reader.readAsDataURL(raw)
+// 图片压缩：最长边 ≤1280、JPEG 0.8（白底防透明变黑），返回 dataURL。
+// 真实大图（截图/照片动辄几 MB）先压缩再发送，避免请求体过大与存储超限
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    const url = URL.createObjectURL(file)
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      const MAX = 1280
+      let { width, height } = img
+      const scale = Math.min(1, MAX / Math.max(width, height))
+      if (scale < 1) {
+        width = Math.round(width * scale)
+        height = Math.round(height * scale)
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#fff'
+      ctx.fillRect(0, 0, width, height)
+      ctx.drawImage(img, 0, 0, width, height)
+      resolve(canvas.toDataURL('image/jpeg', 0.8))
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解码失败')) }
+    img.src = url
+  })
 }
 
-// 输入框粘贴图片（Ctrl+V）→ 进预览，走图片识别链路；剪贴板无图则正常粘贴文本
+// 选择图片 → 压缩后预览
+async function onPickImage(file) {
+  const raw = file.raw
+  if (!raw || !raw.type.startsWith('image/')) return
+  try {
+    previewImg.value = await compressImage(raw)
+  } catch {
+    ElMessage.error('图片处理失败')
+  }
+}
+
+// 输入框粘贴图片（Ctrl+V）→ 压缩后预览，走图片识别链路；剪贴板无图则正常粘贴文本
 function onPaste(e) {
   const items = e.clipboardData?.items
   if (!items) return
@@ -170,9 +201,9 @@ function onPaste(e) {
       const file = item.getAsFile()
       if (file) {
         e.preventDefault()
-        const reader = new FileReader()
-        reader.onload = (ev) => { previewImg.value = ev.target.result }
-        reader.readAsDataURL(file)
+        compressImage(file)
+          .then((dataUrl) => { previewImg.value = dataUrl })
+          .catch(() => ElMessage.error('图片处理失败'))
       }
       break
     }

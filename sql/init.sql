@@ -153,7 +153,7 @@ CREATE TABLE t_message (
     conversation_id BIGINT      NOT NULL COMMENT '会话 id',
     role            VARCHAR(20) NOT NULL COMMENT '角色：user / assistant',
     content         TEXT        COMMENT '消息内容',
-    extra_json      TEXT        COMMENT '扩展信息（V2 起：引用来源/商品卡片）',
+    extra_json      MEDIUMTEXT  COMMENT '扩展信息（V2 起：引用来源/商品卡片/用户图片）',
     created_at      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (id),
     KEY idx_conversation (conversation_id)
