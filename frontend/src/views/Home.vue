@@ -30,15 +30,23 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, reactive, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { productApi } from '../api'
 
+const route = useRoute()
 const router = useRouter()
+
 const list = ref([])
 const total = ref(0)
 const loading = ref(false)
-const query = reactive({ page: 1, pageSize: 8 })
+// 页码从 URL query 初始化：进入详情再返回（或刷新）时能恢复到原页码，而不是重置回第 1 页
+const query = reactive({ page: Number(route.query.page) || 1, pageSize: 8 })
+
+// 翻页时把页码同步到 URL（router.replace 不新增历史记录，返回仍能回到 ?page=N）
+watch(() => query.page, (p) => {
+  router.replace({ query: { ...route.query, page: p } })
+})
 
 async function load() {
   loading.value = true
