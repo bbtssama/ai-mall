@@ -10,6 +10,7 @@
                c.quantity    AS quantity,
                s.sku_name    AS skuName,
                s.price       AS price,
+               s.stock       AS skuStock,
                p.id          AS productId,
                p.spu_name    AS productName,
                p.main_img    AS mainImg,
@@ -28,6 +29,7 @@
                c.quantity    AS quantity,
                s.sku_name    AS skuName,
                s.price       AS price,
+               s.stock       AS skuStock,
                p.id          AS productId,
                p.spu_name    AS productName,
                p.main_img    AS mainImg,
@@ -44,13 +46,13 @@
         WHERE user_id = #{userId} AND sku_id = #{skuId}
     </select>
 
-    <!-- 原子合并（防并发丢更新）：依赖 uk_user_sku 唯一索引，
-         命中冲突则在数据库内 quantity = quantity + ? 原子累加（封顶 99）。
-         单条 SQL、无"读-改-写"竞态窗口，两个并发加购不会互相覆盖。 -->
-    <insert id="upsert" useGeneratedKeys="true" keyProperty="id">
+    <!-- 原子合并（防并发丢更新 + 库存封顶）：依赖 uk_user_sku 唯一索引，
+         命中冲突则在数据库内 quantity = quantity + ? 原子累加，并按 stockCap（实时库存）封顶。
+         单条 SQL、无"读-改-写"竞态窗口；同时保证购物车数量不会超过可售库存。 -->
+    <insert id="upsert" useGeneratedKeys="true" keyProperty="cart.id">
         INSERT INTO t_cart (user_id, sku_id, quantity)
-        VALUES (#{userId}, #{skuId}, #{quantity})
-        ON DUPLICATE KEY UPDATE quantity = LEAST(quantity + #{quantity}, 99)
+        VALUES (#{cart.userId}, #{cart.skuId}, #{cart.quantity})
+        ON DUPLICATE KEY UPDATE quantity = LEAST(quantity + #{cart.quantity}, #{stockCap})
     </insert>
 
     <update id="updateQuantity">

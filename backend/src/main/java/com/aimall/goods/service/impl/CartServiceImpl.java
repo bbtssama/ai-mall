@@ -44,20 +44,22 @@ public class CartServiceImpl implements CartService {
         }
         Product product = productMapper.selectById(sku.getProductId());
         if (product == null || product.getStatus() == null || product.getStatus() != 1) {
+            // 下架商品不可加购（宽松收集的边界：不可购买的东西不塞进购物车）
             throw new BusinessException(ResultCode.SKU_OFF_SHELF);
         }
-        if (sku.getStock() < req.getQuantity()) {
-            throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH);
+        if (sku.getStock() == null || sku.getStock() <= 0) {
+            // 售罄同样不可加购（与商品详情页"无货/已售罄"置灰一致）
+            throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH, "商品已售罄");
         }
 
-        // 原子合并：不存在该 SKU 则插入，存在则在数据库内 quantity+quantity 原子累加（封顶 99）。
-        // 单条 INSERT ... ON DUPLICATE KEY UPDATE（依赖 uk_user_sku 唯一索引）消除了"读-改-写"竞态窗口，
-        // 解决并发加购因"先读旧值、再写回叠算"而丢更新（lost update）的问题。
         Cart cart = new Cart();
         cart.setUserId(userId);
         cart.setSkuId(req.getSkuId());
-        cart.setQuantity(req.getQuantity());
-        cartMapper.upsert(cart);
+        cart.setQuantity(req.getQuantity() == null ? 1 : req.getQuantity());
+
+        // 原子合并 + 库存封顶：不存在则插入；存在则数据库内原子累加并按可售库存封顶。
+        // 宽松收集：即使本次加购数量超过可售库存，也不拒绝，而是自动封顶到可售数（京东式）。
+        cartMapper.upsert(cart, sku.getStock());
 
         // 定位并返回本条 join 商品/SKU 的展示 VO（user_id 条件天然校验归属；查不到兜底抛异常）
         Cart row = cartMapper.selectByUserIdAndSkuId(userId, req.getSkuId());
@@ -66,8 +68,19 @@ public class CartServiceImpl implements CartService {
 
     @Override
     public void update(Long id, UpdateCartRequest req) {
-        // update/remove 同理：均带 userId 条件，影响行数 0 = 非本人条目
-        if (cartMapper.updateQuantity(id, currentUserId(), req.getQuantity()) == 0) {
+        Long userId = currentUserId();
+        // 取该条当前 skuStock（join 出行内实时库存，带归属校验）
+        CartItemVO item = cartMapper.selectItemById(id, userId);
+        if (item == null) {
+            throw new BusinessException(ResultCode.CART_ITEM_NOT_FOUND);
+        }
+        // 改数封顶到可售库存（京东/淘宝式：购物车内 "+" 到库存上限即点不动）
+        int target = req.getQuantity();
+        int cap = item.maxBuyable();
+        if (target > cap) {
+            target = cap;
+        }
+        if (cartMapper.updateQuantity(id, userId, target) == 0) {
             throw new BusinessException(ResultCode.CART_ITEM_NOT_FOUND);
         }
     }

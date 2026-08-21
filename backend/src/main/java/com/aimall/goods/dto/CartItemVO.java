@@ -23,9 +23,22 @@ public class CartItemVO {
     /** 商品上架状态：1上架 0下架（下架商品前端置灰、仅可删除不可购买） */
     private Integer productStatus;
 
+    /** SKU 实时库存（join t_product_sku.stock，用于购物车页实时校验是否超库存） */
+    private Integer skuStock;
+
     /** 是否已下架 */
     public boolean isOffShelf() {
         return productStatus == null || productStatus != 1;
+    }
+
+    /** 是否超库存（购物车数量 > 实时库存）。库存未知(空)时视为不充足。 */
+    public boolean isOutOfStock() {
+        return skuStock == null || quantity > skuStock;
+    }
+
+    /** 该 SKU 当前可购最大数量（用于前端引导/封顶），库存未知按 0 */
+    public int getMaxBuyable() {
+        return skuStock == null ? 0 : Math.max(skuStock, 0);
     }
 
     /** 小计 = 单价 × 数量 */
