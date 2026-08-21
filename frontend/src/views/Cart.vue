@@ -282,6 +282,12 @@ async function submitOrder() {
     persistChecked()
     checkoutVisible.value = false
     router.push('/orders')
+  } catch (e) {
+    // 结算失败（典型：勾选后到提交前库存被抢走/商品下架，后端校验拒绝）。
+    // 自动刷新购物车，让相关条目立即按最新库存状态展示（超库存提示 + '设为N' 修正、自动取消勾选），更直观。
+    ElMessage.warning('下单未成功，已刷新购物车，请检查库存后重试')
+    checkoutVisible.value = false
+    await load()
   } finally {
     submitting.value = false
   }
