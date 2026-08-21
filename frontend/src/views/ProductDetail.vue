@@ -106,13 +106,12 @@ const CATEGORY = { 101: '数码影音', 102: '数码配件', 103: '美妆护肤'
 const categoryName = computed(() => (product.value ? (CATEGORY[product.value.categoryId] || '未分类') : ''))
 const soldTotal = computed(() => (product.value?.skus || []).reduce((s, x) => s + (x.sales || 0), 0))
 
-// 当前展示图集：规格专属图置前 + 商品图集补足（合并去重），保证可滚动且规格优先
+// 当前展示图集（京东模式）：一律用选中 SKU 的图集（多张）；
+// 无规格图时兜底商品封面。默认选中第一个 SKU → 进详情即其图集。
 const currentImages = computed(() => {
   const sku = selectedSku.value
-  const skuImgs = sku && sku.images && sku.images.length ? sku.images : []
-  const prodImgs = product.value?.images && product.value.images.length ? product.value.images : []
-  const merged = [...skuImgs, ...prodImgs]
-  return [...new Set(merged)]
+  if (sku && sku.images && sku.images.length) return sku.images
+  return [product.value?.mainImg].filter(Boolean)
 })
 
 // 切换规格 → 主图切回该图集第一张；无则维持
