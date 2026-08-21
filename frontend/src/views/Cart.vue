@@ -40,13 +40,20 @@
           <template #default="{ row }">¥{{ row.price }}</template>
         </el-table-column>
 
-        <el-table-column label="数量" width="150">
+        <el-table-column label="数量/库存" width="160">
           <template #default="{ row }">
             <div class="qty-cell">
               <el-input-number v-model="row.quantity" :min="1"
                                :max="row.productStatus === 1 ? Math.max(row.maxBuyable, 1) : 99"
                                :disabled="row.productStatus !== 1 || row.skuStock === 0"
                                size="small" @change="updateQty(row)" />
+              <!-- 显式展示实时库存：正常显示库存数；下架/售罄以状态 tag 呈现 -->
+              <div class="stock-line" v-if="row.productStatus === 1">
+                <span v-if="row.skuStock > 0" :class="{ low: row.skuStock <= 10, zero: row.skuStock === 0 }">
+                  库存 {{ row.skuStock }} 件
+                </span>
+                <span v-else class="zero">无货</span>
+              </div>
               <!-- 仅"超库存但仍有货"时提供修正按钮；售罄(maxBuyable=0)设 0 无意义，不显示 -->
               <el-button v-if="row.productStatus === 1 && row.outOfStock && row.maxBuyable > 0"
                          size="small" type="warning" plain @click="fixQty(row)">设为 {{ row.maxBuyable }}</el-button>
@@ -285,7 +292,10 @@ onMounted(load)
 .goods-name { font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .goods-sku { color: #999; font-size: 12px; margin-top: 2px; }
 .stock-warn { color: #f56c6c; font-size: 12px; margin-top: 3px; }
-.qty-cell { display: flex; align-items: center; gap: 6px; }
+.qty-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.stock-line { font-size: 12px; color: #67c23a; line-height: 1.2; }
+.stock-line .low { color: #e6a23c; }
+.stock-line .zero { color: #f56c6c; }
 .subtotal { color: #e8562c; font-weight: 700; }
 .subtotal.off { color: #bbb; }
 .cart-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
