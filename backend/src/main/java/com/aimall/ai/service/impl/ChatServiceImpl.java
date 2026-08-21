@@ -100,8 +100,10 @@ public class ChatServiceImpl implements ChatService {
             log.error("AI 问答失败: {}", e.getMessage(), e);
             throw new BusinessException(ResultCode.AI_SERVICE_ERROR, "AI 服务暂时不可用");
         }
-        saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage());
-        saveMessage(conv.getId(), Message.ROLE_ASSISTANT, answer);
+        saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage(), req.getImage());
+        saveMessage(conv.getId(), Message.ROLE_ASSISTANT, answer, null);
+        // 首条消息后自动命名会话（标题仍为默认值时）
+        autoRenameIfDefault(conv, req);
         return answer;
     }
 
@@ -122,9 +124,12 @@ public class ChatServiceImpl implements ChatService {
                 .user(req.getMessage())
                 .stream()
                 .content()
-                .doOnSubscribe(s -> saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage()))
+                .doOnSubscribe(s -> {
+                    saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage(), null);
+                    autoRenameIfDefault(conv, req);
+                })
                 .doOnNext(sb::append)
-                .doOnComplete(() -> saveMessage(conv.getId(), Message.ROLE_ASSISTANT, sb.toString()))
+                .doOnComplete(() -> saveMessage(conv.getId(), Message.ROLE_ASSISTANT, sb.toString(), null))
                 .onErrorResume(e -> {
                     log.error("AI 流式问答失败: {}", e.getMessage(), e);
                     return Flux.just("\n\n[AI 服务暂时不可用，请稍后再试]");
@@ -218,12 +223,28 @@ public class ChatServiceImpl implements ChatService {
         }
     }
 
-    private void saveMessage(Long conversationId, String role, String content) {
+    private void saveMessage(Long conversationId, String role, String content, String image) {
         Message m = new Message();
         m.setConversationId(conversationId);
         m.setRole(role);
         m.setContent(content);
+        // V1 简化：图片 base64 直接存 extra_json（用户消息）
+        if (image != null && !image.isBlank()) {
+            m.setExtraJson(image);
+        }
         messageMapper.insert(m);
+    }
+
+    /** 若会话标题仍是默认占位（新会话/图片识别/空），用首条用户消息自动命名 */
+    private void autoRenameIfDefault(Conversation conv, ChatRequest req) {
+        String cur = conv.getTitle();
+        if (cur == null || cur.isBlank() || "新会话".equals(cur) || "图片识别".equals(cur)) {
+            String title = StringUtils.hasText(req.getMessage())
+                    ? abbreviate(req.getMessage(), 16)
+                    : "图片识别";
+            conversationMapper.updateTitle(conv.getId(), title);
+            conv.setTitle(title);
+        }
     }
 
     private String abbreviate(String text, int max) {
@@ -248,6 +269,7 @@ public class ChatServiceImpl implements ChatService {
         vo.setId(m.getId());
         vo.setRole(m.getRole());
         vo.setContent(m.getContent());
+        vo.setImage(m.getExtraJson());
         vo.setCreatedAt(m.getCreatedAt());
         return vo;
     }

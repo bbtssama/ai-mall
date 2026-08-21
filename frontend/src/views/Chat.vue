@@ -14,7 +14,10 @@
       <!-- 消息区 -->
       <div class="msg-area" ref="msgArea">
         <div v-for="(m, i) in messages" :key="i" class="msg-row" :class="m.role">
-          <div class="bubble">{{ m.content }}</div>
+          <div class="bubble">
+            <img v-if="m.image" :src="m.image" class="msg-img" alt="用户图片" />
+            <div v-if="m.content">{{ m.content }}</div>
+          </div>
         </div>
         <div v-if="streaming" class="msg-row assistant">
           <div class="bubble streaming">{{ streamText }}<span class="cursor">▍</span></div>
@@ -120,7 +123,7 @@ async function send() {
     return
   }
 
-  // 纯文字 → 流式（后端走搜索工具）
+  // 纯文字 → 流式（后端走搜索工具；标题由后端首条消息自动命名）
   streaming.value = true
   streamText.value = ''
   messages.value.push({ role: 'assistant', content: '' }) // 占位
@@ -137,8 +140,6 @@ async function send() {
       async () => {
         streaming.value = false
         await loadConversations()
-        const idx = conversations.value.findIndex(c => c.id === currentId.value)
-        if (idx >= 0) conversations.value[idx].title = text.slice(0, 16) || '新会话'
       },
       (err) => {
         streaming.value = false
@@ -199,6 +200,7 @@ onMounted(async () => {
 }
 .user .bubble { background: #e8562c; color: #fff; border-bottom-right-radius: 2px; }
 .assistant .bubble { background: #fff; border: 1px solid #eee; border-bottom-left-radius: 2px; }
+.msg-img { max-width: 220px; max-height: 220px; border-radius: 8px; display: block; margin-bottom: 4px; }
 .cursor { animation: blink 1s infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .empty-tip { color: #999; font-size: 13px; margin: 40px auto; }

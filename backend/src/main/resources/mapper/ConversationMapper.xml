@@ -21,4 +21,8 @@
         ORDER BY created_at DESC, id DESC
     </select>
 
+    <update id="updateTitle">
+        UPDATE t_conversation SET title = #{title} WHERE id = #{id}
+    </update>
+
 </mapper>

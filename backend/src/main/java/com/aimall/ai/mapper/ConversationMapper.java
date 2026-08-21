@@ -20,4 +20,7 @@ public interface ConversationMapper {
 
     /** 用户会话列表（新→旧） */
     List<Conversation> selectByUserId(@Param("userId") Long userId);
+
+    /** 更新会话标题（首条消息后自动命名） */
+    int updateTitle(@Param("id") Long id, @Param("title") String title);
 }
