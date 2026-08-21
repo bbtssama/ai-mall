@@ -8,13 +8,16 @@
         </div>
       </template>
 
-      <el-table :data="items" v-loading="loading">
+      <el-table :data="items" v-loading="loading" :row-class-name="rowClass">
         <el-table-column label="商品" min-width="260">
           <template #default="{ row }">
             <div class="goods-cell">
-              <img :src="row.mainImg" class="thumb" @error="onImgError" />
-              <div>
-                <div class="goods-name">{{ row.productName }}</div>
+              <img :src="row.mainImg" class="thumb" :class="{ off: row.productStatus !== 1 }" @error="onImgError" />
+              <div class="goods-info">
+                <div class="goods-name">
+                  {{ row.productName }}
+                  <el-tag v-if="row.productStatus !== 1" type="info" size="small" effect="plain">已下架</el-tag>
+                </div>
                 <div class="goods-sku">{{ row.skuName }}</div>
               </div>
             </div>
@@ -26,12 +29,12 @@
         <el-table-column label="数量" width="160">
           <template #default="{ row }">
             <el-input-number v-model="row.quantity" :min="1" :max="99" size="small"
-                             @change="updateQty(row)" />
+                             :disabled="row.productStatus !== 1" @change="updateQty(row)" />
           </template>
         </el-table-column>
         <el-table-column label="小计" width="120">
           <template #default="{ row }">
-            <span class="subtotal">¥{{ subtotalOf(row) }}</span>
+            <span class="subtotal" :class="{ off: row.productStatus !== 1 }">¥{{ subtotalOf(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="100">
@@ -43,10 +46,15 @@
 
       <div class="cart-footer" v-if="items.length">
         <div class="total">
-          共 <b>{{ totalCount }}</b> 件，合计：
-          <span class="total-price">¥{{ totalAmount }}</span>
+          <template v-if="offShelfCount > 0">
+            <span class="off-tip">⚠ {{ offShelfCount }} 件商品已下架，不可购买（请删除后结算）</span>
+          </template>
+          <template v-else>
+            共 <b>{{ buyableCount }}</b> 件，合计：
+          </template>
+          <span class="total-price">¥{{ buyableAmount }}</span>
         </div>
-        <el-button type="danger" size="large" @click="checkoutVisible = true">去结算</el-button>
+        <el-button type="danger" size="large" :disabled="buyableCount === 0" @click="checkoutVisible = true">去结算</el-button>
       </div>
       <el-empty v-else description="购物车空空如也">
         <el-button type="primary" @click="$router.push('/')">去逛逛</el-button>
@@ -81,10 +89,20 @@ const checkoutVisible = ref(false)
 const submitting = ref(false)
 const checkout = ref({ receiverName: '', receiverPhone: '', receiverAddress: '' })
 
-// 后端 CartItemVO 的 subtotal 是方法、不会序列化进 JSON，故前端基于 price*quantity 实时计算
+// 下架判定：productStatus == 1 才能购买
+const isSellable = (i) => i.productStatus === 1
+
+// 可购买条目（过滤下架）
+const sellableItems = computed(() => items.value.filter(isSellable))
+const buyableCount = computed(() => sellableItems.value.reduce((s, i) => s + i.quantity, 0))
+const buyableAmount = computed(() => sellableItems.value.reduce((s, i) => s + subtotalOf(i), 0))
+const offShelfCount = computed(() => items.value.length - sellableItems.value.length)
+
 function subtotalOf(i) { return Number(i.price) * Number(i.quantity) || 0 }
-const totalAmount = computed(() => items.value.reduce((s, i) => s + subtotalOf(i), 0))
-const totalCount = computed(() => items.value.reduce((s, i) => s + i.quantity, 0))
+
+function rowClass({ row }) {
+  return row.productStatus === 1 ? '' : 'row-off'
+}
 
 async function load() {
   loading.value = true
@@ -92,6 +110,7 @@ async function load() {
 }
 
 async function updateQty(row) {
+  if (row.productStatus !== 1) return
   try {
     await cartApi.update(row.id, { quantity: row.quantity })
   } catch (e) {
@@ -116,11 +135,15 @@ async function submitOrder() {
     ElMessage.warning('请填写完整的收货信息')
     return
   }
+  // 下架商品不参与下单
+  if (sellableItems.value.length === 0) {
+    ElMessage.warning('没有可购买的商品')
+    return
+  }
   submitting.value = true
   try {
     const order = await orderApi.create({
-      items: items.value.map(i => ({ skuId: i.skuId, quantity: i.quantity })),
-      fromCart: true,
+      items: sellableItems.value.map(i => ({ skuId: i.skuId, quantity: i.quantity })),
       ...checkout.value
     })
     ElMessage.success(`下单成功：${order.orderNo}`)
@@ -139,10 +162,20 @@ onMounted(load)
 <style scoped>
 .cart-head { display: flex; justify-content: space-between; align-items: center; }
 .goods-cell { display: flex; align-items: center; gap: 10px; }
-.thumb { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; }
-.goods-name { font-weight: 600; }
+.thumb { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; filter: grayscale(1); opacity: 0.6; }
+.thumb.off { }
+.goods-info { min-width: 0; }
+.goods-name { font-weight: 600; display: flex; align-items: center; gap: 6px; }
 .goods-sku { color: #999; font-size: 12px; margin-top: 2px; }
 .subtotal { color: #e8562c; font-weight: 700; }
-.cart-footer { display: flex; justify-content: flex-end; align-items: center; gap: 16px; margin-top: 16px; }
+.subtotal.off { color: #bbb; }
+.cart-footer { display: flex; justify-content: flex-end; align-items: center; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+.off-tip { color: #e6a23c; font-size: 13px; margin-right: 8px; }
 .total-price { color: #e8562c; font-size: 22px; font-weight: 700; }
+/* Element Plus 行样式：下架整行置灰 */
+.el-table :deep(.row-off) {
+  background: #fafafa;
+  color: #888;
+}
+.el-table :deep(.row-off td) { background: #fafafa; }
 </style>

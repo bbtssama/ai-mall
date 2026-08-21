@@ -161,7 +161,7 @@ public class OrderServiceImpl implements OrderService {
         return vo;
     }
 
-    /** 订单号：时间戳(17位) + 4位随机 + 用户尾号，全局唯一由 uk_order_no 兜底 */
+    /** 订单号：时间戳(17位) + 4位随机 + 用户尾号，全局唯一由插入时order_no列的唯一索引约束 uk_order_no 兜底 */
     private String generateOrderNo(Long userId) {
         return ORDER_NO_FMT.format(LocalDateTime.now())
                 + ThreadLocalRandom.current().nextInt(1000, 10000)

@@ -20,6 +20,14 @@ public class CartItemVO {
     private String productName;
     private String mainImg;
 
+    /** 商品上架状态：1上架 0下架（下架商品前端置灰、仅可删除不可购买） */
+    private Integer productStatus;
+
+    /** 是否已下架 */
+    public boolean isOffShelf() {
+        return productStatus == null || productStatus != 1;
+    }
+
     /** 小计 = 单价 × 数量 */
     public BigDecimal getSubtotal() {
         return price.multiply(BigDecimal.valueOf(quantity == null ? 0 : quantity));

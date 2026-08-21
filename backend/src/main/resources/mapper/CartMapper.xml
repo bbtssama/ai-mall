@@ -12,7 +12,8 @@
                s.price       AS price,
                p.id          AS productId,
                p.spu_name    AS productName,
-               p.main_img    AS mainImg
+               p.main_img    AS mainImg,
+               p.status      AS productStatus
         FROM t_cart c
         JOIN t_product_sku s ON s.id = c.sku_id
         JOIN t_product p ON p.id = s.product_id
@@ -29,7 +30,8 @@
                s.price       AS price,
                p.id          AS productId,
                p.spu_name    AS productName,
-               p.main_img    AS mainImg
+               p.main_img    AS mainImg,
+               p.status      AS productStatus
         FROM t_cart c
         JOIN t_product_sku s ON s.id = c.sku_id
         JOIN t_product p ON p.id = s.product_id
