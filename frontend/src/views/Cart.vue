@@ -98,8 +98,8 @@
       </el-empty>
     </el-card>
 
-    <!-- 结算弹窗：列出将下单的勾选商品 -->
-    <el-dialog v-model="checkoutVisible" title="确认订单" width="500px">
+    <!-- 结算弹窗：商品清单 + 收货地址簿选择 -->
+    <el-dialog v-model="checkoutVisible" title="确认订单" width="560px" @open="openCheckout">
       <div class="checkout-list">
         <div v-for="i in selectedItems" :key="i.id" class="checkout-row">
           <span class="co-name">{{ i.productName }}（{{ i.skuName }}）</span>
@@ -108,14 +108,41 @@
         </div>
       </div>
       <el-divider />
-      <el-form label-width="70px">
-        <el-form-item label="收货人"><el-input v-model="checkout.receiverName" placeholder="收货人姓名" /></el-form-item>
-        <el-form-item label="电话"><el-input v-model="checkout.receiverPhone" placeholder="手机号" /></el-form-item>
-        <el-form-item label="地址"><el-input v-model="checkout.receiverAddress" placeholder="收货地址" /></el-form-item>
-      </el-form>
+      <div class="addr-section" v-loading="addressLoading">
+        <div class="addr-title">选择收货地址</div>
+        <el-empty v-if="!addresses.length && !addressLoading" description="还没有收货地址" :image-size="60">
+          <el-button type="primary" size="small" @click="showAddAddr = true">新增收货地址</el-button>
+        </el-empty>
+        <template v-else>
+          <div class="addr-list">
+            <div v-for="a in addresses" :key="a.id" class="addr-card"
+                 :class="{ active: selectedAddrId === a.id }" @click="selectedAddrId = a.id">
+              <div class="addr-main">
+                <span class="addr-receiver">{{ a.receiver }}</span>
+                <span class="addr-phone">{{ a.phone }}</span>
+                <el-tag v-if="a.isDefault" type="danger" size="small" effect="plain">默认</el-tag>
+              </div>
+              <div class="addr-detail">{{ a.fullAddress }}</div>
+            </div>
+            <el-button text type="primary" size="small" @click="showAddAddr = !showAddAddr">＋ 新增地址</el-button>
+          </div>
+        </template>
+        <!-- 新增地址表单：空态 / 有地址 均可展开 -->
+        <el-form v-if="showAddAddr" label-width="64px" size="small" class="addr-form">
+          <el-form-item label="收货人"><el-input v-model="newAddr.receiver" placeholder="收货人" /></el-form-item>
+          <el-form-item label="电话"><el-input v-model="newAddr.phone" placeholder="手机号" /></el-form-item>
+          <el-form-item label="省"><el-input v-model="newAddr.province" placeholder="省" /></el-form-item>
+          <el-form-item label="市"><el-input v-model="newAddr.city" placeholder="市" /></el-form-item>
+          <el-form-item label="详细地址"><el-input v-model="newAddr.detail" placeholder="区 / 街道 / 门牌号" /></el-form-item>
+          <el-form-item label="设为默认">
+            <el-checkbox v-model="newAddr.isDefault">设为默认收货地址</el-checkbox>
+          </el-form-item>
+          <el-button type="primary" size="small" :loading="addrSaving" @click="saveNewAddr">保存地址</el-button>
+        </el-form>
+      </div>
       <template #footer>
         <el-button @click="checkoutVisible = false">取消</el-button>
-        <el-button type="danger" :loading="submitting" @click="submitOrder">
+        <el-button type="danger" :loading="submitting" :disabled="!selectedAddrId" @click="submitOrder">
           提交订单（¥{{ checkedAmount }}）
         </el-button>
       </template>
@@ -127,7 +154,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { cartApi, orderApi } from '../api'
+import { cartApi, orderApi, addressApi } from '../api'
 import { useAuthStore } from '../stores/auth'
 
 const router = useRouter()
@@ -138,7 +165,14 @@ const items = ref([])
 const loading = ref(false)
 const checkoutVisible = ref(false)
 const submitting = ref(false)
-const checkout = ref({ receiverName: '', receiverPhone: '', receiverAddress: '' })
+
+// 收货地址簿
+const addresses = ref([])
+const addressLoading = ref(false)
+const selectedAddrId = ref(null)
+const showAddAddr = ref(false)
+const addrSaving = ref(false)
+const newAddr = ref({ receiver: '', phone: '', province: '', city: '', detail: '', isDefault: false })
 
 // 勾选态：本地持久化（按用户隔离），key = cart_checked_{userId}
 const checkedIds = ref(new Set())
@@ -231,6 +265,43 @@ async function updateQty(row) {
   }
 }
 
+// ---------- 收货地址簿 ----------
+async function loadAddresses(selectDefault = true) {
+  addressLoading.value = true
+  try {
+    addresses.value = await addressApi.list() || []
+    if (selectDefault) {
+      const d = addresses.value.find(a => a.isDefault)
+      selectedAddrId.value = (d ? d.id : addresses.value[0]?.id) || null
+    }
+  } finally {
+    addressLoading.value = false
+  }
+}
+
+async function openCheckout() {
+  // 打开结算弹窗时加载地址簿并默认选中默认地址
+  await loadAddresses(true)
+}
+
+async function saveNewAddr() {
+  if (!newAddr.value.receiver || !newAddr.value.phone || !newAddr.value.detail) {
+    ElMessage.warning('请填写收货人、电话和详细地址')
+    return
+  }
+  addrSaving.value = true
+  try {
+    const saved = await addressApi.add(newAddr.value)
+    await loadAddresses(false)
+    selectedAddrId.value = saved.id
+    newAddr.value = { receiver: '', phone: '', province: '', city: '', detail: '', isDefault: false }
+    showAddAddr.value = false
+    ElMessage.success('地址已保存')
+  } finally {
+    addrSaving.value = false
+  }
+}
+
 // 一键把数量修正到可售库存（超库存引导）。
 // 注意：不走 updateQty（其售罄/下架早退会拦截修正）；这里就是要处理超库存非法项，直接调接口。
 async function fixQty(row) {
@@ -262,8 +333,10 @@ async function clearCart() {
 }
 
 async function submitOrder() {
-  if (!checkout.value.receiverName || !checkout.value.receiverPhone || !checkout.value.receiverAddress) {
-    ElMessage.warning('请填写完整的收货信息')
+  // 从地址簿取选中的收货地址（下单仍存地址快照）
+  const addr = addresses.value.find(a => a.id === selectedAddrId.value)
+  if (!addr) {
+    ElMessage.warning('请选择收货地址')
     return
   }
   if (selectedItems.value.length === 0) {
@@ -274,7 +347,9 @@ async function submitOrder() {
   try {
     const order = await orderApi.create({
       items: selectedItems.value.map(i => ({ skuId: i.skuId, quantity: i.quantity })),
-      ...checkout.value
+      receiverName: addr.receiver,
+      receiverPhone: addr.phone,
+      receiverAddress: addr.fullAddress
     })
     ElMessage.success(`下单成功：${order.orderNo}`)
     // 下单后取消勾选项（已结算清车）
@@ -295,7 +370,10 @@ async function submitOrder() {
 
 function onImgError(e) { e.target.src = 'https://picsum.photos/seed/fallback/120/120' }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadAddresses()
+})
 </script>
 
 <style scoped>
@@ -323,6 +401,21 @@ onMounted(load)
 .co-name { flex: 1; }
 .co-qty { color: #666; margin: 0 12px; }
 .co-price { color: #e8562c; font-weight: 600; }
+/* 收货地址簿 */
+.addr-section { }
+.addr-title { font-weight: 600; margin-bottom: 8px; color: #333; }
+.addr-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow: auto; }
+.addr-card {
+  border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px; cursor: pointer;
+  transition: all .15s;
+}
+.addr-card:hover { border-color: #e8562c; }
+.addr-card.active { border-color: #e8562c; background: #fff6f4; }
+.addr-main { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.addr-receiver { font-weight: 600; }
+.addr-phone { color: #666; font-size: 13px; }
+.addr-detail { color: #999; font-size: 13px; }
+.addr-form { margin-top: 12px; padding-top: 12px; border-top: 1px dashed #eee; }
 /* 下架整行置灰、超库存整行浅红提示 */
 .el-table :deep(.row-off) { background: #fafafa !important; color: #aaa; }
 .el-table :deep(.row-off td) { background: #fafafa !important; }

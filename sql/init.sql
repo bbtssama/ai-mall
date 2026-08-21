@@ -25,6 +25,23 @@ CREATE TABLE t_user (
     UNIQUE KEY uk_username (username)
 ) ENGINE = InnoDB COMMENT ='用户表';
 
+-- 用户收货地址簿（结算时选择，避免每次手填；最多保留常用地址）
+DROP TABLE IF EXISTS t_user_address;
+CREATE TABLE t_user_address (
+    id         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    user_id    BIGINT       NOT NULL COMMENT '用户 id',
+    receiver   VARCHAR(50)  NOT NULL COMMENT '收货人',
+    phone      VARCHAR(20)  NOT NULL COMMENT '联系电话',
+    province   VARCHAR(50)  DEFAULT NULL COMMENT '省',
+    city       VARCHAR(50)  DEFAULT NULL COMMENT '市',
+    detail     VARCHAR(200) NOT NULL COMMENT '详细地址',
+    is_default TINYINT      NOT NULL DEFAULT 0 COMMENT '是否默认收货地址：1是 0否',
+    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (id),
+    KEY idx_user (user_id)
+) ENGINE = InnoDB COMMENT ='用户收货地址表';
+
 -- ---------------------------------------------------------------------
 -- 电商域
 -- ---------------------------------------------------------------------

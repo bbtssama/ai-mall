@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.user.mapper.AddressMapper">
+
+    <sql id="baseCols">
+        id, user_id, receiver, phone, province, city, detail, is_default, created_at, updated_at
+    </sql>
+
+    <select id="selectByUserId" resultType="com.aimall.user.bean.Address">
+        SELECT <include refid="baseCols"/>
+        FROM t_user_address
+        WHERE user_id = #{userId}
+        ORDER BY is_default DESC, id ASC
+    </select>
+
+    <select id="countByUserId" resultType="long">
+        SELECT COUNT(*) FROM t_user_address WHERE user_id = #{userId}
+    </select>
+
+    <select id="selectById" resultType="com.aimall.user.bean.Address">
+        SELECT <include refid="baseCols"/>
+        FROM t_user_address WHERE id = #{id}
+    </select>
+
+    <select id="selectByIdAndUserId" resultType="com.aimall.user.bean.Address">
+        SELECT <include refid="baseCols"/>
+        FROM t_user_address WHERE id = #{id} AND user_id = #{userId}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_user_address (user_id, receiver, phone, province, city, detail, is_default)
+        VALUES (#{userId}, #{receiver}, #{phone}, #{province}, #{city}, #{detail}, #{isDefault})
+    </insert>
+
+    <update id="update">
+        UPDATE t_user_address
+        SET receiver = #{receiver},
+            phone    = #{phone},
+            province = #{province},
+            city     = #{city},
+            detail   = #{detail}
+        WHERE id = #{id} AND user_id = #{userId}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM t_user_address WHERE id = #{id} AND user_id = #{userId}
+    </delete>
+
+    <update id="unsetDefault">
+        UPDATE t_user_address SET is_default = 0 WHERE user_id = #{userId}
+    </update>
+
+    <update id="updateDefault">
+        UPDATE t_user_address SET is_default = 1 WHERE id = #{id} AND user_id = #{userId}
+    </update>
+
+</mapper>

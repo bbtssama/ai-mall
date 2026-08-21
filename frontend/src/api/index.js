@@ -31,6 +31,15 @@ export const orderApi = {
   cancel: (id) => request.post(`/v1/orders/${id}/cancel`)
 }
 
+// ---------- 收货地址 ----------
+export const addressApi = {
+  list: () => request.get('/v1/addresses'),
+  add: (data) => request.post('/v1/addresses', data),
+  update: (id, data) => request.put(`/v1/addresses/${id}`, data),
+  remove: (id) => request.delete(`/v1/addresses/${id}`),
+  setDefault: (id) => request.put(`/v1/addresses/${id}/default`)
+}
+
 // ---------- AI 问答 ----------
 export const chatApi = {
   conversations: () => request.get('/v1/chat/conversations'),
