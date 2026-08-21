@@ -11,38 +11,44 @@ import com.aimall.ai.mapper.MessageMapper;
 import com.aimall.ai.service.ChatService;
 import com.aimall.common.api.ResultCode;
 import com.aimall.common.exception.BusinessException;
-import com.aimall.goods.bean.Product;
-import com.aimall.goods.mapper.ProductMapper;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.content.Media;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.stereotype.Service;
+import org.springframework.util.MimeTypeUtils;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 
 import java.time.LocalDateTime;
-import java.util.LinkedHashMap;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
 /**
- * V1 问答实现：预置商品知识（全量商品 JSON）作为 system prompt，
- * 不引入向量库；V2 升级为 RAG 检索（t_product_doc 分块 + embedding）。
+ * AI 问答实现：
+ * - 文本链路：不再全量注入商品库，AI 需要商品信息时调用 searchProduct 工具
+ *   （与前端搜索完全一致的后端分页数据）按需检索再回答。
+ * - 视觉链路：带图时用 deepseek-v4-flash-vision-exp 识别图片中的商品。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ChatServiceImpl implements ChatService {
 
+    /** 视觉识别模型（opencode 中转提供） */
+    private static final String VISION_MODEL = "deepseek-v4-flash-vision-exp";
+
     private final ConversationMapper conversationMapper;
     private final MessageMapper messageMapper;
-    private final ProductMapper productMapper;
+    /** 文本链路：已全局注册 searchProduct 工具（见 AiConfig） */
     private final ChatClient chatClient;
-    private final ObjectMapper objectMapper;
+    /** 视觉链路：不带工具，避免视觉模型收到 function calling */
+    private final ChatClient visionChatClient;
 
     @Override
     public ConversationVO createConversation(String title) {
@@ -72,15 +78,27 @@ public class ChatServiceImpl implements ChatService {
         Conversation conv = resolveConversation(req);
         String answer;
         try {
-            answer = chatClient.prompt()
-                    .system(buildSystemPrompt())
-                    .messages(toAiHistory(conv.getId()))
-                    .user(req.getMessage())
-                    .call()
-                    .content();
+            if (req.hasImage()) {
+                // 视觉链路：识别图片中的商品（多模态 UserMessage 走 messages()）
+                answer = visionChatClient.prompt()
+                        .system(visionSystemPrompt())
+                        .messages(toAiHistory(conv.getId()))
+                        .messages(List.of(buildUserMessage(req)))
+                        .options(OpenAiChatOptions.builder().model(VISION_MODEL).temperature(0.5).build())
+                        .call()
+                        .content();
+            } else {
+                // 文本链路：引导调用 searchProduct 工具按需检索
+                answer = chatClient.prompt()
+                        .system(textSystemPrompt())
+                        .messages(toAiHistory(conv.getId()))
+                        .user(req.getMessage())
+                        .call()
+                        .content();
+            }
         } catch (Exception e) {
-            log.error("AI 普通问答失败: {}", e.getMessage(), e);
-            throw new BusinessException(ResultCode.AI_SERVICE_ERROR, "AI 服务暂时不可用，请检查 DEEPSEEK_API_KEY 配置");
+            log.error("AI 问答失败: {}", e.getMessage(), e);
+            throw new BusinessException(ResultCode.AI_SERVICE_ERROR, "AI 服务暂时不可用");
         }
         saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage());
         saveMessage(conv.getId(), Message.ROLE_ASSISTANT, answer);
@@ -91,19 +109,24 @@ public class ChatServiceImpl implements ChatService {
     public Flux<String> stream(ChatRequest req) {
         Conversation conv = resolveConversation(req);
         StringBuilder sb = new StringBuilder();
+        if (req.hasImage()) {
+            // 带图暂不支持流式：退化到非流式返回（前端对图片走 chat 而非 stream）
+            return Flux.defer(() -> Flux.just(chat(req))).onErrorResume(e -> {
+                log.error("AI 图片问答失败: {}", e.getMessage(), e);
+                return Flux.just("[AI 服务暂时不可用]");
+            });
+        }
         return chatClient.prompt()
-                .system(buildSystemPrompt())
+                .system(textSystemPrompt())
                 .messages(toAiHistory(conv.getId()))
                 .user(req.getMessage())
                 .stream()
                 .content()
-                // 订阅开始即持久化用户提问（避免流失败时留下孤儿问题）
                 .doOnSubscribe(s -> saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage()))
                 .doOnNext(sb::append)
                 .doOnComplete(() -> saveMessage(conv.getId(), Message.ROLE_ASSISTANT, sb.toString()))
                 .onErrorResume(e -> {
                     log.error("AI 流式问答失败: {}", e.getMessage(), e);
-                    // 兜底文案，避免 SSE 连接裸断
                     return Flux.just("\n\n[AI 服务暂时不可用，请稍后再试]");
                 });
     }
@@ -116,7 +139,6 @@ public class ChatServiceImpl implements ChatService {
         return StpUtil.getLoginIdAsLong();
     }
 
-    /** 会话归属校验 */
     private void ensureOwned(Long conversationId) {
         Conversation c = conversationMapper.selectById(conversationId);
         if (c == null || !c.getUserId().equals(currentUserId())) {
@@ -131,7 +153,7 @@ public class ChatServiceImpl implements ChatService {
             Conversation c = new Conversation();
             c.setUserId(userId);
             c.setBizType(Conversation.BIZ_CHAT);
-            c.setTitle(abbreviate(req.getMessage(), 20));
+            c.setTitle(abbreviate(StringUtils.hasText(req.getMessage()) ? req.getMessage() : "图片识别", 20));
             conversationMapper.insert(c);
             return c;
         }
@@ -142,7 +164,7 @@ public class ChatServiceImpl implements ChatService {
         return c;
     }
 
-    /** 历史消息转 Spring AI 消息数组（DB 里均为已完成的轮次，不会与本次提问重复） */
+    /** 历史消息转 Spring AI 消息数组（均为已完成的轮次，不与本次提问重复） */
     private List<org.springframework.ai.chat.messages.Message> toAiHistory(Long conversationId) {
         return messageMapper.selectByConversationId(conversationId).stream()
                 .map(m -> (org.springframework.ai.chat.messages.Message)
@@ -152,38 +174,47 @@ public class ChatServiceImpl implements ChatService {
                 .toList();
     }
 
-    /**
-     * V1 预置商品知识：全部上架商品序列化为 JSON 注入 system prompt。
-     * 说明：商品量小（演示数据）可全量注入；V2 换 RAG 后此方法废弃。
-     */
-    private String buildSystemPrompt() {
-        List<Product> products = productMapper.selectAllOnSale();
-        StringBuilder sb = new StringBuilder();
-        sb.append("你是「AI 种草助手」，一个耐心、专业的电商导购。")
-          .append("回答用户问题时，请基于提供的商品库信息如实回答；")
-          .append("介绍商品时给出名称、价格区间与核心卖点；")
-          .append("如果商品库中没有相关信息，坦诚说明不知道，绝对不要编造商品或参数。")
-          .append("\n\n【本店在售商品库(JSON)】\n");
-        sb.append(toKnowledgeJson(products));
-        return sb.toString();
+    /** 文本链路 system prompt：引导按需调用搜索工具，不编造商品 */
+    private String textSystemPrompt() {
+        return "你是「AI 种草助手」，商城导购。用户询问商品/价格/找某类商品时，"
+                + "先调用 searchProduct 工具按需搜索，再基于返回结果如实回答（给名称、价格、卖点）。"
+                + "商品库里没有就坦诚说明，不要编造不存在的商品或参数。";
     }
 
-    /** 裁剪实体字段后转 JSON，避免把无关字段（createdAt 等）塞给模型 */
-    private String toKnowledgeJson(List<Product> products) {
-        List<Map<String, Object>> list = products.stream().map(p -> {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id", p.getId());
-            m.put("name", p.getSpuName());
-            m.put("subTitle", p.getSubTitle());
-            m.put("minPrice", p.getMinPrice());
-            m.put("detail", p.getDetail());
-            return m;
-        }).toList();
+    /** 视觉链路 system prompt：识别图片中的商品 */
+    private String visionSystemPrompt() {
+        return "你是「AI 种草助手」。用户会发来商品图片，请识别图片大概是什么商品（品类/外观/可能的商品类型），"
+                + "并简要说明；不确定时如实说明，不要编造。";
+    }
+
+    /** 组装用户消息：带图 → 多模态（文本+图片），经 messages() 传入；否则纯文本 */
+    private UserMessage buildUserMessage(ChatRequest req) {
+        if (!req.hasImage()) {
+            return new UserMessage(req.getMessage());
+        }
+        String text = StringUtils.hasText(req.getMessage()) ? req.getMessage() : "请识别这张图片，它大概是什么商品？";
+        byte[] bytes = decodeImage(req.getImage());
+        Media media = new Media(MimeTypeUtils.parseMimeType("image/png"),
+                new ByteArrayResource(bytes) {
+                    @Override
+                    public String getFilename() {
+                        return "product.png";
+                    }
+                });
+        return UserMessage.builder().text(text).media(List.of(media)).build();
+    }
+
+    /** 解析 base64（兼容 data:image/...;base64,xxx 或纯 base64） */
+    private byte[] decodeImage(String image) {
+        String data = image;
+        int idx = image.indexOf("base64,");
+        if (idx >= 0) {
+            data = image.substring(idx + 7);
+        }
         try {
-            return objectMapper.writeValueAsString(list);
-        } catch (JsonProcessingException e) {
-            log.warn("商品知识序列化失败，回退简单文本: {}", e.getMessage());
-            return products.stream().map(Product::getSpuName).toList().toString();
+            return Base64.getDecoder().decode(data);
+        } catch (IllegalArgumentException e) {
+            return Base64.getDecoder().decode(data.replaceAll("\\s", ""));
         }
     }
 

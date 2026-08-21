@@ -31,10 +31,19 @@
 
       <!-- 输入区 -->
       <div class="input-area">
-        <el-input v-model="input" type="textarea" :rows="2" resize="none"
-                  placeholder="输入问题，Enter 发送（Shift+Enter 换行）"
-                  @keyup.enter.exact.prevent="send" :disabled="streaming" />
+        <div class="input-box">
+          <div v-if="previewImg" class="img-preview">
+            <img :src="previewImg" />
+            <span class="img-remove" @click="clearImage">×</span>
+          </div>
+          <el-input v-model="input" type="textarea" :rows="2" resize="none"
+                    placeholder="输入问题，Enter 发送（Shift+Enter 换行）；也可发图识别商品"
+                    @keyup.enter.exact.prevent="send" :disabled="streaming" />
+        </div>
         <div class="input-actions">
+          <el-upload :show-file-list="false" accept="image/*" :auto-upload="false" @change="onPickImage">
+            <el-button :icon="Picture">图片</el-button>
+          </el-upload>
           <el-button @click="newConversation">新会话</el-button>
           <el-button type="danger" :loading="streaming" @click="send">发送</el-button>
         </div>
@@ -47,6 +56,7 @@
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Picture } from '@element-plus/icons-vue'
 import { chatApi } from '../api'
 
 const conversations = ref([])
@@ -56,6 +66,7 @@ const input = ref('')
 const streaming = ref(false)
 const streamText = ref('')
 const msgArea = ref(null)
+const previewImg = ref('')   // dataURL 预览 + 发送
 
 async function loadConversations() {
   conversations.value = await chatApi.conversations() || []
@@ -75,20 +86,41 @@ async function switchConversation(id) {
 
 async function send() {
   const text = input.value.trim()
-  if (!text || streaming.value) return
+  const image = previewImg.value
+  if ((!text && !image) || streaming.value) return
 
   if (!currentId.value) {
-    const c = await chatApi.createConversation({ title: text.slice(0, 16) })
+    const title = text || '图片识别'
+    const c = await chatApi.createConversation({ title: title.slice(0, 16) })
     conversations.value.unshift(c)
     currentId.value = c.id
   }
 
-  // 先渲染用户消息
-  messages.value.push({ role: 'user', content: text })
+  // 先渲染用户消息（有图则带图）
+  messages.value.push({ role: 'user', content: text || '[图片]', image })
   input.value = ''
+  previewImg.value = ''
   scrollBottom()
 
-  // 流式请求
+  if (image) {
+    // 带图 → 非流式（后端 vision 链路）
+    streaming.value = true
+    messages.value.push({ role: 'assistant', content: '' })
+    try {
+      const answer = await chatApi.send({ conversationId: currentId.value, message: text, image })
+      messages.value[messages.value.length - 1].content = answer
+      await loadConversations()
+    } catch (e) {
+      messages.value[messages.value.length - 1].content = 'AI 服务暂时不可用'
+      ElMessage.error('识别失败')
+    } finally {
+      streaming.value = false
+      scrollBottom()
+    }
+    return
+  }
+
+  // 纯文字 → 流式（后端走搜索工具）
   streaming.value = true
   streamText.value = ''
   messages.value.push({ role: 'assistant', content: '' }) // 占位
@@ -103,7 +135,6 @@ async function send() {
         scrollBottom()
       },
       async () => {
-        // 完成后刷新会话标题与消息（服务端已落库）
         streaming.value = false
         await loadConversations()
         const idx = conversations.value.findIndex(c => c.id === currentId.value)
@@ -119,6 +150,17 @@ async function send() {
     ElMessage.error('网络异常')
   }
 }
+
+// 选择图片 → 读为 dataURL 预览
+function onPickImage(file) {
+  const raw = file.raw
+  if (!raw || !raw.type.startsWith('image/')) return
+  const reader = new FileReader()
+  reader.onload = (e) => { previewImg.value = e.target.result }
+  reader.readAsDataURL(raw)
+}
+
+function clearImage() { previewImg.value = '' }
 
 function scrollBottom() {
   nextTick(() => {
@@ -161,5 +203,14 @@ onMounted(async () => {
 @keyframes blink { 50% { opacity: 0; } }
 .empty-tip { color: #999; font-size: 13px; margin: 40px auto; }
 .empty-tip li { margin: 6px 0; list-style: none; }
-.input-area { display: flex; gap: 10px; padding: 12px; border-top: 1px solid #eee; }
+.input-area { display: flex; gap: 10px; padding: 12px; border-top: 1px solid var(--clr-border); align-items: flex-end; }
+.input-box { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.img-preview { position: relative; width: 72px; height: 72px; border-radius: var(--radius-sm); overflow: hidden; }
+.img-preview img { width: 100%; height: 100%; object-fit: cover; }
+.img-remove {
+  position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; line-height: 16px;
+  text-align: center; background: rgba(0,0,0,.55); color: #fff; border-radius: 50%;
+  cursor: pointer; font-size: 13px;
+}
+.input-actions { display: flex; flex-direction: column; gap: 8px; }
 </style>
