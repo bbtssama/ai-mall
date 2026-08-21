@@ -44,9 +44,13 @@
         WHERE user_id = #{userId} AND sku_id = #{skuId}
     </select>
 
-    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+    <!-- 原子合并（防并发丢更新）：依赖 uk_user_sku 唯一索引，
+         命中冲突则在数据库内 quantity = quantity + ? 原子累加（封顶 99）。
+         单条 SQL、无"读-改-写"竞态窗口，两个并发加购不会互相覆盖。 -->
+    <insert id="upsert" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO t_cart (user_id, sku_id, quantity)
         VALUES (#{userId}, #{skuId}, #{quantity})
+        ON DUPLICATE KEY UPDATE quantity = LEAST(quantity + #{quantity}, 99)
     </insert>
 
     <update id="updateQuantity">

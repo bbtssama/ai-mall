@@ -22,8 +22,12 @@ public interface CartMapper {
 
     Cart selectByUserIdAndSkuId(@Param("userId") Long userId, @Param("skuId") Long skuId);
 
-    /** 返回受影响行数，主键回填 cart.id */
-    int insert(Cart cart);
+    /**
+     * 原子合并写入购物车条目（防并发丢更新）：
+     * 不存在该 (user_id, sku_id) 则插入；存在则在该行当前数量上原子累加（封顶 99）。
+     * 依赖 t_cart.uk_user_sku 唯一索引触发 ON DUPLICATE KEY 分支，单条 SQL、无读-改-写竞态窗口。
+     */
+    int upsert(Cart cart);
 
     /** 带 userId 条件，天然校验归属；返回 0 表示条目不存在/不属于该用户 */
     int updateQuantity(@Param("id") Long id, @Param("userId") Long userId, @Param("quantity") int quantity);
