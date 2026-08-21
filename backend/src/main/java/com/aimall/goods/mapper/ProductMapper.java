@@ -13,11 +13,15 @@ import java.util.List;
 @Mapper
 public interface ProductMapper {
 
-    /** 上架商品分页（带 MIN(sku.price) 起售价，不含 detail 大字段） */
-    List<Product> selectOnSalePage(@Param("offset") long offset, @Param("size") long size);
+    /** 上架商品分页（带 MIN(sku.price) 起售价，不含 detail 大字段），支持 keyword/categoryId 过滤 */
+    List<Product> selectOnSalePage(@Param("offset") long offset,
+                                   @Param("size") long size,
+                                   @Param("keyword") String keyword,
+                                   @Param("categoryId") Long categoryId);
 
-    /** 上架商品总数 */
-    long countOnSale();
+    /** 上架商品总数（同条件） */
+    long countOnSale(@Param("keyword") String keyword,
+                     @Param("categoryId") Long categoryId);
 
     /** 按 id 查（含 detail） */
     Product selectById(@Param("id") Long id);

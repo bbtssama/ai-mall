@@ -6,7 +6,9 @@ const routes = [
   { path: '/product/:id', name: 'product', component: () => import('../views/ProductDetail.vue') },
   { path: '/cart', name: 'cart', component: () => import('../views/Cart.vue') },
   { path: '/orders', name: 'orders', component: () => import('../views/Orders.vue') },
-  { path: '/chat', name: 'chat', component: () => import('../views/Chat.vue') }
+  { path: '/chat', name: 'chat', component: () => import('../views/Chat.vue') },
+  { path: '/mine', name: 'mine', component: () => import('../views/Mine.vue') },
+  { path: '/mine/addresses', name: 'addresses', component: () => import('../views/AddressManage.vue') }
 ]
 
 const router = createRouter({

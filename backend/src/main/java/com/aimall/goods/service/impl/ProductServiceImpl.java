@@ -2,8 +2,8 @@ package com.aimall.goods.service.impl;
 
 import com.aimall.common.api.ResultCode;
 import com.aimall.common.exception.BusinessException;
-import com.aimall.common.page.PageQuery;
 import com.aimall.common.page.PageResult;
+import com.aimall.goods.dto.ProductQuery;
 import com.aimall.goods.dto.ProductVO;
 import com.aimall.goods.dto.SkuVO;
 import com.aimall.goods.bean.Product;
@@ -24,10 +24,12 @@ public class ProductServiceImpl implements ProductService {
     private final ProductSkuMapper skuMapper;
 
     @Override
-    public PageResult<ProductVO> pageOnSale(PageQuery query) {
-        long total = productMapper.countOnSale();
+    public PageResult<ProductVO> pageOnSale(ProductQuery query) {
+        // 关键词去空白，避免误传空格
+        String keyword = query.getKeyword() == null ? null : query.getKeyword().trim();
+        long total = productMapper.countOnSale(keyword, query.getCategoryId());
         List<ProductVO> records = productMapper
-                .selectOnSalePage(query.getOffset(), query.getPageSize())
+                .selectOnSalePage(query.getOffset(), query.getPageSize(), keyword, query.getCategoryId())
                 .stream()
                 .map(this::toListVO)
                 .toList();

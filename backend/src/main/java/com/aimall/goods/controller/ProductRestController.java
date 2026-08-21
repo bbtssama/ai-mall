@@ -1,8 +1,8 @@
 package com.aimall.goods.controller;
 
 import com.aimall.common.api.R;
-import com.aimall.common.page.PageQuery;
 import com.aimall.common.page.PageResult;
+import com.aimall.goods.dto.ProductQuery;
 import com.aimall.goods.dto.ProductVO;
 import com.aimall.goods.service.ProductService;
 import jakarta.validation.Valid;
@@ -13,7 +13,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 商品接口：列表 / 详情
+ * 商品接口：列表（关键词/分类过滤 + 分页）/ 详情
  */
 @RestController
 @RequestMapping("/api/v1/products")
@@ -23,7 +23,7 @@ public class ProductRestController {
     private final ProductService productService;
 
     @GetMapping
-    public R<PageResult<ProductVO>> page(@Valid PageQuery query) {
+    public R<PageResult<ProductVO>> page(@Valid ProductQuery query) {
         return R.ok(productService.pageOnSale(query));
     }
 

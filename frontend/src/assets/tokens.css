@@ -1,0 +1,78 @@
+/* ============================================================
+   AI 种草商城 · 全局设计 Token（V1 体验重构 / 阶段 A）
+   主色系：活力橙红（电商大促感）
+   ============================================================ */
+:root {
+  /* 主色 */
+  --clr-primary: #ff5000;
+  --clr-primary-hover: #ff6a2b;
+  --clr-primary-active: #e64a00;
+  --clr-primary-bg: #fff3ec;        /* 主色浅底（选中/标签底） */
+
+  /* 功能色 */
+  --clr-success: #00b578;
+  --clr-warning: #ff8f1f;
+  --clr-danger: #f53f3f;
+  --clr-info: #999;
+
+  /* 文本 */
+  --clr-text: #1a1a1a;
+  --clr-text-2: #666;
+  --clr-text-3: #999;
+  --clr-text-4: #bbb;
+
+  /* 背景与边框 */
+  --clr-bg: #f5f6f8;               /* 页面底 */
+  --clr-bg-card: #fff;
+  --clr-border: #ececec;
+  --clr-border-light: #f5f5f5;
+
+  /* 圆角 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  /* 阴影（层级） */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.1);
+
+  /* 间距 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* 布局 */
+  --content-width: 1200px;
+  --header-height: 60px;
+}
+
+/* Element Plus 主色覆盖为橙红 */
+:root {
+  --el-color-primary: var(--clr-primary);
+  --el-color-primary-light-3: #ff8a55;
+  --el-color-primary-light-5: #ffad8a;
+  --el-color-primary-light-7: #ffd0bc;
+  --el-color-primary-light-8: #ffe0d2;
+  --el-color-primary-light-9: #fff0e8;
+  --el-color-primary-dark-2: #d94300;
+}
+
+/* 内容限宽容器 */
+.container {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 0 var(--space-4);
+}
+
+/* 通用卡片 */
+.mall-card {
+  background: var(--clr-bg-card);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}

@@ -3,20 +3,36 @@
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.aimall.goods.mapper.ProductMapper">
 
+    <!-- 上架条件：状态 + 分类 + 关键词（名称/副标题模糊） -->
+    <sql id="onsaleWhere">
+        <where>
+            p.status = 1
+            <if test="categoryId != null">
+                AND p.category_id = #{categoryId}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (p.spu_name LIKE CONCAT('%', #{keyword}, '%')
+                     OR p.sub_title LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+    </sql>
+
     <!-- 列表：聚合 MIN(price) 作为"起售价"，LEFT JOIN 保证无 SKU 商品不丢行 -->
     <select id="selectOnSalePage" resultType="com.aimall.goods.bean.Product">
         SELECT p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at,
                MIN(s.price) AS min_price
         FROM t_product p
         LEFT JOIN t_product_sku s ON s.product_id = p.id
-        WHERE p.status = 1
+        <include refid="onsaleWhere"/>
         GROUP BY p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at
         ORDER BY p.id DESC
         LIMIT #{offset}, #{size}
     </select>
 
     <select id="countOnSale" resultType="long">
-        SELECT COUNT(*) FROM t_product WHERE status = 1
+        SELECT COUNT(*)
+        FROM t_product p
+        <include refid="onsaleWhere"/>
     </select>
 
     <select id="selectById" resultType="com.aimall.goods.bean.Product">
