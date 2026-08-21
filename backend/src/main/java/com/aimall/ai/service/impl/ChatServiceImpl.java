@@ -75,6 +75,7 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public String chat(ChatRequest req) {
+        validate(req);
         Conversation conv = resolveConversation(req);
         String answer;
         try {
@@ -109,6 +110,7 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public Flux<String> stream(ChatRequest req) {
+        validate(req);
         Conversation conv = resolveConversation(req);
         StringBuilder sb = new StringBuilder();
         if (req.hasImage()) {
@@ -142,6 +144,13 @@ public class ChatServiceImpl implements ChatService {
 
     private Long currentUserId() {
         return StpUtil.getLoginIdAsLong();
+    }
+
+    /** 参数校验：无图时必须有问题文本；纯图片识别允许空文本 */
+    private void validate(ChatRequest req) {
+        if (!req.hasImage() && !StringUtils.hasText(req.getMessage())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "问题不能为空");
+        }
     }
 
     private void ensureOwned(Long conversationId) {

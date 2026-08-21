@@ -1,6 +1,5 @@
 package com.aimall.ai.dto;
 
-import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 
 /**
@@ -9,8 +8,7 @@ import lombok.Data;
 @Data
 public class ChatRequest {
 
-    /** 问题；纯图片识别时可为空（有 image 即可） */
-    @NotBlank(message = "问题不能为空")
+    /** 问题；纯图片识别（有 image）时可为空，由 Service 校验 */
     private String message;
 
     /** 会话 id，为空则自动创建新会话 */
