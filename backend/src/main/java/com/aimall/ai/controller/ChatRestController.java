@@ -19,45 +19,90 @@ import reactor.core.publisher.Flux;
 import java.util.List;
 
 /**
- * AI 问答接口：会话管理 + 普通问答 + SSE 流式问答
+ * AI 问答接口 —— AI 模块的 HTTP 门户，共 5 个接口：会话管理 3 个 + 问答 2 个。
+ *
+ * <h2>与前端 chatApi 一一对应（frontend/src/api/index.js）</h2>
+ * <pre>
+ *   POST   /api/v1/chat/conversations            → chatApi.createConversation  点"新会话"
+ *   GET    /api/v1/chat/conversations            → chatApi.conversations       左侧会话栏
+ *   GET    /api/v1/chat/conversations/{id}/messages → chatApi.messages         切会话回显
+ *   POST   /api/v1/chat                          → chatApi.send               有图时发送（非流式）
+ *   POST   /api/v1/chat/stream                   → chatApi.sendStream         无图时发送（SSE 流式）
+ * </pre>
+ *
+ * <h2>0 基础须知</h2>
+ * <ul>
+ *   <li>全部接口要求登录：Sa-Token 拦截 /api/**（SaTokenConfig），登录注册在白名单；</li>
+ *   <li>返回值统一 R&lt;T&gt; = {code, msg, data}，code=200 成功；
+ *       唯独 /stream 返回 Flux&lt;String&gt;（SSE 流），不走 R 包装——流一旦开始，
+ *       HTTP 状态码已发出，后续信息只能以流内容表达（教程第 6 章）；</li>
+ *   <li>Controller 一行业务逻辑都没有：校验/会话/调模型/落库全在 ChatService。
+ *       分层纪律：Controller 只做"HTTP 协议 ↔ 业务调用"的翻译。</li>
+ * </ul>
+ *
+ * <p>📖 对应教程《Spring AI 从零到实战》第 6 章（流式）、第 7 章（会话接口）、第 8 章。</p>
  */
 @RestController
 @RequestMapping("/api/v1/chat")
 @RequiredArgsConstructor
 public class ChatRestController {
 
+    /** 依赖接口而非实现类：换 AI 实现（V2 加 RAG 等）Controller 不动（依赖倒置） */
     private final ChatService chatService;
 
+    /**
+     * 新建空会话（前端传"新会话"占位标题，首条消息后由后端自动改名）。
+     *
+     * <p>body 允许整体缺失（required=false）：前端"新会话"按钮可能什么都不带，
+     * req 为 null 时 title 传 null，Service 兜底占位标题。</p>
+     */
     @PostMapping("/conversations")
     public R<ConversationVO> createConversation(@RequestBody(required = false) ChatTitleRequest req) {
         return R.ok(chatService.createConversation(req == null ? null : req.title()));
     }
 
+    /** 当前用户的会话列表（新→旧），左侧会话栏展示用 */
     @GetMapping("/conversations")
     public R<List<ConversationVO>> listConversations() {
         return R.ok(chatService.listConversations());
     }
 
+    /** 拉取某个会话的全部历史消息（旧→新），切会话时回显；Service 层做归属校验防越权 */
     @GetMapping("/conversations/{id}/messages")
     public R<List<MessageVO>> listMessages(@PathVariable Long id) {
         return R.ok(chatService.listMessages(id));
     }
 
-    /** 普通问答（非流式，返回完整回答） */
+    /**
+     * 普通问答（非流式，返回完整回答）。
+     *
+     * <p>前端约定：<b>带图必走这里</b>（视觉链路流式不稳，降级非流式，教程第 5 章），
+     * 无图走下面的 /stream。@Valid 触发 Bean Validation，但 message 的
+     * "与 image 二选一"校验是跨字段规则，在 Service.validate() 里做。</p>
+     */
     @PostMapping
     public R<String> chat(@RequestBody @Valid ChatRequest req) {
         return R.ok(chatService.chat(req));
     }
 
     /**
-     * SSE 流式问答：text/event-stream，逐字下发（HTTP/1.1 + SSE）
+     * SSE 流式问答：text/event-stream，逐字下发（HTTP/1.1 + SSE）。
+     *
+     * <p>两个关键点：① produces 声明响应是 SSE，Spring MVC 会把 Flux 的每个元素
+     * 自动包装成 "data:xxx\n\n" 事件（无需引入 WebFlux）；② 返回 Flux&lt;String&gt;
+     * 而非 R&lt;String&gt;：流式响应不走统一 JSON 包装，正文就是事件流本身。
+     * 前端 fetch + ReadableStream 手动解析（教程第 6.5 节）。</p>
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> stream(@RequestBody @Valid ChatRequest req) {
         return chatService.stream(req);
     }
 
-    /** 新建会话请求体 */
+    /**
+     * 新建会话的请求体。
+     * 用 record（Java 17）：不可变数据载体，一行顶一个类；
+     * title 可为 null——允许"裸点新会话"。
+     */
     public record ChatTitleRequest(String title) {
     }
 }
