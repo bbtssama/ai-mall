@@ -15,12 +15,15 @@ spring:
       # OpenCode Go 中转（opencode.ai/zen/go 订阅，OpenAI 兼容协议）。
       # 注意：base-url 不带 /v1，Spring AI 会自动拼接 /v1/chat/completions。
       # 官方 DeepSeek 直连可改回 https://api.deepseek.com（模型 deepseek-chat）。
-      base-url: https://opencode.ai/zen/go
-      # 生产环境请用环境变量 DEEPSEEK_API_KEY 覆盖
-      api-key: ${DEEPSEEK_API_KEY:sk-AMtI0Eb8zJULhdamGBBPAfOlgxp9awncoZnQvWStAmEsimOoRa0sBkibRgfvKY0L}
+      #base-url: https://opencode.ai/zen/go
+      # API Key 一律通过环境变量 DEEPSEEK_API_KEY 注入，禁止硬编码入库（GitHub 推送保护会拦截）。
+      # 本地开发：写入 application-local.yml（已被 .gitignore 忽略），用 --spring.profiles.active=local 启动。
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:}
+
       chat:
         options:
-          model: deepseek-v4-pro
+          model: deepseek-v4-flash-vision-exp
           temperature: 0.7
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss

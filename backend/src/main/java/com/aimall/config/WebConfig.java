@@ -20,6 +20,7 @@ public class WebConfig implements WebMvcConfigurer {
                 .allowedOriginPatterns(
                         "http://localhost:*",
                         "http://127.0.0.1:*",
+                        "http://192.168.1.4:*",
                         "https://paimon.store",
                         "https://*.paimon.store")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
