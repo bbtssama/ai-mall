@@ -2,6 +2,10 @@ server:
   port: 8080
 
 spring:
+  profiles:
+    # 默认激活 local：真实密钥放在 application-local.yml（不入库），mvn spring-boot:run 直接跑即可。
+    # 若将来部署生产，用命令行覆盖：--spring.profiles.active=prod
+    active: local
   application:
     name: ai-mall-backend
   datasource:
@@ -17,7 +21,7 @@ spring:
       # 官方 DeepSeek 直连可改回 https://api.deepseek.com（模型 deepseek-chat）。
       #base-url: https://opencode.ai/zen/go
       # API Key 一律通过环境变量 DEEPSEEK_API_KEY 注入，禁止硬编码入库（GitHub 推送保护会拦截）。
-      # 本地开发：写入 application-local.yml（已被 .gitignore 忽略），用 --spring.profiles.active=local 启动。
+      # 本地开发：密钥写入 application-local.yml（已被 .gitignore 忽略），默认已激活，直接启动即可。
       base-url: https://api.deepseek.com
       api-key: ${DEEPSEEK_API_KEY:}
 
