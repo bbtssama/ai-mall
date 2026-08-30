@@ -306,6 +306,11 @@ public class ChatServiceImpl implements ChatService {
      *   <li>UserMessage.builder().text().media() = "文字 + 图片"一体组装，
      *       最终会被翻译成 OpenAI 协议的 content 数组 [{type:text},{type:image_url}]。</li>
      * </ul>
+     *
+     * <p><b>MIME 类型从图片字节自动嗅探</b>（见 detectImageMimeType）：
+     * 早期这里硬编码 image/png，但前端 canvas 压缩后实际产出是 JPEG，
+     * 属于"声明的格式 ≠ 真实格式"——只因为网关会自行嗅探字节才一直没暴露。
+     * 现在按文件头字节识别真实格式，png/jpeg/gif/webp/bmp 都能如实告诉模型。</p>
      */
     private UserMessage buildUserMessage(ChatRequest req) {
         if (!req.hasImage()) {
@@ -314,14 +319,74 @@ public class ChatServiceImpl implements ChatService {
         // 识别任务总得给模型一句指令：用户没写文字时给默认指令
         String text = StringUtils.hasText(req.getMessage()) ? req.getMessage() : "请识别这张图片，它大概是什么商品？";
         byte[] bytes = decodeImage(req.getImage());
-        Media media = new Media(MimeTypeUtils.parseMimeType("image/png"),
+        // 以数据本身的格式为准，不采信前端声明（前端压成 JPEG 却按 png 上传的坑）
+        String mimeType = detectImageMimeType(bytes);
+        String filename = "product." + imageExtension(mimeType);
+        Media media = new Media(MimeTypeUtils.parseMimeType(mimeType),
                 new ByteArrayResource(bytes) {
                     @Override
                     public String getFilename() {
-                        return "product.png";
+                        return filename;
                     }
                 });
         return UserMessage.builder().text(text).media(List.of(media)).build();
+    }
+
+    /**
+     * 按文件头字节（magic number）嗅探图片真实格式——图片格式就写在头几个字节里，像身份证。
+     *
+     * <p>为什么不用前端 dataURL 前缀（data:image/jpeg;base64,）里写的类型？
+     * 两个原因：① 前端也可能直接发裸 base64，压根没有前缀；
+     * ② 前缀是前端拼的，理论上可以和真实内容不符（本项目就踩过：压成 JPEG 却声明 png）。
+     * 文件头字节来自数据本身，最权威，且不依赖调用方守规矩。</p>
+     *
+     * <p>覆盖常规业务常见的 5 种：PNG / JPEG / GIF / WEBP / BMP。
+     * 认不出来时兜底 image/jpeg（前端 canvas 压缩的默认产出）。</p>
+     *
+     * @param bytes 解码后的图片字节
+     * @return MIME 类型，如 image/png；永不返回 null
+     */
+    private String detectImageMimeType(byte[] bytes) {
+        // 任何真实图片都远大于 12 字节，比这还短说明数据本身有问题，直接兜底
+        if (bytes == null || bytes.length < 12) {
+            return "image/jpeg";
+        }
+        // PNG：89 50 4E 47，即 "\x89PNG"
+        if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G') {
+            return "image/png";
+        }
+        // JPEG：FF D8 FF
+        if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8 && (bytes[2] & 0xFF) == 0xFF) {
+            return "image/jpeg";
+        }
+        // GIF：47 49 46 38，即 "GIF8"（GIF87a 与 GIF89a 都是这个头）
+        if (bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == '8') {
+            return "image/gif";
+        }
+        // WEBP：前 4 字节 "RIFF"，第 8-11 字节 "WEBP"
+        if (bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+                && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+            return "image/webp";
+        }
+        // BMP：42 4D，即 "BM"
+        if (bytes[0] == 'B' && bytes[1] == 'M') {
+            return "image/bmp";
+        }
+        return "image/jpeg";   // 未知格式兜底
+    }
+
+    /**
+     * MIME → 文件扩展名，用于给附件起文件名。
+     * 网关只关心"附件有个名字"，并不校验它和真实内容是否一致，所以简单映射即可。
+     */
+    private String imageExtension(String mimeType) {
+        return switch (mimeType) {
+            case "image/png" -> "png";
+            case "image/gif" -> "gif";
+            case "image/webp" -> "webp";
+            case "image/bmp" -> "bmp";
+            default -> "jpg";   // image/jpeg 及一切未知格式
+        };
     }
 
     /**
