@@ -8,7 +8,7 @@ import java.time.LocalDateTime;
  * AI 会话消息视图对象（VO = View Object，给前端渲染用的出参）。
  *
  * <h2>VO 和实体(bean)为什么要分开？</h2>
- * 实体 Message 是"数据库行长什么样"（有 extraJson 这种存储导向的字段）；
+ * 实体 ChatMessage 是"数据库行长什么样"（有 extraJson 这种存储导向的字段）；
  * VO 是"前端需要什么"（语义化的 image 字段）。两者通过 ChatServiceImpl.toMsgVO() 转换。
  * 分开的好处：存储结构变化（比如 V2 图片改成存 OSS URL）不影响前端契约，
  * 反过来前端要的字段也不会倒逼数据库表加列。

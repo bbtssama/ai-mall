@@ -390,9 +390,9 @@ public Flux<String> stream(ChatRequest req) {
             .stream()
             .content()
             // 订阅开始即持久化用户提问（避免流失败时留下孤儿问题）
-            .doOnSubscribe(s -> saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage()))
+            .doOnSubscribe(s -> saveMessage(conv.getId(), ChatMessage.ROLE_USER, req.getMessage()))
             .doOnNext(sb::append)
-            .doOnComplete(() -> saveMessage(conv.getId(), Message.ROLE_ASSISTANT, sb.toString()))
+            .doOnComplete(() -> saveMessage(conv.getId(), ChatMessage.ROLE_ASSISTANT, sb.toString()))
             .onErrorResume(e -> {
                 log.error("AI 流式问答失败: {}", e.getMessage(), e);
                 // 兜底文案，避免 SSE 连接裸断

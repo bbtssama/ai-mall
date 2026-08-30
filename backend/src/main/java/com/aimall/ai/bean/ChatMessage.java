@@ -9,7 +9,7 @@ import java.time.LocalDateTime;
  *
  * <h2>它是什么？</h2>
  * 聊天界面里的一条"气泡"：要么是用户问的（role=user），要么是 AI 答的（role=assistant）。
- * 一个会话（Conversation）按时间顺序包含多条 Message，按 created_at 升序读出来，
+ * 一个会话（Conversation）按时间顺序包含多条 ChatMessage，按 created_at 升序读出来，
  * 就是这个会话的完整对话上下文——也就是每次调大模型时 messages 数组的"原料"
  * （转换逻辑见 ChatServiceImpl.toAiHistory()）。
  *
@@ -17,6 +17,13 @@ import java.time.LocalDateTime;
  * 大模型本身没有记忆（教程第 0 章心智模型），"多轮对话"完全靠客户端每次把历史重新发过去。
  * 所以 AI 的"记忆"= 我们数据库里的这两张表（t_conversation + t_message）。
  * 不落库 = 刷新页面就失忆。
+ *
+ * <h2>为什么叫 ChatMessage 而不叫 Message？（命名由来）</h2>
+ * 早期本类叫 Message，与 Spring AI 的消息接口
+ * {@code org.springframework.ai.chat.messages.Message} <b>重名</b>——
+ * 同一个文件里同时用到两者时，其中一个只能写全限定名，读代码极易混淆。
+ * 故加 Chat 前缀区分：本类 = 我们数据库里的聊天记录，
+ * Spring AI 的 Message = 发给模型的协议消息对象。
  *
  * <h2>设计要点（面试可讲）</h2>
  * <ul>
@@ -31,7 +38,7 @@ import java.time.LocalDateTime;
  * <p>📖 对应教程《Spring AI 从零到实战》第 3 章（多轮对话）、第 9 章案例一。</p>
  */
 @Data
-public class Message {
+public class ChatMessage {
 
     /** 角色-用户发言。取值刻意与 OpenAI 协议的 role 一致，转消息时免翻译 */
     public static final String ROLE_USER = "user";

@@ -8,7 +8,7 @@
         VALUES (#{conversationId}, #{role}, #{content}, #{extraJson})
     </insert>
 
-    <select id="selectByConversationId" resultType="com.aimall.ai.bean.Message">
+    <select id="selectByConversationId" resultType="com.aimall.ai.bean.ChatMessage">
         SELECT id, conversation_id, role, content, extra_json, created_at
         FROM t_message
         WHERE conversation_id = #{conversationId}

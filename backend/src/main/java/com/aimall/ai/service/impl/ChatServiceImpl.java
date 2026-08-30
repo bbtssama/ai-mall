@@ -1,11 +1,11 @@
 package com.aimall.ai.service.impl;
 
 import cn.dev33.satoken.stp.StpUtil;
+import com.aimall.ai.bean.ChatMessage;
+import com.aimall.ai.bean.Conversation;
 import com.aimall.ai.dto.ChatRequest;
 import com.aimall.ai.dto.ConversationVO;
 import com.aimall.ai.dto.MessageVO;
-import com.aimall.ai.bean.Conversation;
-import com.aimall.ai.bean.Message;
 import com.aimall.ai.mapper.ConversationMapper;
 import com.aimall.ai.mapper.MessageMapper;
 import com.aimall.ai.service.ChatService;
@@ -15,6 +15,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.content.Media;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -27,7 +28,6 @@ import reactor.core.publisher.Flux;
 import java.time.LocalDateTime;
 import java.util.Base64;
 import java.util.List;
-import java.util.Map;
 
 /**
  * AI 问答实现 —— 整个 AI 模块的业务心脏。
@@ -151,8 +151,8 @@ public class ChatServiceImpl implements ChatService {
             throw new BusinessException(ResultCode.AI_SERVICE_ERROR, "AI 服务暂时不可用");
         }
         // ③ 问答成功后两条消息一起落库：用户消息（含图片 base64）供历史回显，AI 回答供下一轮当上下文
-        saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage(), req.getImage());
-        saveMessage(conv.getId(), Message.ROLE_ASSISTANT, answer, null);
+        saveMessage(conv.getId(), ChatMessage.ROLE_USER, req.getMessage(), req.getImage());
+        saveMessage(conv.getId(), ChatMessage.ROLE_ASSISTANT, answer, null);
         // 首条消息后自动命名会话（标题仍为默认值时）
         autoRenameIfDefault(conv, req);
         return answer;
@@ -189,11 +189,11 @@ public class ChatServiceImpl implements ChatService {
                 .content()                     // Flux<String>：逐段正文，不是完整文本
                 .doOnSubscribe(s -> {
                     // 订阅即存用户消息（它本来就是完整的），并顺手做首条自动命名
-                    saveMessage(conv.getId(), Message.ROLE_USER, req.getMessage(), null);
+                    saveMessage(conv.getId(), ChatMessage.ROLE_USER, req.getMessage(), null);
                     autoRenameIfDefault(conv, req);
                 })
                 .doOnNext(sb::append)          // 每个片段追加到 StringBuilder
-                .doOnComplete(() -> saveMessage(conv.getId(), Message.ROLE_ASSISTANT, sb.toString(), null))
+                .doOnComplete(() -> saveMessage(conv.getId(), ChatMessage.ROLE_ASSISTANT, sb.toString(), null))
                 // 流中途出错：把错误"说"给用户听（响应已开始，改不了状态码了）
                 .onErrorResume(e -> {
                     log.error("AI 流式问答失败: {}", e.getMessage(), e);
@@ -265,14 +265,14 @@ public class ChatServiceImpl implements ChatService {
      * AI 发言转 AssistantMessage → 拼成 messages 数组随每次请求发给模型。
      * SQL 已按 created_at ASC, id ASC 排序（旧→新），对话剧本顺序才正确。</p>
      *
-     * <p><b>重名警告</b>：本项目实体叫 com.aimall.ai.bean.Message，
-     * Spring AI 的消息接口是 org.springframework.ai.chat.messages.Message——
-     * 两个不同的类！所以这里用全限定名区分，读代码时别混。</p>
+     * <p><b>怎么区分两个"消息"类</b>：实体已由 Message 改名为 ChatMessage，
+     * 不再与 Spring AI 的 Message 接口重名，因此这里可以直接按名字分辨——
+     * ChatMessage = 我们库里存的聊天记录，Message = 组装好发给模型的协议消息。</p>
      */
-    private List<org.springframework.ai.chat.messages.Message> toAiHistory(Long conversationId) {
+    private List<Message> toAiHistory(Long conversationId) {
         return messageMapper.selectByConversationId(conversationId).stream()
-                .map(m -> (org.springframework.ai.chat.messages.Message)
-                        (Message.ROLE_USER.equals(m.getRole())
+                .map(m -> (Message)
+                        (ChatMessage.ROLE_USER.equals(m.getRole())
                                 ? new UserMessage(m.getContent())        // 用户发言 → UserMessage
                                 : new AssistantMessage(m.getContent()))) // AI 发言 → AssistantMessage
                 .toList();
@@ -352,7 +352,7 @@ public class ChatServiceImpl implements ChatService {
      * 完整复盘见教程第 9 章案例一。V2 演进方向：传对象存储只存 URL。</p>
      */
     private void saveMessage(Long conversationId, String role, String content, String image) {
-        Message m = new Message();
+        ChatMessage m = new ChatMessage();
         m.setConversationId(conversationId);
         m.setRole(role);
         m.setContent(content);
@@ -400,7 +400,7 @@ public class ChatServiceImpl implements ChatService {
     }
 
     /** 实体 → 消息 VO 的映射。注意 extraJson → image 的语义化改名：前端拿到即懂"这是附图" */
-    private MessageVO toMsgVO(Message m) {
+    private MessageVO toMsgVO(ChatMessage m) {
         MessageVO vo = new MessageVO();
         vo.setId(m.getId());
         vo.setRole(m.getRole());

@@ -123,7 +123,7 @@ backend/src/main/
 - **detail/pageMyOrders**：带 userId 校验归属；OrderVO 由 BeanUtils.copyProperties(order, vo)，items 由 orderItemMapper 查
 
 ### ai 域 —— SSE 流式
-- **Conversation**：BIZ_CHAT 常量；**Message**：ROLE_USER / ROLE_ASSISTANT
+- **Conversation**：BIZ_CHAT 常量；**ChatMessage**：ROLE_USER / ROLE_ASSISTANT
 - **ConversationMapper**：`insert` / `selectById` / `selectByUserId`（新→旧）
 - **MessageMapper**：`insert` / `selectByConversationId`（旧→新）
 - **ChatRestController** `/api/v1/chat`：`POST /conversations`（可空 body：record ChatTitleRequest）、`GET /conversations`、`GET /conversations/{id}/messages`、`POST /`（普通问答，返回 R<String>）、`POST /stream`（**produces = TEXT_EVENT_STREAM_VALUE，返回 Flux<String>**）

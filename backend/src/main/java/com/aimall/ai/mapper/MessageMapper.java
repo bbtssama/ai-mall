@@ -2,7 +2,7 @@ package com.aimall.ai.mapper;
 
 import org.apache.ibatis.annotations.Mapper;
 
-import com.aimall.ai.bean.Message;
+import com.aimall.ai.bean.ChatMessage;
 import org.apache.ibatis.annotations.Param;
 
 import java.util.List;
@@ -36,7 +36,7 @@ public interface MessageMapper {
      * @param message 由调用方填好 conversationId/role/content/extraJson
      * @return 受影响行数（1=成功），主键回填到参数对象的 id 字段
      */
-    int insert(Message message);
+    int insert(ChatMessage message);
 
     /**
      * 查某会话的全部消息——<b>顺序是本方法的灵魂：必须旧→新</b>。
@@ -49,5 +49,5 @@ public interface MessageMapper {
      * @param conversationId 会话 id（调用前应已通过 ensureOwned 校验归属）
      * @return 消息列表，旧→新
      */
-    List<Message> selectByConversationId(@Param("conversationId") Long conversationId);
+    List<ChatMessage> selectByConversationId(@Param("conversationId") Long conversationId);
 }

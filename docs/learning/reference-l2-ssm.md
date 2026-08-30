@@ -108,7 +108,7 @@
 | 文件 | 行 | 一句话职责 |
 |---|---|---|
 | `ai/bean/Conversation.java` | 23 | 会话实体（t_conversation），常量 `BIZ_CHAT="CHAT"` |
-| `ai/bean/Message.java` | 27 | 消息实体（t_message），常量 ROLE_USER/ROLE_ASSISTANT |
+| `ai/bean/ChatMessage.java` | 71 | 消息实体（t_message），常量 ROLE_USER/ROLE_ASSISTANT |
 | `ai/controller/ChatRestController.java` | 62 | `/api/v1/chat`：conversations CRUD + chat + **stream（SSE）**；内嵌 `ChatTitleRequest` record |
 | `ai/dto/ChatRequest.java` | 17 | 问答入参（message 必填，conversationId 可空） |
 | `ai/dto/ConversationVO.java` | 17 | 会话视图 |
@@ -270,7 +270,7 @@
 **Conversation（t_conversation）**：`id`、`userId`、`bizType`、`title`、`createdAt`
 （⚠️ 常量 `BIZ_CHAT="CHAT"`）
 
-**Message（t_message）**：`id`、`conversationId`、`role`、`content`、`extraJson`、`createdAt`
+**ChatMessage（t_message）**：`id`、`conversationId`、`role`、`content`、`extraJson`、`createdAt`
 （⚠️ 常量 `ROLE_USER="user"` / `ROLE_ASSISTANT="assistant"`）
 
 ### 5.2 Request（入参 DTO，全 `@Data` + jakarta validation）

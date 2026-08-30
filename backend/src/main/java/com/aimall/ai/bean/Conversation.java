@@ -9,9 +9,9 @@ import java.time.LocalDateTime;
  *
  * <h2>它是什么？</h2>
  * 一个用户和 AI 的一次连续对话 = 一个会话。类比微信：会话就是一个"聊天框"，
- * 会话里的每条发言就是 Message（t_message）。前端左侧的会话列表，展示的就是本表记录。
+ * 会话里的每条发言就是 ChatMessage（t_message）。前端左侧的会话列表，展示的就是本表记录。
  *
- * <h2>和 Message 的关系（一对多）</h2>
+ * <h2>和 ChatMessage 的关系（一对多）</h2>
  * <pre>
  *   t_conversation (1) ──── (N) t_message
  *   聊天框                      聊天框里的每条气泡

@@ -432,8 +432,8 @@
 | 常量 | 值 | 含义 |
 |---|---|---|
 | `Conversation.BIZ_CHAT` | `CHAT` | 通用会话类型（表默认值） |
-| `Message.ROLE_USER` | `user` | 用户消息 |
-| `Message.ROLE_ASSISTANT` | `assistant` | 助手消息 |
+| `ChatMessage.ROLE_USER` | `user` | 用户消息 |
+| `ChatMessage.ROLE_ASSISTANT` | `assistant` | 助手消息 |
 | 会话标题 | 问题前 20 字 | conversationId 为空自动建会话时取 |
 | SSE 失败兜底文案 | `\n\n[AI 服务暂时不可用，请稍后再试]` | 流出错时发给前端，防止 SSE 裸断 |
 
