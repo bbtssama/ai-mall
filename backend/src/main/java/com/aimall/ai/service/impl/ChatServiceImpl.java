@@ -62,8 +62,10 @@ public class ChatServiceImpl implements ChatService {
 
     /**
      * 视觉识别模型（opencode 中转提供）。
-     * 与 yml 默认的文本模型 deepseek-v4-pro 不同——看图必须用支持多模态的模型，
-     * 调用时通过 .options(OpenAiChatOptions...model(本常量)) 按次覆盖（第 5.5 节）。
+     * 注意：当前 yml 默认 model 与它同为 deepseek-v4-flash-vision-exp，
+     * 所以视觉链路的 .options().model(本常量) 是无效覆盖——两条链路实际用同一个模型，
+     * 视觉链路的真实差异只有 temperature(0.5)（识别要稳）。
+     * 若将来要让两条链路用不同模型，改 yml 默认 model 并删掉这里的按次覆盖即可。
      */
     private static final String VISION_MODEL = "deepseek-v4-flash-vision-exp";
 
@@ -125,7 +127,8 @@ public class ChatServiceImpl implements ChatService {
             if (req.hasImage()) {
                 // 视觉链路：识别图片中的商品（多模态 UserMessage 走 messages()）
                 // 注意用的是"空手"的 visionChatClient（视觉模型不挂工具，教程案例四）。
-                // .options() 按次覆盖模型与温度：识图任务要稳，温度给 0.5（低于文本链路 0.7）
+                // .options() 按次覆盖模型与温度：当前模型与 yml 默认相同（覆盖无效），
+                // 真正的差异是温度给 0.5（低于文本链路 0.7，识图要稳）
                 answer = visionChatClient.prompt()
                         .system(visionSystemPrompt())
                         .messages(toAiHistory(conv.getId()))        // 历史上下文（模型无记忆，每次都要带）
@@ -150,7 +153,9 @@ public class ChatServiceImpl implements ChatService {
             log.error("AI 问答失败: {}", e.getMessage(), e);
             throw new BusinessException(ResultCode.AI_SERVICE_ERROR, "AI 服务暂时不可用");
         }
-        // ③ 问答成功后两条消息一起落库：用户消息（含图片 base64）供历史回显，AI 回答供下一轮当上下文
+        // ③ 问答成功后两条消息一起落库。
+        //    注意：两种消息的"文字"都同时用于回显和下一轮上下文，区别只在图片——
+        //    用户消息的 base64 图片仅供前端回显，不重复喂给模型（见 toAiHistory 的说明）。
         saveMessage(conv.getId(), ChatMessage.ROLE_USER, req.getMessage(), req.getImage());
         saveMessage(conv.getId(), ChatMessage.ROLE_ASSISTANT, answer, null);
         // 首条消息后自动命名会话（标题仍为默认值时）
@@ -264,6 +269,12 @@ public class ChatServiceImpl implements ChatService {
      * DB 的 t_message（role 刻意与 OpenAI 协议一致）→ user 发言转 UserMessage、
      * AI 发言转 AssistantMessage → 拼成 messages 数组随每次请求发给模型。
      * SQL 已按 created_at ASC, id ASC 排序（旧→新），对话剧本顺序才正确。</p>
+     *
+     * <p><b>这里刻意不带历史图片</b>：只取 content 文字，不把 extra_json 的 base64
+     * 还原成 Media。历史图片仅供前端回显，不重复喂给模型——图片按尺寸计 token，
+     * 每轮都带上几张的话成本会指数级上涨。
+     * 代价：用户追问"图里这件还有别的颜色吗"时，模型已经看不到那张图，
+     * 只能依据当时生成的文字回答来推断。</p>
      *
      * <p><b>怎么区分两个"消息"类</b>：实体已由 Message 改名为 ChatMessage，
      * 不再与 Spring AI 的 Message 接口重名，因此这里可以直接按名字分辨——
