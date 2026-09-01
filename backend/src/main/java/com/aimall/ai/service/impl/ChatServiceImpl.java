@@ -113,8 +113,10 @@ public class ChatServiceImpl implements ChatService {
     }
 
     /**
-     * 非流式问答（带图必走这里）。①校验 → ②定会话 → 分流调模型 → 落库 → 自动命名。
+     * 非流式问答（一次返回完整回答）。①校验 → ②定会话 → 分流调模型 → 落库 → 自动命名。
      * 每一步的"为什么"见方法内注释；与 stream() 共享全部私有方法。
+     * 注：前端现在带图/纯文字都走流式 stream()；/chat 保留作为"一次要全量结果"的
+     * 备选（如测试、非流式调用方），与 stream() 共用同一套分流逻辑。
      */
     @Override
     public String chat(ChatRequest req) {
@@ -164,9 +166,13 @@ public class ChatServiceImpl implements ChatService {
     }
 
     /**
-     * 流式问答（打字机效果，纯文字走这里）。
+     * 流式问答（打字机效果，带图与纯文字都走这里）。
      * 与 chat() 同一套校验/会话逻辑，差别只在：.call() 换成 .stream()，落库从"事后一起存"
      * 变成"两头存"——订阅时存 user，流结束攒齐再存 assistant（断流不会存半截话）。
+     *
+     * <p>带图与纯文字都支持流式（DeepSeek 官方视觉模型实测流式+多模态稳定）。
+     * 按 req.hasImage() 分流到不同 ChatClient：带图用"空手"的 visionChatClient +
+     * 多模态 UserMessage + 低温度（识图要稳），纯文字用挂工具的 chatClient。</p>
      */
     @Override
     public Flux<String> stream(ChatRequest req) {
@@ -176,16 +182,29 @@ public class ChatServiceImpl implements ChatService {
         Conversation conv = resolveConversation(req);
         // 累积 AI 回答的完整文本：流式逐段吐字，落库必须等流结束后攒齐再存
         StringBuilder sb = new StringBuilder();
+
         if (req.hasImage()) {
-            // 带图暂不支持流式：退化到非流式返回（前端对图片走 chat 而非 stream）
-            // defer：把 chat(req) 推迟到"真正被订阅"那一刻才执行
-            // （不包 defer 的话，组装返回值的瞬间就会同步阻塞跑完整个问答）
-            // onErrorResume：HTTP 响应已按 200/event-stream 开始，错误只能以流内容表达
-            return Flux.defer(() -> Flux.just(chat(req))).onErrorResume(e -> {
-                log.error("AI 图片问答失败: {}", e.getMessage(), e);
-                return Flux.just("[AI 服务暂时不可用]");
-            });
+            // 视觉链路流式：多模态消息走 messages()，温度 0.5（识别要稳）
+            return visionChatClient.prompt()
+                    .system(visionSystemPrompt())
+                    .messages(toAiHistory(conv.getId()))
+                    .messages(List.of(buildUserMessage(req)))
+                    .options(OpenAiChatOptions.builder().model(VISION_MODEL).temperature(0.5).build())
+                    .stream()
+                    .content()
+                    .doOnSubscribe(s -> {
+                        saveMessage(conv.getId(), ChatMessage.ROLE_USER, req.getMessage(), req.getImage());
+                        autoRenameIfDefault(conv, req);
+                    })
+                    .doOnNext(sb::append)
+                    .doOnComplete(() -> saveMessage(conv.getId(), ChatMessage.ROLE_ASSISTANT, sb.toString(), null))
+                    .onErrorResume(e -> {
+                        log.error("AI 图片流式问答失败: {}", e.getMessage(), e);
+                        return Flux.just("\n\n[AI 服务暂时不可用，请稍后再试]");
+                    });
         }
+
+        // 纯文字链路：引导调用 searchProduct 工具按需检索
         return chatClient.prompt()
                 .system(textSystemPrompt())
                 .messages(toAiHistory(conv.getId()))

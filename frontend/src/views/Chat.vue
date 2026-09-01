@@ -105,32 +105,15 @@ async function send() {
   previewImg.value = ''
   scrollBottom()
 
-  if (image) {
-    // 带图 → 非流式（后端 vision 链路）
-    streaming.value = true
-    messages.value.push({ role: 'assistant', content: '' })
-    try {
-      const answer = await chatApi.send({ conversationId: currentId.value, message: text, image })
-      messages.value[messages.value.length - 1].content = answer
-      await loadConversations()
-    } catch (e) {
-      messages.value[messages.value.length - 1].content = 'AI 服务暂时不可用'
-      ElMessage.error('识别失败')
-    } finally {
-      streaming.value = false
-      scrollBottom()
-    }
-    return
-  }
-
-  // 纯文字 → 流式（后端走搜索工具；标题由后端首条消息自动命名）
+  // 带图与纯文字统一走流式（后端 stream() 已支持视觉+多模态流式；
+  // 标题由后端首条消息自动命名）。send() 保留但前端不再走它。
   streaming.value = true
   streamText.value = ''
   messages.value.push({ role: 'assistant', content: '' }) // 占位
   let acc = ''
   try {
     await chatApi.sendStream(
-      { conversationId: currentId.value, message: text },
+      { conversationId: currentId.value, message: text, image },
       (chunk) => {
         acc += chunk
         streamText.value = acc

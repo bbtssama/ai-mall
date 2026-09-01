@@ -18,7 +18,7 @@ import java.util.List;
  * <h2>5 个方法 = 聊天助手的 5 项能力</h2>
  * <pre>
  *   会话管理：createConversation / listConversations / listMessages
- *   问答执行：chat（非流式，有图必走这条） / stream（流式，纯文字走这条）
+ *   问答执行：chat（非流式，一次给全结果） / stream（流式，打字机效果，带图与纯文字都走这条）
  * </pre>
  * 前端 chatApi 与之一一对应（frontend/src/api/index.js）。
  *
@@ -61,8 +61,8 @@ public interface ChatService {
 
     /**
      * SSE 流式问答，逐字返回（打字机效果）。
-     * 带图请求在此降级为非流式（视觉模型流式不稳，教程第 5 章）；
-     * 纯文字走 chatClient.stream().content()，四个 Reactor 钩子负责落库与兜底（教程第 6 章）。
+     * 带图与纯文字都走流式：按 hasImage() 分流到不同 ChatClient（带图走视觉链路、
+     * 纯文字走文本链路+搜索工具），各自 .stream().content()，四个 Reactor 钩子负责落库与兜底（教程第 6 章）。
      *
      * @return Flux<String> —— "会陆续到达的字符串片段"，Controller 以 text/event-stream 下发
      */

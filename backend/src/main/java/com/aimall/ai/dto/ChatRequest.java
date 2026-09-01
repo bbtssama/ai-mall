@@ -18,7 +18,7 @@ import lombok.Data;
  *   conversationId != null
  *      → 校验归属后复用该会话
  * </pre>
- * 前端约定与此对应：有图走非流式 /chat，无图走流式 /stream（教程第 5、6 章）。
+ * 前端约定：带图与纯文字统一走流式 /stream（教程第 6 章）；/chat 保留为"一次给全结果"的备选。
  *
  * <h2>为什么 message 上没有 @NotBlank？</h2>
  * 纯图片识别（有 image、无文字）是合法请求——校验规则是"message 和 image 二选一"的

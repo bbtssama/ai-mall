@@ -26,8 +26,8 @@ import java.util.List;
  *   POST   /api/v1/chat/conversations            → chatApi.createConversation  点"新会话"
  *   GET    /api/v1/chat/conversations            → chatApi.conversations       左侧会话栏
  *   GET    /api/v1/chat/conversations/{id}/messages → chatApi.messages         切会话回显
- *   POST   /api/v1/chat                          → chatApi.send               有图时发送（非流式）
- *   POST   /api/v1/chat/stream                   → chatApi.sendStream         无图时发送（SSE 流式）
+ *   POST   /api/v1/chat                          → chatApi.send               一次给全结果（前端保留但不主用）
+ *   POST   /api/v1/chat/stream                   → chatApi.sendStream         带图与纯文字统一走（SSE 流式）
  * </pre>
  *
  * <h2>0 基础须知</h2>
@@ -76,9 +76,10 @@ public class ChatRestController {
     /**
      * 普通问答（非流式，返回完整回答）。
      *
-     * <p>前端约定：<b>带图必走这里</b>（视觉链路流式不稳，降级非流式，教程第 5 章），
-     * 无图走下面的 /stream。@Valid 触发 Bean Validation，但 message 的
-     * "与 image 二选一"校验是跨字段规则，在 Service.validate() 里做。</p>
+     * <p>前端约定：带图与纯文字都走 /stream（流式）；本接口保留作为"一次要全量结果"的
+     * 备选（测试、非流式调用方），与 stream() 共用同一套分流逻辑。
+     * @Valid 触发 Bean Validation，但 message 的"与 image 二选一"校验是跨字段规则，
+     * 在 Service.validate() 里做。</p>
      */
     @PostMapping
     public R<String> chat(@RequestBody @Valid ChatRequest req) {
