@@ -61,7 +61,7 @@ public class AiConfig {
      * 文本链路占用，视觉链路的差异参数（目前主要是温度）按次覆盖最清晰。</p>
      */
     @Bean
-    public ChatClient visionChatClient(ChatClient.Builder builder) {
-        return builder.build();
+    public ChatClient visionChatClient(ChatClient.Builder builder, ProductSearchTool searchTool) {
+        return builder.defaultTools(searchTool).build();
     }
 }
