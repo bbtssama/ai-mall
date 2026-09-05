@@ -39,6 +39,27 @@ mybatis:
     map-underscore-to-camel-case: true
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
 
+# 语音引擎（com.aimall.voice）
+# 运行时说明：主路径需要派蒙音色（派蒙 6k VITS）——须先启动 PaimonLiveWeb5 的 VITS 侧车
+#   (scripts/vits_server.py，默认 http://127.0.0.1:9944) 或其派蒙后端(:18781)，否则 TTS 会
+#   回退到本地 Edge-TTS（非派蒙音色，仅兜底）。如需关闭回退只需把派蒙后端指到不可达地址。
+aimall:
+  voice:
+    tts:
+      # 派蒙音色主路径：复用 PaimonLiveWeb5 后端 /api/tts（:18781，内部 mode=vits 走派蒙6k VITS
+      #   + Edge-TTS 回退，返回 audio/mpeg）。也可指向 ../vits_server.py 的 /tts（但返回 wav，需自行转 mp3）。
+      backend-url: http://127.0.0.1:18781/api/tts
+      # 派蒙后端连接/读取超时（ms）
+      backend-connect-timeout-ms: 3000
+      backend-read-timeout-ms: 60000
+      # 兜底音色（本地 Edge-TTS，仅当派蒙后端不可用时才用）：默认 zh-CN-XiaoyiNeural 活泼女声
+      voice: zh-CN-XiaoyiNeural
+      # 兜底 Edge-TTS 同时合成上限：edge/微软接口并发会整批失败，默认串行（1），可放宽到 2
+      max-concurrency: 1
+      # 兜底 Edge-TTS 单次失败的重试次数（不含首试），退避 retry-backoff-ms × 尝试轮次
+      retry-attempts: 2
+      retry-backoff-ms: 500
+
 sa-token:
   # token 名称（前端请求头），默认 Authorization；Sa-Token 会兼容 "Bearer " 前缀
   token-name: Authorization

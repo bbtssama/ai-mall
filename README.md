@@ -10,6 +10,7 @@
 | 后端 | Spring Boot 3.4.5 · Java 17 · MyBatis（XML 手写 SQL）· Sa-Token（无状态 Token） |
 | 数据 | MySQL 8（192.168.6.102:3306 / ai_mall） |
 | AI | Spring AI 1.0 + OpenCode Go 中转（OpenAI 兼容，模型 `deepseek-v4-pro`，可切换官方 DeepSeek） |
+| 语音/动效（可选） | `com.aimall.voice`（纯派蒙 TTS 引擎）+ 前端 `src/voice/`（Live2D 皮套 + TTS 播放队列） |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + axios（SSE 流式对话） |
 
 ## 目录结构
@@ -23,8 +24,10 @@ ai-mall/
 │       ├── user/             # 注册/登录/当前用户
 │       ├── goods/            # 商品列表/详情/SKU / 购物车（V1 MySQL 版）
 │       ├── order/            # 下单（乐观扣库存+事务）/ 订单列表/详情/取消
-│       └── ai/               # 会话管理 / AI 问答（预置商品知识 + SSE 流式）
+│       ├── ai/               # 会话管理 / AI 问答（Agent 商品搜索工具 + 图片识别 + SSE 流式）
+│       └── voice/            # 独立派蒙 TTS 引擎（可选，POST /api/v1/voice/tts）
 ├── frontend/                 # Vue3 + Vite 前端
+│   └── src/voice/            # Live2D 皮套组件 + TTS 播放队列（可选）
 ├── sql/init.sql              # 建库建表 + 种子商品
 └── scripts/                  # smoke-test.ps1 冒烟测试
 ```
@@ -35,7 +38,7 @@ ai-mall/
 # 1. 初始化数据库（192.168.6.102，root/root123，可改）
 mysql -h192.168.6.102 -uroot -proot123 < sql/init.sql
 
-# 2. 启动后端（8080）
+# 2. 启动后端（8080；API Key 从环境变量读取，无默认值）
 cd backend && mvn spring-boot:run
 
 # 3. 启动前端（5173，/api 代理到 8080）
@@ -43,6 +46,38 @@ cd frontend && npm install && npm run dev
 ```
 
 打开 http://localhost:5173 ，注册/登录后体验完整闭环。
+
+## 派蒙语音动效助手（可选，依赖受限第三方资产）
+
+V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端逐句请求 TTS 并播放派蒙音色，同时派蒙 Live2D 皮套做口型/表情/动作。
+
+> ⚠️ **合规红线（务必先读）**
+> - 派蒙 Live2D 皮套模型、游戏语音、派蒙 6k VITS 音色模型，均为**第三方 / 他人（miHoYo IP + 社区 Paimon6k 音色）的受限资产**，许可含限制项：**仅限个人 / 学习 / 演示，禁止再分发、公开、商用**。
+> - **公开仓库不含这些资产**：`.gitignore` 已忽略 `frontend/public/assets/`（皮套模型）与 `frontend/public/vendor/`（Live2D 核心库），克隆后不会带入。
+> - 若未来要**公开或商用**，请先经"人设层"（`frontend/src/voice/voiceStage.vue` 可配置的 `modelUrl` / 表情表 / 动作组 / 音色）替换为**自主授权或自有**角色 / 音色。
+
+**无资产也能正常运行（默认）**
+- 克隆后若不提供皮套：前端**自动降级** —— 不显示派蒙舞台（或显示轻量"皮套未安装"提示），**聊天、图片、工具检索、会话全部正常**，页面不白屏。
+- 若派蒙 VITS 服务未启动：后端 **TTS 自动回退**到本地纯 Java Edge-TTS（仍能出声，只是非派蒙音色），聊天不受影响。
+
+**启用派蒙声音 + 动效（需自行获取上述受限资产）**
+
+1. **皮套资产**：把派蒙 Live2D 模型放入 `frontend/public/assets/model/`（含 `*.model3.json / *.moc3 / *.physics3.json / expressions/ / motions/ / 贴图`），并把 `live2dcubismcore.min.js` 放入 `frontend/public/vendor/`。（来源：`PaimonLiveWeb5` 项目，或自行获取授权/自有模型。）
+2. **派蒙音色**：启动派蒙 VITS 服务（二选一）
+   ```bash
+   # 方式 A：本地派蒙 6k VITS（需 PyTorch + 派蒙音色模型）
+   python scripts/vits_server.py            # 监听 :9944
+   # 方式 B：派蒙后端（其 /api/tts 为 mode=vits，含 Edge-TTS 回退）
+   # 启动 PaimonLiveWeb5 后端（:18781，/api/health 显示 tts=vits-paimon6k）
+   ```
+   在 `backend/src/main/resources/application.yml` 配置（默认已指向派蒙后端）：
+   ```yaml
+   aimall:
+     voice:
+       tts:
+         backend-url: http://127.0.0.1:18781/api/tts   # 派蒙 VITS 音色（黑盒）
+   ```
+3. 前后端照常启动（见"快速启动"），聊天即自动带派蒙语音 + 动效。
 
 ## V1 验收清单（已全部通过）
 
@@ -53,8 +88,9 @@ cd frontend && npm install && npm run dev
 | 加购物车 → 购物车列表/改数量/删除 | ✅ |
 | 下单（乐观扣库存 `stock>=?` + @Transactional + 订单快照） | ✅ |
 | 订单列表 / 详情 / 取消（回补库存） | ✅ |
-| AI 问答：预置商品知识注入 + SSE 流式输出 | ✅（deepseek-v4-pro） |
+| AI 问答：Agent 商品搜索工具（Function Calling）+ 图片识别 + SSE 流式输出 | ✅（deepseek-v4-pro / vision） |
 | 全链路冒烟测试 `scripts/smoke-test.ps1` 9/9 | ✅ |
+| 派蒙语音动效助手（皮套/音色资产就位时） | ✅ |
 
 ## 面试可讲点（V1）
 
@@ -64,6 +100,9 @@ cd frontend && npm install && npm run dev
 - 下单防超卖：`UPDATE sku SET stock=stock-? WHERE id=? AND stock>=?`（CAS 式乐观扣减）
 - Sa-Token 无状态 Token + 拦截器白名单
 - Spring AI 流式响应（SSE text/event-stream，前端 fetch 逐块渲染）
+- **Agent Function Calling**：AI 不确定商品时按需调 `searchProduct` 工具（复用业务 Service，与前端搜索同源），不编造
+- **多模态图片识别**：canvas 压缩 → base64 → `UserMessage.builder().media()` → 视觉模型
+- **TTS + Live2D 动效（派蒙可选）**：前端按句切分 → 逐句 `/api/v1/voice/tts` → 顺序播放 + Live2D 口型/表情/动作；模块独立（`com.aimall.voice` + `src/voice/`），低耦合、可插拔
 
 ## 演进预告
 
@@ -72,4 +111,4 @@ cd frontend && npm install && npm run dev
 - **V4**：按域拆微服务（user/content/goods/order/ai）+ Nacos/Gateway/Feign + 分布式事务
 - **V5**：Agent 客服（Function Calling）、推荐系统、NL2SQL 数据分析
 
-> ⚠️ `application.yml` 内含 AI 中转 Key（OpenCode Go 订阅），仅本地开发使用；推送到公开仓库前务必改为环境变量注入。
+> ⚠️ `application.yml` 的 AI 中转 Key 已改为**环境变量注入**（`${DEEPSEEK_API_KEY:}`，无默认值）；本地运行请先设置该环境变量，勿把真实 Key 提交入库。

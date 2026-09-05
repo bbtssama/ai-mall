@@ -32,3 +32,11 @@ logs/
 backend/src/main/resources/application-local.yml
 .env
 .env.*
+# ===== 派蒙 Live2D 皮套 / 语音等受限第三方资产（仅本地演示，禁止提交/再分发/商用/公开）=====
+frontend/public/assets/
+frontend/public/vendor/
+
+# ===== 本地测试截图 / 临时文件 =====
+stage-*.png
+t15-r5-centered*.png
+*.db

@@ -7,6 +7,16 @@
 </head>
 <body>
   <div id="app"></div>
+
+  <!--
+    【渲染栈】pixi.js@7 + pixi-live2d-display@0.5.0-beta（ESM，构建期打包，无 CDN）。
+    此处仅保留 Cubism Core 运行时全局（window.Live2DCubismCore），须最先加载（在 /src/main.js 之前）。
+    公开仓库不含该受限资产时脚本 404：onerror 仅记录警告（不影响其它模块），Live2D 侧由 voiceStage.vue
+    动态 import 并优雅降级，聊天/图片/工具检索/会话照常。
+  -->
+  <script src="/vendor/live2dcubismcore.min.js"
+          onerror="console.warn('Live2D Cubism Core 未加载（资产未提供）：皮套降级为纯文字聊天');"></script>
+
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

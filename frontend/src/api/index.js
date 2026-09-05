@@ -81,3 +81,22 @@ export const chatApi = {
     onDone?.()
   }
 }
+
+// ---------- 语音动效（单一 TTS：前端按句切分后逐句合成派蒙语音） ----------
+// 仅保留 POST /api/v1/voice/tts；SSE 句子契约(session/sentence)与语音会话(list/messages)已随"单一 AI 页"简化移除。
+export const voiceApi = {
+  /** POST /api/v1/voice/tts {text} → 可播放的 objectURL（失败抛错由调用方捕获降级） */
+  voiceTts: async (text) => {
+    const resp = await fetch('/api/v1/voice/tts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json;charset=utf-8',
+        Authorization: localStorage.getItem('token') || ''
+      },
+      body: JSON.stringify({ text })
+    })
+    if (!resp.ok) throw new Error(`TTS HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    return URL.createObjectURL(blob)
+  }
+}
