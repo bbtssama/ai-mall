@@ -9,19 +9,19 @@ import org.springframework.context.annotation.Configuration;
 /**
  * Spring AI 配置 —— AI 模块的"装配车间"：把大模型客户端装配成两个用途明确的 Bean。
  *
- * <h2>为什么是两个 ChatClient？（本项目真实踩坑后拆的，教程案例四）</h2>
+ * <h2>为什么是两个 ChatClient？</h2>
  * <pre>
  *   chatClient          文本链路（模型来自 yml 默认，即 deepseek-v4-flash-vision-exp）
  *                       带装备：defaultTools(searchProduct)
  *                       → AI 能"查商品库"再回答，不编造
  *
- *   visionChatClient    视觉链路（与文本链路同一模型，仅温度按次覆盖为 0.5）
- *                       空手：不带任何工具
- *                       → 识图专用；挂工具会让该模型胡言乱语（案例四）
+ *   visionChatClient    视觉链路（同一模型）
+ *                       也带 searchProduct 工具：视觉模型同样支持 function calling，
+ *                       识别商品后可按用户追问进一步调工具查库（"视觉模型支持调用tool"提交）
  * </pre>
- * ChatServiceImpl 按 req.hasImage() 分流注入，互不污染。
- * 注意：当前两条链路用的是同一个模型（yml 默认 model 即 vision 模型），
- * 视觉链路的差异只有"不带工具 + 更低温度"；工具和温度诉求不同，分开装最清晰。
+ * ChatServiceImpl 按 req.hasImage() 分流注入，两链路当前唯一真实的差异是
+ * 视觉链路按次覆盖 temperature=0.5（识图要稳，见 ChatServiceImpl 的 .options()）。
+ * 若将来需要让两条链路挂不同的工具集 / 模型，直接改这里各自 defaultTools / 按次覆盖即可。
  *
  * <h2>Builder 从哪来？（0 基础常见疑问）</h2>
  * spring-ai-starter-model-openai 的自动装配根据 application.yml 的
@@ -53,12 +53,11 @@ public class AiConfig {
     }
 
     /**
-     * 视觉链路客户端：刻意"空手"，不带任何工具。
+     * 视觉链路客户端：与文本链路一样挂载 searchProduct 工具。
      *
-     * <p>识图调用时用 .options(OpenAiChatOptions.builder().model(VISION_MODEL).temperature(0.5))
-     * 按次覆盖。注意：当前 model 与 yml 默认相同，覆盖实际无效——真正生效的是 temperature(0.5)
-     * （识别要稳，教程第 2 章）。温度/模型为什么不在 yml 里配死：同一个 yml 默认配置已被
-     * 文本链路占用，视觉链路的差异参数（目前主要是温度）按次覆盖最清晰。</p>
+     * <p>视觉模型自身的 function calling 支持良好，识别商品后可继续调工具查库。
+     * 识图调用时 ChatServiceImpl 用 .options(...) 按次覆盖 temperature=0.5 让识别更稳；
+     * 当前 model 与 yml 默认相同，温度才是与文本链路的真实差异。</p>
      */
     @Bean
     public ChatClient visionChatClient(ChatClient.Builder builder, ProductSearchTool searchTool) {

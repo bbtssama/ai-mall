@@ -73,7 +73,7 @@ public class ChatServiceImpl implements ChatService {
     private final MessageMapper messageMapper;
     /** 文本链路：已全局注册 searchProduct 工具（见 AiConfig） */
     private final ChatClient chatClient;
-    /** 视觉链路：不带工具，避免视觉模型收到 function calling */
+    /** 视觉链路：也带 searchProduct 工具（视觉模型支持 function calling，见 AiConfig） */
     private final ChatClient visionChatClient;
 
     /**
@@ -128,7 +128,7 @@ public class ChatServiceImpl implements ChatService {
         try {
             if (req.hasImage()) {
                 // 视觉链路：识别图片中的商品（多模态 UserMessage 走 messages()）
-                // 注意用的是"空手"的 visionChatClient（视觉模型不挂工具，教程案例四）。
+                // visionChatClient 也挂载了 searchProduct 工具，视觉模型同样支持 function calling。
                 // .options() 按次覆盖模型与温度：当前模型与 yml 默认相同（覆盖无效），
                 // 真正的差异是温度给 0.5（低于文本链路 0.7，识图要稳）
                 answer = visionChatClient.prompt()
@@ -171,8 +171,8 @@ public class ChatServiceImpl implements ChatService {
      * 变成"两头存"——订阅时存 user，流结束攒齐再存 assistant（断流不会存半截话）。
      *
      * <p>带图与纯文字都支持流式（DeepSeek 官方视觉模型实测流式+多模态稳定）。
-     * 按 req.hasImage() 分流到不同 ChatClient：带图用"空手"的 visionChatClient +
-     * 多模态 UserMessage + 低温度（识图要稳），纯文字用挂工具的 chatClient。</p>
+     * 按 req.hasImage() 分流到不同 ChatClient：带图走有工具的 visionChatClient +
+     * 多模态 UserMessage + 低温度（识图要稳），纯文字用 chatClient。</p>
      */
     @Override
     public Flux<String> stream(ChatRequest req) {

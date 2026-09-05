@@ -14,13 +14,10 @@
       <!-- 消息区 -->
       <div class="msg-area" ref="msgArea">
         <div v-for="(m, i) in messages" :key="i" class="msg-row" :class="m.role">
-          <div class="bubble">
+          <div class="bubble" :class="{ streaming: streaming }">
             <img v-if="m.image" :src="m.image" class="msg-img" alt="用户图片" />
-            <div v-if="m.content">{{ m.content }}</div>
+            <div v-if="m.content">{{ m.content }}<span v-if="streaming && i === messages.length - 1" class="cursor">▍</span></div>
           </div>
-        </div>
-        <div v-if="streaming" class="msg-row assistant">
-          <div class="bubble streaming">{{ streamText }}<span class="cursor">▍</span></div>
         </div>
         <div v-if="!messages.length && !streaming" class="empty-tip">
           <p>我是 AI 种草助手，可以帮你：</p>
@@ -44,6 +41,10 @@
                     @keyup.enter.exact.prevent="send" @paste="onPaste" :disabled="streaming" />
         </div>
         <div class="input-actions">
+          <div class="toggle-row">
+            <el-switch v-model="streamingEnabled" size="small" title="关闭后一次性返回完整回答" />
+            <span class="toggle-label">流式输出</span>
+          </div>
           <el-upload :show-file-list="false" accept="image/*" :auto-upload="false" @change="onPickImage">
             <el-button :icon="Picture">图片</el-button>
           </el-upload>
@@ -67,7 +68,7 @@ const currentId = ref(null)
 const messages = ref([])
 const input = ref('')
 const streaming = ref(false)
-const streamText = ref('')
+const streamingEnabled = ref(true)   // 流式开关（默认开）；关则走 /chat 一次性返回
 const msgArea = ref(null)
 const previewImg = ref('')   // dataURL 预览 + 发送
 
@@ -105,32 +106,41 @@ async function send() {
   previewImg.value = ''
   scrollBottom()
 
-  // 带图与纯文字统一走流式（后端 stream() 已支持视觉+多模态流式；
-  // 标题由后端首条消息自动命名）。send() 保留但前端不再走它。
+  // 占位助手消息：流式逐字填充 / 非流式一次填满（统一渲染源，避免双框）
+  messages.value.push({ role: 'assistant', content: '' })
+  const last = messages.value[messages.value.length - 1]
   streaming.value = true
-  streamText.value = ''
-  messages.value.push({ role: 'assistant', content: '' }) // 占位
-  let acc = ''
+  const payload = { conversationId: currentId.value, message: text, image }
   try {
-    await chatApi.sendStream(
-      { conversationId: currentId.value, message: text, image },
-      (chunk) => {
-        acc += chunk
-        streamText.value = acc
-        messages.value[messages.value.length - 1].content = acc
-        scrollBottom()
-      },
-      async () => {
-        streaming.value = false
-        await loadConversations()
-      },
-      (err) => {
-        streaming.value = false
-        ElMessage.error('AI 服务暂时不可用')
-      }
-    )
+    if (streamingEnabled.value) {
+      // 流式通道：SSE 逐块更新最后一条占位消息
+      let acc = ''
+      await chatApi.sendStream(
+        payload,
+        (chunk) => {
+          acc += chunk
+          last.content = acc
+          scrollBottom()
+        },
+        async () => {
+          streaming.value = false
+          await loadConversations()
+        },
+        () => {
+          streaming.value = false
+          ElMessage.error('AI 服务暂时不可用')
+        }
+      )
+    } else {
+      // 非流式通道：/chat 一次性返回完整回答
+      const answer = await chatApi.send(payload)
+      last.content = answer || ''
+      streaming.value = false
+      await loadConversations()
+    }
   } catch (e) {
     streaming.value = false
+    if (last.content === '') messages.value.pop()  // 失败且无内容，移除空占位
     ElMessage.error('网络异常')
   }
 }
@@ -246,5 +256,7 @@ onMounted(async () => {
   text-align: center; background: rgba(0,0,0,.55); color: #fff; border-radius: 50%;
   cursor: pointer; font-size: 13px;
 }
-.input-actions { display: flex; flex-direction: column; gap: 8px; }
+.input-actions { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.toggle-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.toggle-label { font-size: 12px; color: #999; }
 </style>
