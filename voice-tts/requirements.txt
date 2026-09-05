@@ -1,0 +1,9 @@
+# ai-mall voice-tts 依赖（内嵌派蒙 6k VITS 侧车）
+# 安装：pip install -r voice-tts/requirements.txt
+# 运行由 ai-mall 后端启动时自动拉起（见 VitsLifecycle），也可手动：python voice-tts/vits_server.py --port 9944
+torch>=2.0          # CUDA/CPU 均可
+fastapi>=0.100      # /tts + /health HTTP 服务
+uvicorn>=0.23       # ASGI server
+soundfile>=0.12     # wav 读写
+pydantic>=2.0       # 请求体校验
+numpy>=1.24         # 音频数组

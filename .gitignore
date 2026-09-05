@@ -36,6 +36,12 @@ backend/src/main/resources/application-local.yml
 frontend/public/assets/
 frontend/public/vendor/
 
+# ===== 派蒙 6k VITS 模型 / MoeGoe 库（受限资产，仅本地，禁止提交；vits_server.py/requirements.txt 保留入库）=====
+voice-tts/paimon6k_390k.pth
+voice-tts/paimon6k.json
+voice-tts/MoeGoe/
+voice-tts/vits-server.log
+
 # ===== 本地测试截图 / 临时文件 =====
 stage-*.png
 t15-r5-centered*.png

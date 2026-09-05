@@ -53,30 +53,33 @@ V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端�
 
 > ⚠️ **合规红线（务必先读）**
 > - 派蒙 Live2D 皮套模型、游戏语音、派蒙 6k VITS 音色模型，均为**第三方 / 他人（miHoYo IP + 社区 Paimon6k 音色）的受限资产**，许可含限制项：**仅限个人 / 学习 / 演示，禁止再分发、公开、商用**。
-> - **公开仓库不含这些资产**：`.gitignore` 已忽略 `frontend/public/assets/`（皮套模型）与 `frontend/public/vendor/`（Live2D 核心库），克隆后不会带入。
+> - **公开仓库不含这些资产**：`.gitignore` 已忽略 `frontend/public/assets/`（皮套模型）、`frontend/public/vendor/`（Live2D 核心库）与 `voice-tts/paimon6k_*.pth`、`voice-tts/paimon6k.json`、`voice-tts/MoeGoe/`（派蒙 VITS 模型/库），克隆后不会带入。
 > - 若未来要**公开或商用**，请先经"人设层"（`frontend/src/voice/voiceStage.vue` 可配置的 `modelUrl` / 表情表 / 动作组 / 音色）替换为**自主授权或自有**角色 / 音色。
 
 **无资产也能正常运行（默认）**
 - 克隆后若不提供皮套：前端**自动降级** —— 不显示派蒙舞台（或显示轻量"皮套未安装"提示），**聊天、图片、工具检索、会话全部正常**，页面不白屏。
-- 若派蒙 VITS 服务未启动：后端 **TTS 自动回退**到本地纯 Java Edge-TTS（仍能出声，只是非派蒙音色），聊天不受影响。
+- 若机器**无 Python / 无内嵌派蒙模型 / 无依赖**：后端**照常启动**（不拉起 VITS），**TTS 自动回退**到本地纯 Java Edge-TTS（仍能出声，只是非派蒙音色），聊天不受影响。
 
 **启用派蒙声音 + 动效（需自行获取上述受限资产）**
 
 1. **皮套资产**：把派蒙 Live2D 模型放入 `frontend/public/assets/model/`（含 `*.model3.json / *.moc3 / *.physics3.json / expressions/ / motions/ / 贴图`），并把 `live2dcubismcore.min.js` 放入 `frontend/public/vendor/`。（来源：`PaimonLiveWeb5` 项目，或自行获取授权/自有模型。）
-2. **派蒙音色**：启动派蒙 VITS 服务（二选一）
-   ```bash
-   # 方式 A：本地派蒙 6k VITS（需 PyTorch + 派蒙音色模型）
-   python scripts/vits_server.py            # 监听 :9944
-   # 方式 B：派蒙后端（其 /api/tts 为 mode=vits，含 Edge-TTS 回退）
-   # 启动 PaimonLiveWeb5 后端（:18781，/api/health 显示 tts=vits-paimon6k）
-   ```
-   在 `backend/src/main/resources/application.yml` 配置（默认已指向派蒙后端）：
-   ```yaml
-   aimall:
-     voice:
-       tts:
-         backend-url: http://127.0.0.1:18781/api/tts   # 派蒙 VITS 音色（黑盒）
-   ```
+2. **派蒙音色**：后端已**自包含派蒙 VITS 服务**（`voice-tts/`），启动时会**自动拉起**，无需手动启动外部 PaimonLiveWeb5：
+   - 仓库内已含 `voice-tts/vits_server.py` + `voice-tts/requirements.txt`（入库）；**模型与 MoeGoe 库为本地受限资产、不入库**（见 `.gitignore`），需自行放到 `voice-tts/`：
+     - `voice-tts/paimon6k_390k.pth`（派蒙 6k VITS 模型，~429MB）
+     - `voice-tts/paimon6k.json`（模型配置）
+     - `voice-tts/MoeGoe/`（MoeGoe 推理库）
+   - **运行前提（Python 依赖不随 ai-mall 打包，需用户自装）**：本机需装 **Python 3.x**，并运行 `pip install -r voice-tts/requirements.txt`（torch/fastapi/uvicorn/soundfile 等，版本见该文件）；再把 `aimall.voice.tts.vits.python` 配成装好依赖的解释器命令（如 `G:\tts\env\python.exe`）。缺任一项（Python/依赖/模型）时后端**照常启动**、**TTS 自动回退 Edge-TTS**。
+   - 配置（`backend/src/main/resources/application.yml`）默认已指向本机内嵌 VITS：
+     ```yaml
+     aimall:
+       voice:
+         tts:
+           backend-url: http://127.0.0.1:9944/tts     # 本机内嵌 VITS（后端自动拉起）
+           vits:
+             port: 9944
+             python: python                            # 换成装好依赖的解释器命令（如 G:\tts\env\python.exe）
+     ```
+   - 后端启动时 `VitsLifecycle` 检测到 Python + 模型即自动 spawn `voice-tts/vits_server.py`，轮询 `/health` 就绪后把 TTS 指向本机 VITS；**无 Python/模型/依赖时自动跳过并回退 Edge-TTS**。
 3. 前后端照常启动（见"快速启动"），聊天即自动带派蒙语音 + 动效。
 
 ## V1 验收清单（已全部通过）
