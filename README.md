@@ -60,27 +60,25 @@ V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端�
 - 克隆后若不提供皮套：前端**自动降级** —— 不显示派蒙舞台（或显示轻量"皮套未安装"提示），**聊天、图片、工具检索、会话全部正常**，页面不白屏。
 - 若机器**无 Python / 无内嵌派蒙模型 / 无依赖**：后端**照常启动**（不拉起 VITS），**TTS 自动回退**到本地纯 Java Edge-TTS（仍能出声，只是非派蒙音色），聊天不受影响。
 
-**启用派蒙声音 + 动效（需自行获取上述受限资产）**
+**恢复派蒙资产（下载来源 + 步骤，可从 GitHub 拉取后补齐到完整）**
 
-1. **皮套资产**：把派蒙 Live2D 模型放入 `frontend/public/assets/model/`（含 `*.model3.json / *.moc3 / *.physics3.json / expressions/ / motions/ / 贴图`），并把 `live2dcubismcore.min.js` 放入 `frontend/public/vendor/`。（来源：`PaimonLiveWeb5` 项目，或自行获取授权/自有模型。）
-2. **派蒙音色**：后端已**自包含派蒙 VITS 服务**（`voice-tts/`），启动时会**自动拉起**，无需手动启动外部 PaimonLiveWeb5：
-   - 仓库内已含 `voice-tts/vits_server.py` + `voice-tts/requirements.txt`（入库）；**模型与 MoeGoe 库为本地受限资产、不入库**（见 `.gitignore`），需自行放到 `voice-tts/`：
-     - `voice-tts/paimon6k_390k.pth`（派蒙 6k VITS 模型，~429MB）
-     - `voice-tts/paimon6k.json`（模型配置）
-     - `voice-tts/MoeGoe/`（MoeGoe 推理库）
-   - **运行前提（Python 依赖不随 ai-mall 打包，需用户自装）**：本机需装 **Python 3.x**，并运行 `pip install -r voice-tts/requirements.txt`（torch/fastapi/uvicorn/soundfile 等，版本见该文件）；再把 `aimall.voice.tts.vits.python` 配成装好依赖的解释器命令（如 `G:\tts\env\python.exe`）。缺任一项（Python/依赖/模型）时后端**照常启动**、**TTS 自动回退 Edge-TTS**。
-   - 配置（`backend/src/main/resources/application.yml`）默认已指向本机内嵌 VITS：
-     ```yaml
-     aimall:
-       voice:
-         tts:
-           backend-url: http://127.0.0.1:9944/tts     # 本机内嵌 VITS（后端自动拉起）
-           vits:
-             port: 9944
-             python: python                            # 换成装好依赖的解释器命令（如 G:\tts\env\python.exe）
-     ```
-   - 后端启动时 `VitsLifecycle` 检测到 Python + 模型即自动 spawn `voice-tts/vits_server.py`，轮询 `/health` 就绪后把 TTS 指向本机 VITS；**无 Python/模型/依赖时自动跳过并回退 Edge-TTS**。
-3. 前后端照常启动（见"快速启动"），聊天即自动带派蒙语音 + 动效。
+1. **皮套 Live2D 模型**（社区同人，⚠️ **禁止再分发/公开/商用**，需自行获取）：
+   - 派蒙是 miHoYo 角色，**官方无开放 Live2D**；市面上均为**社区同人资源**，实例来源：
+     - B站「YAYA药团子」《派蒙live2d模型分享》`BV1eA4y1X7he`（百度网盘，vts / l2dviewer 可用）
+     - B站「根瘤菌rkzj」（社区分享）
+     - Steam 创意工坊 Live2DViewerEX「御神灯Goshinto」《【Genshin/原神】派蒙》item `2703407280`（需客户端订阅）
+     - 详细来源与许可：`PaimonLiveWeb5/docs/live2d-model-notes.md`
+   - ⚠️ 原分享页限定**个人使用、禁止再分发/公开/商业**；请勿将这些模型资产拷出仓库二次分发。
+   - **放入**：`frontend/public/assets/model/`（`model.model3.json` + `*.moc3` + `*.physics3.json` + `expressions/` + `motions/` + 贴图 `paimon.4096/`）。
+   - `live2dcubismcore.min.js`：Live2D 官方 **CDN 免费分发版**（Proprietary SDK License，仅随运行时使用勿二次分发），放入 `frontend/public/vendor/`。
+2. **派蒙 6k VITS 音色模型**（**MIT** 授权可下载，但为派蒙语音衍生 → 仅**个人、非商用**，需保留 MIT 版权声明并标注来源）：
+   - **下载**：[HuggingFace `caojiachen1/paimon_tts`](https://huggingface.co/caojiachen1/paimon_tts) → `paimon6k_390k.pth`（约 429MB）+ `paimon6k.json`。
+   - **MoeGoe 推理库**：[GitHub `CjangCjengh/MoeGoe`](https://github.com/CjangCjengh/MoeGoe)（MIT，VITS 推理）。
+   - **放入**：`voice-tts/paimon6k_390k.pth`、`voice-tts/paimon6k.json`、`voice-tts/MoeGoe/`（这些在 `.gitignore`，不入库）。
+   - 派蒙语音数据集（敏感勿公开）：`https://huggingface.co/datasets/umoubuton/paimon`。
+3. **运行时前提（Python 依赖不随 ai-mall 打包，需用户自装）**：本机需 **Python 3.x** + `pip install -r voice-tts/requirements.txt`（torch/fastapi/uvicorn/soundfile 等）＋把 `aimall.voice.tts.vits.python` 配成装好依赖的解释器命令（如 `G:\tts\env\python.exe`）。缺任一项（Python/依赖/模型）→ 后端**照常启动**、**TTS 自动回退 Edge-TTS**。
+4. **后端启动自动拉起**：`VitsLifecycle` 检测到 Python + 模型，即自动 `spawn voice-tts/vits_server.py`（:9944）并轮询 `/health` 就绪、把 TTS 指向本机 VITS；**无需手动启动外部 PaimonLiveWeb5**。
+5. 前后端照常启动（见"快速启动"），聊天即自动带派蒙语音 + 动效。
 
 ## V1 验收清单（已全部通过）
 
