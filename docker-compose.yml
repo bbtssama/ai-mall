@@ -1,0 +1,97 @@
+# =====================================================================
+# ai-mall 依赖中间件一键启动（V1.5 工程基建）
+#
+# 用法：
+#   docker compose up -d            # 启动全部
+#   docker compose up -d mysql      # 只起某个
+#   docker compose ps               # 看状态
+#   docker compose logs -f minio    # 看日志
+#   docker compose down             # 停止（数据卷保留）
+#   docker compose down -v          # 停止并清空数据（慎用）
+#
+# ★ 注意：本项目 application.yml 默认连的是开发机 192.168.6.102 上的 MySQL，
+#   与本文件的 mysql 容器【不是同一个】。想改用本地容器，把 url 改成
+#   jdbc:mysql://localhost:3306/ai_mall 即可（其余配置不变）。
+#   Redis / RabbitMQ / MinIO 目前 V1 尚未使用，是为 V2/V3 预先备好的环境。
+# =====================================================================
+
+services:
+
+  # ---------- MySQL 8：全量业务数据 ----------
+  mysql:
+    image: mysql:8.0
+    container_name: aimall-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: ai_mall
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --default-time-zone=+08:00
+    volumes:
+      - mysql-data:/var/lib/mysql
+    # healthcheck 很关键：让依赖它的服务能等数据库真正可用后再启动，
+    # 避免"容器起来了但 MySQL 还在初始化"导致的连接失败
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - aimall
+
+  # ---------- Redis 7（V3 使用：缓存 / 计数 / 排行榜 / 分布式锁）----------
+  redis:
+    image: redis:7-alpine
+    container_name: aimall-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - aimall
+
+  # ---------- RabbitMQ（V2 AI 审核异步 / V3 订单超时取消）----------
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: aimall-rabbitmq
+    ports:
+      - "5672:5672"     # AMQP 协议端口
+      - "15672:15672"   # 管理后台 http://localhost:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: aimall
+      RABBITMQ_DEFAULT_PASS: aimall123
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - aimall
+
+  # ---------- MinIO（V2 笔记图片；S3 兼容对象存储）----------
+  minio:
+    image: minio/minio:latest
+    container_name: aimall-minio
+    ports:
+      - "9000:9000"     # API 端口
+      - "9001:9001"     # 控制台 http://localhost:9001
+    environment:
+      MINIO_ROOT_USER: aimall
+      MINIO_ROOT_PASSWORD: aimall123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - aimall
+
+volumes:
+  mysql-data:
+  redis-data:
+  rabbitmq-data:
+  minio-data:
+
+networks:
+  aimall:
+    driver: bridge

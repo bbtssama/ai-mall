@@ -26,7 +26,8 @@
  */
 import * as PIXI from 'pixi.js'
 // 注意：pixi-live2d-display/cubism4 在模块加载期会校验 window.Live2DCubismCore，缺失即抛错。
-// 公开仓库不含该受限资产时若顶层静态 import 会整页白屏，故改为在 onMounted 内运行时动态 import（见 init()）。
+// 因此不能用顶层静态 import——否则一旦 core 脚本加载失败（网络问题 / 资产被移除以便公开分发）就会整页白屏。
+// 改为在 onMounted 内运行时动态 import + try-catch（见 init()），失败仅降级占位，聊天功能不受影响。
 // 这里不 import cubism4，也不做 Live2DModel.registerTicker / config.sound —— 全部移到 init() 动态加载成功后再执行。
 
 const CORE_SCRIPT = '/vendor/live2dcubismcore.min.js'
@@ -155,7 +156,7 @@ export default {
         if (!coreOk) throw new Error('Cubism core 未加载')
       } catch (err) {
         console.warn('[live2d] 皮套引擎/核心缺失，降级为纯文字聊天:', err && err.message)
-        return this.fail('皮套/语音动效资产未安装（公开仓库不提供）。聊天、图片识别、工具检索、会话全部照常；部署资产后刷新即可见到皮套与动效。')
+        return this.fail('皮套/语音动效未能加载（Live2D 运行时或 Cubism Core 缺失）。聊天、图片识别、工具检索、会话全部照常；确认 frontend/public/vendor/ 与 public/assets/model/ 就位后刷新即可见到皮套与动效。')
       }
       try {
         this._app = new PIXI.Application({

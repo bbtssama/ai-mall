@@ -40,6 +40,18 @@ export const addressApi = {
   setDefault: (id) => request.put(`/v1/addresses/${id}/default`)
 }
 
+// ---------- 文件上传（V1.5） ----------
+export const fileApi = {
+  upload: (file, dir = 'notes') => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('dir', dir)
+    return request.post('/v1/files/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  }
+}
+
 // ---------- AI 问答 ----------
 export const chatApi = {
   conversations: () => request.get('/v1/chat/conversations'),

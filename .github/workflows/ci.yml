@@ -1,0 +1,40 @@
+name: CI
+
+# 每次 push / PR 自动跑编译 + 单测。
+# 价值：把"我本地能跑"变成"任何人 clone 下来都能跑"，并在代码合入前拦住回归。
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  backend:
+    name: Backend build & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build and test
+        working-directory: ./backend
+        env:
+          # CI 里没有真实密钥；本项目当前单测为纯单元测试（不启动 Spring 上下文、
+          # 不连数据库、不调真实 AI），所以给个占位值即可跑通。
+          DEEPSEEK_API_KEY: dummy-key-for-ci
+        run: mvn -B clean verify
+
+      - name: Upload test report (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: backend/target/surefire-reports/

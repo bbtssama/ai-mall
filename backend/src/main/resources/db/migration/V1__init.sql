@@ -1,22 +1,22 @@
 -- =====================================================================
--- AI 种草商城 V1 数据库初始化脚本
--- 面向 MySQL 8.x，库名 ai_mall
--- 说明：V1 为单体+无 Redis 阶段；t_cart 暂用 MySQL 存储，
---       V3 引入 Redis 后迁移为 Hash(user_id -> sku_id -> count)。
--- ★ V1.5 起，表结构的【唯一权威来源】是 Flyway 迁移目录：
---       backend/src/main/resources/db/migration/V1__init.sql
---   本文件仅保留作"全新环境一次性手工初始化"的便利脚本（后端启动时
---   Flyway 会自动管理版本，无需再手动执行本文件）。
+-- V1__init.sql —— AI 种草商城 V1 初始表结构（Flyway 版本化迁移）
+--
+-- ★ 本文件是数据库结构的【唯一权威来源】。请勿再手动执行 sql/init.sql。
+--    sql/init.sql 保留仅作"全新环境一次性手工初始化"的便利脚本。
+--
+-- 迁移约定：
+--   1. 只做增量，不修改已执行的迁移文件（已执行文件的 checksum 会被校验）。
+--      要改表结构请新增 V2__xxx.sql、V3__xxx.sql……
+--   2. 建库/USE 语句由应用连接串决定，迁移脚本内不写。
+--   3. 不使用 DROP TABLE —— 迁移脚本必须是"向前"的，删表另写迁移。
+--   4. 存量库接入：application.yml 已配置 baseline-on-migrate=true，
+--      非空库会被自动"基线化"到版本 1（把 V1 视为已执行），不会重复建表。
 -- =====================================================================
-
-CREATE DATABASE IF NOT EXISTS ai_mall DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-USE ai_mall;
 
 -- ---------------------------------------------------------------------
 -- 用户域
 -- ---------------------------------------------------------------------
-DROP TABLE IF EXISTS t_user;
-CREATE TABLE t_user (
+CREATE TABLE IF NOT EXISTS t_user (
     id            BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
     username      VARCHAR(50)  NOT NULL COMMENT '登录名',
     password_hash VARCHAR(100) NOT NULL COMMENT 'BCrypt 密码哈希',
@@ -29,9 +29,7 @@ CREATE TABLE t_user (
     UNIQUE KEY uk_username (username)
 ) ENGINE = InnoDB COMMENT ='用户表';
 
--- 用户收货地址簿（结算时选择，避免每次手填；最多保留常用地址）
-DROP TABLE IF EXISTS t_user_address;
-CREATE TABLE t_user_address (
+CREATE TABLE IF NOT EXISTS t_user_address (
     id         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
     user_id    BIGINT       NOT NULL COMMENT '用户 id',
     receiver   VARCHAR(50)  NOT NULL COMMENT '收货人',
@@ -49,8 +47,7 @@ CREATE TABLE t_user_address (
 -- ---------------------------------------------------------------------
 -- 电商域
 -- ---------------------------------------------------------------------
-DROP TABLE IF EXISTS t_product;
-CREATE TABLE t_product (
+CREATE TABLE IF NOT EXISTS t_product (
     id          BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
     spu_name    VARCHAR(150) NOT NULL COMMENT '商品名称(SPU)',
     sub_title   VARCHAR(255) DEFAULT NULL COMMENT '副标题/卖点',
@@ -63,8 +60,7 @@ CREATE TABLE t_product (
     KEY idx_status (status)
 ) ENGINE = InnoDB COMMENT ='商品表(SPU)';
 
-DROP TABLE IF EXISTS t_product_sku;
-CREATE TABLE t_product_sku (
+CREATE TABLE IF NOT EXISTS t_product_sku (
     id         BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
     product_id BIGINT        NOT NULL COMMENT '所属商品 id',
     sku_name   VARCHAR(100)  NOT NULL COMMENT '规格名，如 曜石黑 32G',
@@ -72,15 +68,14 @@ CREATE TABLE t_product_sku (
     stock      INT           NOT NULL DEFAULT 0 COMMENT '库存',
     sales      INT           NOT NULL DEFAULT 0 COMMENT '销量',
     image      VARCHAR(255)  DEFAULT NULL COMMENT '规格图 URL（选中该规格时主图切换；无则用商品图集）',
-    version    INT           NOT NULL DEFAULT 0 COMMENT '乐观锁版本号（V3 秒杀/防超卖使用）',
+    version    INT           NOT NULL DEFAULT 0 COMMENT '★预留字段，当前【未用作乐观锁】。防超卖靠 UPDATE ... WHERE stock>=? 的行锁 CAS（见 OrderServiceImpl）',
     created_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (id),
     KEY idx_product (product_id)
 ) ENGINE = InnoDB COMMENT ='商品 SKU 表';
 
 -- 商品/规格图集：sku_id 为空是商品级图（默认图集，可滚动），非空是该规格专属图
-DROP TABLE IF EXISTS t_product_image;
-CREATE TABLE t_product_image (
+CREATE TABLE IF NOT EXISTS t_product_image (
     id         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
     product_id BIGINT       NOT NULL COMMENT '商品 id',
     sku_id     BIGINT       DEFAULT NULL COMMENT '规格 id（NULL=商品级图）',
@@ -91,9 +86,10 @@ CREATE TABLE t_product_image (
     KEY idx_product (product_id, sku_id)
 ) ENGINE = InnoDB COMMENT ='商品图集表(SKU级可选)';
 
--- V1 购物车：MySQL 存储；V3 迁 Redis Hash(user_id -> sku_id -> count)
-DROP TABLE IF EXISTS t_cart;
-CREATE TABLE t_cart (
+-- ★ 购物车采用「京东模式」：MySQL 持久化 + 实时库存校验 + 失效分组 + 原子 UPSERT。
+--   之所以不用 Redis Hash：京东式购物车要"多端同步 + 持久化 + 失效商品分组"，这是 MySQL 的强项。
+--   V3 引入 Redis 后也【不迁移】购物车，而是用它缓存"购物车读"，各司其职。
+CREATE TABLE IF NOT EXISTS t_cart (
     id         BIGINT   NOT NULL AUTO_INCREMENT COMMENT '主键',
     user_id    BIGINT   NOT NULL COMMENT '用户 id',
     sku_id     BIGINT   NOT NULL COMMENT 'SKU id',
@@ -102,10 +98,9 @@ CREATE TABLE t_cart (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     PRIMARY KEY (id),
     UNIQUE KEY uk_user_sku (user_id, sku_id)
-) ENGINE = InnoDB COMMENT ='购物车表(V1 MySQL 版)';
+) ENGINE = InnoDB COMMENT ='购物车表(京东模式，MySQL 持久化)';
 
-DROP TABLE IF EXISTS t_order;
-CREATE TABLE t_order (
+CREATE TABLE IF NOT EXISTS t_order (
     id               BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
     order_no         VARCHAR(32)   NOT NULL COMMENT '订单号(业务唯一)',
     user_id          BIGINT        NOT NULL COMMENT '用户 id',
@@ -114,18 +109,17 @@ CREATE TABLE t_order (
     receiver_name    VARCHAR(50)   DEFAULT NULL COMMENT '收货人',
     receiver_phone   VARCHAR(20)   DEFAULT NULL COMMENT '收货电话',
     receiver_address VARCHAR(255)  DEFAULT NULL COMMENT '收货地址',
-    pay_type         VARCHAR(20)   DEFAULT NULL COMMENT '支付方式（V2 沙箱支付后启用：ALIPAY/WECHAT）',
+    pay_type         VARCHAR(20)   DEFAULT NULL COMMENT '支付方式（V3 沙箱支付后启用：ALIPAY/WECHAT）',
     pay_time         DATETIME      DEFAULT NULL COMMENT '支付时间',
     cancel_time      DATETIME      DEFAULT NULL COMMENT '取消时间',
-    version          INT           NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
+    version          INT           NOT NULL DEFAULT 0 COMMENT '★预留字段，非乐观锁。状态流转的并发安全靠 updateStatus 的 WHERE status=? 条件（状态机 CAS）',
     created_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (id),
     UNIQUE KEY uk_order_no (order_no),
     KEY idx_user_created (user_id, created_at)
 ) ENGINE = InnoDB COMMENT ='订单主表';
 
-DROP TABLE IF EXISTS t_order_item;
-CREATE TABLE t_order_item (
+CREATE TABLE IF NOT EXISTS t_order_item (
     id           BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
     order_id     BIGINT        NOT NULL COMMENT '订单 id',
     sku_id       BIGINT        NOT NULL COMMENT 'SKU id',
@@ -140,8 +134,7 @@ CREATE TABLE t_order_item (
 -- ---------------------------------------------------------------------
 -- AI 域
 -- ---------------------------------------------------------------------
-DROP TABLE IF EXISTS t_conversation;
-CREATE TABLE t_conversation (
+CREATE TABLE IF NOT EXISTS t_conversation (
     id         BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
     user_id    BIGINT      NOT NULL COMMENT '用户 id',
     biz_type   VARCHAR(20) NOT NULL DEFAULT 'CHAT' COMMENT '会话类型：CHAT通用 CHAT_GOODS商品问答（V2 起扩展 SHOPPING导购）',
@@ -151,8 +144,7 @@ CREATE TABLE t_conversation (
     KEY idx_user (user_id)
 ) ENGINE = InnoDB COMMENT ='AI 会话表';
 
-DROP TABLE IF EXISTS t_message;
-CREATE TABLE t_message (
+CREATE TABLE IF NOT EXISTS t_message (
     id              BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
     conversation_id BIGINT      NOT NULL COMMENT '会话 id',
     role            VARCHAR(20) NOT NULL COMMENT '角色：user / assistant',
@@ -163,11 +155,10 @@ CREATE TABLE t_message (
     KEY idx_conversation (conversation_id)
 ) ENGINE = InnoDB COMMENT ='AI 会话消息表';
 
--- =====================================================================
--- 种子数据：演示商品（贴合种草场景，供商城页与 AI 问答使用）
--- =====================================================================
-
-INSERT INTO t_product (id, spu_name, sub_title, category_id, main_img, detail, status) VALUES
+-- ---------------------------------------------------------------------
+-- 种子数据（演示用商品）。用 INSERT IGNORE 保证可重复执行不会主键冲突。
+-- ---------------------------------------------------------------------
+INSERT IGNORE INTO t_product (id, spu_name, sub_title, category_id, main_img, detail, status) VALUES
 (1, 'AirSound Pro 真无线降噪耳机', '主动降噪 + 36小时续航 + 蓝牙5.3', 101,
  'https://picsum.photos/seed/airpro/480/480',
  'AirSound Pro 采用 11mm 复合振膜动圈单元，支持蓝牙 5.3 与 AAC/LDAC 编码。主动降噪深度可达 42dB，通透模式一键切换。单次续航 8 小时，配合充电仓总续航 36 小时，支持无线充电与 IPX5 防水。支持双设备同时连接，通话采用 4 麦克风 AI 降噪算法。', 1),
@@ -181,7 +172,7 @@ INSERT INTO t_product (id, spu_name, sub_title, category_id, main_img, detail, s
  'https://picsum.photos/seed/band6/480/480',
  '轻氧智能手环 6 配备 1.62 英寸 AMOLED 高清屏，支持心率、血氧、睡眠与 100+ 运动模式监测。5ATM 防水，典型使用续航 14 天。支持消息提醒、久坐提醒、女性健康管理，与 iOS / Android 双平台 App 联动。', 1);
 
-INSERT INTO t_product_sku (id, product_id, sku_name, price, stock, sales, version) VALUES
+INSERT IGNORE INTO t_product_sku (id, product_id, sku_name, price, stock, sales, version) VALUES
 (1, 1, '曜石黑', 399.00, 1000, 356, 0),
 (2, 1, '奶白色', 399.00, 800, 289, 0),
 (3, 2, '单头版', 89.00, 500, 1200, 0),

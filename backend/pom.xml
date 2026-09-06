@@ -22,6 +22,7 @@
         <mybatis.version>3.0.4</mybatis.version>
         <sa-token.version>1.39.0</sa-token.version>
         <spring-ai.version>1.0.0</spring-ai.version>
+        <minio.version>8.5.17</minio.version>
     </properties>
 
     <dependencyManagement>
@@ -73,6 +74,33 @@
             <artifactId>spring-security-crypto</artifactId>
         </dependency>
 
+        <!-- ===== V1.5 工程基建（不引入新中间件，补齐"能上线"所需能力） ===== -->
+
+        <!-- 数据库版本管理：表结构变更纳入版本控制，多人协作/多环境不再靠手动执行 SQL。
+             版本由 Spring Boot BOM 统一管理（与 Boot 3.4.5 的 FlywayAutoConfiguration 匹配）。 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+
+        <!-- 可观测性：健康检查 / 指标 / 优雅下线等生产运维端点 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- 对象存储：MinIO（S3 兼容）。注意——本项目【不强制依赖】它：
+             未配置 MinIO 时自动回退本地文件存储，保证任何环境都能正常启动。 -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>${minio.version}</version>
+        </dependency>
+
         <!-- AI：Spring AI 以 OpenAI 兼容模式接入 DeepSeek（base-url 指向 api.deepseek.com） -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
@@ -80,8 +108,9 @@
         </dependency>
 
         <!-- 语音引擎：纯 Java Edge-TTS（tts-edge-java，MIT，内置 Sec-MS-GEC 令牌无需 key）。
-             独立包 com.aimall.voice 使用；仅作为「派蒙 6k VITS」主路径不可用时的本地兜底
-             （主路径是调派蒙后端 /api/tts = vits-paimon6k，见 PaimonBackendTtsClient）。
+             独立包 com.aimall.voice 使用；仅作为「派蒙 6k VITS」主路径不可用时的本地兜底。
+             ★主路径 = 本机内嵌 VITS（127.0.0.1:9944），由 VitsLifecycle 随后端启动自动拉起
+             voice-tts/vits_server.py；缺 Python/模型/依赖时才回退本 Edge-TTS（见 VoiceEngineImpl）。
              与 PaimonLiveWeb5 后端同款、依赖已缓存，勿升级到不含 403 修复的旧版。 -->
         <dependency>
             <groupId>io.github.whitemagic2014</groupId>

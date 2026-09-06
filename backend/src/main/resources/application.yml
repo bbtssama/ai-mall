@@ -14,11 +14,32 @@ spring:
     url: jdbc:mysql://192.168.6.102:3306/ai_mall?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
     password: ${MYSQL_PASSWORD:root123}
+
+  # ===== V1.5：Flyway 数据库版本管理 =====
+  # 表结构变更一律走 backend/src/main/resources/db/migration/Vx__xxx.sql，不再手工执行 SQL。
+  # baseline-on-migrate=true 的作用：
+  #   1) 空库（新环境）→ 正常执行 V1__init.sql 建表；
+  #   2) 已有表的存量库（本项目当前的开发库）→ 自动"基线化"到版本 1，
+  #      把 V1 视为已执行，不会重复建表、也不会报"表已存在"。
+  # 这是把 Flyway 引入【已有项目】的标准做法，面试可讲。
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 1
+    locations: classpath:db/migration
+    # 校验失败时不阻断启动（例如有人手改了已执行过的迁移文件）
+    validate-on-migrate: true
+
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 20MB
+
   ai:
     openai:
-      # OpenCode Go 中转（opencode.ai/zen/go 订阅，OpenAI 兼容协议）。
+      # 当前生效：官方 DeepSeek 直连（https://api.deepseek.com），模型见下方 chat.options.model。
+      # 备用通道：OpenCode Go 中转（opencode.ai/zen/go 订阅，OpenAI 兼容协议），取消下一行注释即可切换。
       # 注意：base-url 不带 /v1，Spring AI 会自动拼接 /v1/chat/completions。
-      # 官方 DeepSeek 直连可改回 https://api.deepseek.com（模型 deepseek-chat）。
       #base-url: https://opencode.ai/zen/go
       # API Key 一律通过环境变量 DEEPSEEK_API_KEY 注入，禁止硬编码入库（GitHub 推送保护会拦截）。
       # 本地开发：密钥写入 application-local.yml（已被 .gitignore 忽略），默认已激活，直接启动即可。
@@ -75,6 +96,30 @@ aimall:
       retry-attempts: 2
       retry-backoff-ms: 500
 
+  # ===== V1.5：对象存储（StorageService 抽象层）=====
+  # type=local 为零依赖默认实现，直接能跑；切 minio 只需改这里 + 填 minio 配置，业务代码零改动。
+  storage:
+    type: local                        # local | minio
+    max-size-bytes: 10485760           # 单文件上限 10MB
+    allowed-content-types:             # 白名单（防存储型 XSS）
+      - image/jpeg
+      - image/png
+      - image/webp
+      - image/gif
+    local:
+      root: ./uploads                  # 落盘目录（同时映射到 /files/** 供访问）
+      url-prefix: /files
+    minio:
+      endpoint:                        # 如 http://192.168.6.102:9000
+      access-key:
+      secret-key:
+      bucket: aimall
+      url-prefix:                      # 留空则生成预签名 URL（7 天有效），适合私有桶
+
+  # 日志目录（logback-spring.xml 通过 springProperty 读取）
+  logging:
+    dir: ./logs
+
 sa-token:
   # token 名称（前端请求头），默认 Authorization；Sa-Token 会兼容 "Bearer " 前缀
   token-name: Authorization
@@ -88,3 +133,23 @@ sa-token:
 logging:
   level:
     com.aimall: info
+    org.springframework.web: info
+    io.minio: warn
+
+# ===== V1.5：可观测性（Actuator）=====
+# 作用：健康检查、指标、优雅下线 —— 没有它，运维无法判断"服务活着还是假死"。
+# 排障入口：GET /actuator/health 、GET /actuator/metrics
+management:
+  endpoints:
+    web:
+      exposure:
+        # 生产请收窄到 health,info；这里为方便本地演示多开两个
+        include: health,info,metrics,beans
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true          # /actuator/health/liveness 、/readiness（K8s 探针用）
+  metrics:
+    tags:
+      application: ${spring.application.name}

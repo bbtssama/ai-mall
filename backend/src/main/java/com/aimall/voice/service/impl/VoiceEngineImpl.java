@@ -20,16 +20,16 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class VoiceEngineImpl implements VoiceEngine {
 
-    /** 派蒙音色 TTS 主路径：调派蒙后端 /api/tts（vits-paimon6k，VITS→ffmpeg→mp3）。 */
+    /** 派蒙音色 TTS 主路径：调<b>本机</b> VITS 服务（127.0.0.1:9944/tts，WAV→ffmpeg→mp3），由 {@code VitsLifecycle} 自动拉起。 */
     private final PaimonBackendTtsClient paimonBackendTtsClient;
 
-    /** 本地纯 Java Edge-TTS 兜底：仅当派蒙后端不可用时才用（非派蒙音色）。 */
+    /** 本地纯 Java Edge-TTS 兜底：仅当本机 VITS 不可用时才用（非派蒙音色）。 */
     private final EdgeTtsEngine edgeTtsEngine;
 
     @Override
     public byte[] synthesize(String text) {
-        // 主路径：派蒙 6k VITS（经派蒙后端 /api/tts = vits-paimon6k，VITS→ffmpeg→mp3），满足"派蒙音色"硬需求；
-        // 仅当派蒙后端不可用时回退本地纯 Java Edge-TTS（非派蒙音色，纯兜底，避免功能硬失败）。
+        // 主路径：本机派蒙 6k VITS（127.0.0.1:9944/tts，VITS→ffmpeg→mp3），满足"派蒙音色"硬需求；
+        // 仅当 VITS 不可用（缺 Python/模型/依赖）时回退本地纯 Java Edge-TTS（非派蒙音色，纯兜底，避免功能硬失败）。
         try {
             return paimonBackendTtsClient.synthesize(text);
         } catch (TtsUnavailableException e) {

@@ -8,8 +8,8 @@
 | 层 | 技术 |
 |---|---|
 | 后端 | Spring Boot 3.4.5 · Java 17 · MyBatis（XML 手写 SQL）· Sa-Token（无状态 Token） |
-| 数据 | MySQL 8（192.168.6.102:3306 / ai_mall） |
-| AI | Spring AI 1.0 + OpenCode Go 中转（OpenAI 兼容，模型 `deepseek-v4-pro`，可切换官方 DeepSeek） |
+| 数据 | MySQL 8（192.168.6.102:3306 / ai_mall）· **Flyway 版本管理**（V1.5） |
+| AI | Spring AI 1.0 + 官方 DeepSeek（OpenAI 兼容，`application.yml` 当前模型 `deepseek-v4-flash-vision-exp`；可切换 OpenCode Go 中转，该 base-url 在配置中已注释备用） |
 | 语音/动效（可选） | `com.aimall.voice`（纯派蒙 TTS 引擎）+ 前端 `src/voice/`（Live2D 皮套 + TTS 播放队列） |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + axios（SSE 流式对话） |
 
@@ -19,23 +19,29 @@
 ai-mall/
 ├── backend/                  # Spring Boot 单体（按域分包，为 V4 拆服务埋伏笔）
 │   └── src/main/java/com/aimall/
-│       ├── common/           # R 统一返回 / ResultCode / BusinessException / 全局异常 / 分页
-│       ├── config/           # MyBatis / Sa-Token / CORS / BCrypt / Spring AI
+│       ├── common/           # R 统一返回 / 全局异常 / 分页 / traceId 链路 / 对象存储抽象(V1.5)
+│       ├── config/           # MyBatis / Sa-Token / CORS / BCrypt / Spring AI / 线程池(V1.5)
 │       ├── user/             # 注册/登录/当前用户
 │       ├── goods/            # 商品列表/详情/SKU / 购物车（V1 MySQL 版）
-│       ├── order/            # 下单（乐观扣库存+事务）/ 订单列表/详情/取消
+│       ├── order/            # 下单（行锁 CAS 扣库存+事务）/ 订单列表/详情/取消
 │       ├── ai/               # 会话管理 / AI 问答（Agent 商品搜索工具 + 图片识别 + SSE 流式）
 │       └── voice/            # 独立派蒙 TTS 引擎（可选，POST /api/v1/voice/tts）
 ├── frontend/                 # Vue3 + Vite 前端
 │   └── src/voice/            # Live2D 皮套组件 + TTS 播放队列（可选）
-├── sql/init.sql              # 建库建表 + 种子商品
+├── sql/init.sql              # 手工初始化便利脚本（权威来源是 Flyway 迁移）
+├── docker-compose.yml        # V1.5：mysql/redis/rabbitmq/minio 一键起
+├── .github/workflows/ci.yml  # V1.5：push 自动 build+test
 └── scripts/                  # smoke-test.ps1 冒烟测试
 ```
 
 ## 快速启动
 
 ```bash
+# 0.（可选）一键起依赖中间件：mysql / redis / rabbitmq / minio
+docker compose up -d
+
 # 1. 初始化数据库（192.168.6.102，root/root123，可改）
+#    ★ V1.5 起推荐直接启动后端：Flyway 自动建表/基线化，无需手动执行 SQL
 mysql -h192.168.6.102 -uroot -proot123 < sql/init.sql
 
 # 2. 启动后端（8080；API Key 从环境变量读取，无默认值）
@@ -43,6 +49,9 @@ cd backend && mvn spring-boot:run
 
 # 3. 启动前端（5173，/api 代理到 8080）
 cd frontend && npm install && npm run dev
+
+# 4.（可选）跑单元测试（V1.5 新增，纯内存毫秒级，无需数据库）
+cd backend && mvn test
 ```
 
 打开 http://localhost:5173 ，注册/登录后体验完整闭环。
@@ -53,7 +62,8 @@ V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端�
 
 > ⚠️ **合规红线（务必先读）**
 > - 派蒙 Live2D 皮套模型、游戏语音、派蒙 6k VITS 音色模型，均为**第三方 / 他人（miHoYo IP + 社区 Paimon6k 音色）的受限资产**，许可含限制项：**仅限个人 / 学习 / 演示，禁止再分发、公开、商用**。
-> - **公开仓库不含这些资产**：`.gitignore` 已忽略 `frontend/public/assets/`（皮套模型）、`frontend/public/vendor/`（Live2D 核心库）与 `voice-tts/paimon6k_*.pth`、`voice-tts/paimon6k.json`、`voice-tts/MoeGoe/`（派蒙 VITS 模型/库），克隆后不会带入。
+> - ⚠️ **当前本机工作副本已就位这些资产**（`frontend/public/assets/model/`、`frontend/public/vendor/`、`voice-tts/` 内模型均存在，派蒙音色与动效可完整体验）。
+> - **但若要公开仓库/开源分发，必须先移除**：`.gitignore` 已忽略 `frontend/public/assets/`（皮套模型）、`frontend/public/vendor/`（Live2D 核心库）与 `voice-tts/paimon6k_*.pth`、`voice-tts/paimon6k.json`、`voice-tts/MoeGoe/`（派蒙 VITS 模型/库）。换言之：这些资产**在本机有、但不入库**，克隆一份干净仓库不会带入。
 > - 若未来要**公开或商用**，请先经"人设层"（`frontend/src/voice/voiceStage.vue` 可配置的 `modelUrl` / 表情表 / 动作组 / 音色）替换为**自主授权或自有**角色 / 音色。
 
 **无资产也能正常运行（默认）**
@@ -87,18 +97,35 @@ V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端�
 | 注册 → 登录（Sa-Token Token + BCrypt） | ✅ |
 | 商品列表（含起售价聚合）/ 详情（SKU） | ✅ |
 | 加购物车 → 购物车列表/改数量/删除 | ✅ |
-| 下单（乐观扣库存 `stock>=?` + @Transactional + 订单快照） | ✅ |
+| 下单（行锁 CAS 式扣库存 `stock>=?` + @Transactional + 订单快照） | ✅ |
 | 订单列表 / 详情 / 取消（回补库存） | ✅ |
-| AI 问答：Agent 商品搜索工具（Function Calling）+ 图片识别 + SSE 流式输出 | ✅（deepseek-v4-pro / vision） |
+| AI 问答：Agent 商品搜索工具（Function Calling）+ 图片识别 + SSE 流式输出 | ✅（文本与视觉**共用同一模型** `deepseek-v4-flash-vision-exp`，由 `AiConfig` 装配成 `chatClient` / `visionChatClient` 两条链路） |
 | 全链路冒烟测试 `scripts/smoke-test.ps1` 9/9 | ✅ |
 | 派蒙语音动效助手（皮套/音色资产就位时） | ✅ |
+
+## V1.5 工程基建（已完成）
+
+> 详见 `V1.5工程基建详解.md`（讲解文档）+ `V1.5工程基建详解【知识词典】.md`（概念速查）。
+
+| 项 | 内容 |
+|---|---|
+| **Flyway** | 表结构版本化管理；存量库 `baseline-on-migrate` 接入（新库自动建表、老库自动基线化） |
+| **traceId** | MDC + Filter（入口生成/回写响应头 `X-Trace-Id`）+ TaskDecorator（异步线程传递），日志全链路可 grep |
+| **日志文件** | logback-spring.xml：按天+50MB 滚动、30天/2GB 封顶、压缩归档 |
+| **Actuator** | `/actuator/health`（含 liveness/readiness 探针）+ metrics |
+| **对象存储** | `StorageService` 抽象：本地磁盘（默认，零依赖）⇄ MinIO（懒初始化+预签名URL），配置一行切换；UUID 重命名+MIME 白名单（防路径穿越/存储型XSS） |
+| **异步线程池** | 有界队列 200 + CallerRuns 背压 + MDC 传递 + 优雅停机（为 V2 AI 审核异步备好） |
+| **测试** | 15 个用例：下单扣库存/状态机/越权/上传安全/MDC/分页（Mockito mockStatic 处理 StpUtil，纯内存毫秒级） |
+| **环境/CI** | docker-compose 四件套 + GitHub Actions（push 自动 build+test） |
 
 ## 面试可讲点（V1）
 
 - 请求链路：Controller → Service（构造器注入）→ Mapper 接口（@Mapper）→ XML SQL
 - 统一返回 `R{code,msg,data}` + `BusinessException` + 全局异常兜底（不泄漏堆栈）
 - MyBatis 手写分页 `LIMIT offset,size` + `PageResult`（为何不引分页插件）
-- 下单防超卖：`UPDATE sku SET stock=stock-? WHERE id=? AND stock>=?`（CAS 式乐观扣减）
+- 下单防超卖：`UPDATE t_product_sku SET stock=stock-? , sales=sales+? WHERE id=? AND stock>=?`
+  —— 靠 **InnoDB 行排他锁 + `WHERE stock>=?` 的 CAS 式条件扣减**（原子、无超卖）。
+  ⚠️ 注意：`t_product_sku.version` 目前**只是预留字段、并未用作乐观锁**（代码注释已注明），面试请讲"行锁 CAS"，不要讲"乐观锁"
 - Sa-Token 无状态 Token + 拦截器白名单
 - Spring AI 流式响应（SSE text/event-stream，前端 fetch 逐块渲染）
 - **Agent Function Calling**：AI 不确定商品时按需调 `searchProduct` 工具（复用业务 Service，与前端搜索同源），不编造
@@ -107,9 +134,10 @@ V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端�
 
 ## 演进预告
 
-- **V2**：RAG 导购（商品文档分块+向量检索）、支付宝/微信沙箱支付、内容笔记发布
-- **V3**：Redis（缓存三兄弟/购物车迁移/排行榜）、RabbitMQ（审核异步/订单事件）、秒杀
-- **V4**：按域拆微服务（user/content/goods/order/ai）+ Nacos/Gateway/Feign + 分布式事务
-- **V5**：Agent 客服（Function Calling）、推荐系统、NL2SQL 数据分析
+- **V1.5 工程基建**：✅ 已完成（Flyway / traceId 可观测 / 对象存储抽象 / 测试 / Compose / CI，见上文）
+- **V2**：内容社区（种草笔记/点赞/收藏）、RAG 导购（说明书+笔记双语料，Hybrid 检索）、AI 审核（MQ 异步）
+- **V3**：Redis（缓存三兄弟/点赞计数/排行榜）、RabbitMQ 延迟消息（订单超时取消）、沙箱支付、限量发售防超卖
+- **V4**：按域拆微服务（仅独立 ai-service + Gateway/Nacos/Feign，主体保持单体）
+- **V5**：Agent 客服（查订单/物流）、相似推荐+热门榜（ItemCF 离线对比）、受限 NL2SQL 商家看板
 
 > ⚠️ `application.yml` 的 AI 中转 Key 已改为**环境变量注入**（`${DEEPSEEK_API_KEY:}`，无默认值）；本地运行请先设置该环境变量，勿把真实 Key 提交入库。

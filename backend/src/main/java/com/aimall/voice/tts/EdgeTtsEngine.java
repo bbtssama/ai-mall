@@ -16,8 +16,9 @@ import java.util.concurrent.Semaphore;
 /**
  * 本地纯 Java Edge-TTS 合成引擎<b>（兜底 / fallback）</b>。
  *
- * <p>主路径是「派蒙 6k VITS」：{@link PaimonBackendTtsClient} 调派蒙后端 /api/tts
- * （vits-paimon6k）。本类仅在派蒙后端不可用时兜底（非派蒙音色），避免功能硬失败。</p>
+ * <p>主路径是「派蒙 6k VITS」：{@link PaimonBackendTtsClient} 调<b>本机</b> VITS 服务
+ * （<code>127.0.0.1:9944/tts</code>，由 {@link VitsLifecycle} 自动拉起）。
+ * 本类仅在 VITS 不可用时兜底（非派蒙音色），避免功能硬失败。</p>
  *
  * <p>封装 {@code io.github.whitemagic2014:tts-edge-java:1.3.3}：websocket 直连微软免费接口，
  * 库内置 Sec-MS-GEC DRM 令牌，无需 key。音色由 {@code aimall.voice.tts.voice} 配置

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  logback 配置（文件名必须是 logback-spring.xml 才能用 <springProperty> 等 Spring 扩展）
+
+  核心目标：让【每一条日志都带上 traceId】。
+  配合 TraceIdFilter（入口生成）+ MdcTaskDecorator（异步传递），
+  一次请求的全部日志——Controller 入参、MyBatis SQL、AI 调用、异常堆栈——
+  都能用同一个 traceId 串起来 grep。
+
+  排障姿势：用户反馈问题时给你响应头里的 X-Trace-Id，
+  然后：grep 'a1b2c3d4e5f67890' logs/aimall.log
+-->
+<configuration>
+
+    <!-- 复用 Spring Boot 默认配置：注册 %clr 颜色转换器等 -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- 日志目录，可在 application.yml 用 aimall.logging.dir 覆盖 -->
+    <springProperty scope="context" name="LOG_DIR" source="aimall.logging.dir" defaultValue="./logs"/>
+
+    <!-- 控制台 pattern：%X{traceId:-N/A} 表示取 MDC 里的 traceId，没有则显示 N/A -->
+    <property name="CONSOLE_PATTERN"
+              value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%5p) %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %clr([%X{traceId:-N/A}]){magenta} %m%n%wEx"/>
+
+    <!-- 文件 pattern 不能用 %clr —— 颜色转义符写进文件会变成乱码 -->
+    <property name="FILE_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%15.15t] %-40.40logger{39} : [%X{traceId:-N/A}] %m%n%wEx"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+            <pattern>${CONSOLE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 滚动文件：按天切 + 按大小切 + 保留 30 天 + 总量上限 2GB。
+         不加这些约束，日志迟早把磁盘写满——这是线上最常见的"低级事故"之一。 -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/aimall.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/aimall.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>2GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+    <!-- 各包的日志级别统一在 application.yml 的 logging.level 下配置（Spring 官方推荐做法，
+         且避免与 logback 本文件的 <logger> 冲突导致"改了不生效"）。 -->
+</configuration>

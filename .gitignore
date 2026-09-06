@@ -24,6 +24,10 @@ Thumbs.db
 logs/
 *.log
 
+# ===== V1.5：本地对象存储落盘目录（运行时生成的用户上传文件，不入库）=====
+uploads/
+backend/uploads/
+
 # ===== 一次性生成产物 / 临时目录 =====
 .imgcache/
 .imgtest/
