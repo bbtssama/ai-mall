@@ -35,6 +35,23 @@ spring:
       max-file-size: 10MB
       max-request-size: 20MB
 
+  # ===== V2：RabbitMQ（AI 内容审核异步化）=====
+  # ★ 可插拔：未启动 RabbitMQ 时发布接口照常工作（自动降级为线程池异步审核）。
+  # spring-amqp 连接失败会自动后台重连，不阻断应用启动。
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:aimall}
+    password: ${RABBITMQ_PASSWORD:aimall123}
+    # 发布者确认：消息到达 Broker 才算发送成功（"不丢"的发送端一半）
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        # 消费失败不重入队（防毒消息循环；失败兜底=死信队列+ERROR流水，见 AuditConsumer）
+        default-requeue-rejected: false
+        prefetch: 5        # 审核是秒级慢任务，预取太多会堆积在客户端内存
+
   ai:
     openai:
       # 当前生效：官方 DeepSeek 直连（https://api.deepseek.com），模型见下方 chat.options.model。
@@ -119,6 +136,19 @@ aimall:
   # 日志目录（logback-spring.xml 通过 springProperty 读取）
   logging:
     dir: ./logs
+
+  # ===== V2：RAG 配置 =====
+  # embedding 默认 local（零依赖哈希向量，字面相似）；
+  # 配置真实 embedding 服务后改 spring-ai（语义相似，质量显著更好），业务代码零改动。
+  rag:
+    enabled: true
+    embedding: local          # local | spring-ai
+    dimension: 256
+    top-k: 5                  # 最终拼进 prompt 的片段数
+    candidate-k: 20           # 每路召回的候选数
+    rrf-k: 60                 # RRF 融合常数（论文推荐值）
+    vector-cache-seconds: 300
+    max-chunk-chars: 800
 
 sa-token:
   # token 名称（前端请求头），默认 Authorization；Sa-Token 会兼容 "Bearer " 前缀

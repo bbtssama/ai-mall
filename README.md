@@ -132,10 +132,22 @@ V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端�
 - **多模态图片识别**：canvas 压缩 → base64 → `UserMessage.builder().media()` → 视觉模型
 - **TTS + Live2D 动效（派蒙可选）**：前端按句切分 → 逐句 `/api/v1/voice/tts` → 顺序播放 + Live2D 口型/表情/动作；模块独立（`com.aimall.voice` + `src/voice/`），低耦合、可插拔
 
+## V2 内容社区 + Hybrid RAG（已完成）
+
+> 详见 `V2内容社区与RAG详解.md`（讲解文档）+ `V2内容社区与RAG详解【知识词典】.md`。
+
+| 项 | 内容 |
+|---|---|
+| **内容社区** | 笔记发布/Feed（游标分页+MySQL ngram 全文检索）/点赞收藏（唯一索引幂等）/种草清单（笔记关联商品） |
+| **AI 审核 + MQ** | 发布秒回→RabbitMQ 异步审核→回写状态；幂等三防线（流水 uk/状态机条件更新/ERROR 不误杀）；MQ 不可用自动降级线程池 |
+| **Hybrid RAG** | 语料=商品说明书+种草笔记；BM25+向量双通道，RRF 融合；`searchDocs` 与 `searchProduct` 双工具 Agent 分流（模型自选）；embedding 可插拔（local 哈希默认 / spring-ai 可切） |
+| **AI 种草文案** | RAG 检索真实用户反馈参与创作，只出草稿绝不自动发布 |
+| **模拟数据** | `scripts/gen_mock_data.py` 生成 100 商品 + 500 笔记（幂律分布/含缺点段），`sql/mock_data.sql` 幂等导入 |
+
 ## 演进预告
 
 - **V1.5 工程基建**：✅ 已完成（Flyway / traceId 可观测 / 对象存储抽象 / 测试 / Compose / CI，见上文）
-- **V2**：内容社区（种草笔记/点赞/收藏）、RAG 导购（说明书+笔记双语料，Hybrid 检索）、AI 审核（MQ 异步）
+- **V2 内容社区+RAG**：✅ 已完成（笔记/MQ 审核异步/Hybrid RAG/AI 文案/模拟数据，见上文）
 - **V3**：Redis（缓存三兄弟/点赞计数/排行榜）、RabbitMQ 延迟消息（订单超时取消）、沙箱支付、限量发售防超卖
 - **V4**：按域拆微服务（仅独立 ai-service + Gateway/Nacos/Feign，主体保持单体）
 - **V5**：Agent 客服（查订单/物流）、相似推荐+热门榜（ItemCF 离线对比）、受限 NL2SQL 商家看板

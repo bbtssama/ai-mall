@@ -1,5 +1,6 @@
 package com.aimall.config;
 
+import com.aimall.ai.rag.KnowledgeSearchTool;
 import com.aimall.ai.tool.ProductSearchTool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -40,13 +41,24 @@ public class AiConfig {
      */
     @Bean
     public ChatClient chatClient(ChatClient.Builder builder,
-                                 ProductSearchTool searchTool) {
-        return builder.defaultTools(searchTool).build();
+                                 ProductSearchTool searchTool,
+                                 KnowledgeSearchTool knowledgeTool) {
+        return builder
+                .defaultTools(searchTool)     // 结构化：价格/库存/分类 → SQL
+                .defaultTools(knowledgeTool)  // 非结构化：说明书/笔记 → Hybrid RAG
+                .build();
     }
 
+    /**
+     * 视觉链路客户端：同样双工具（视觉模型支持 function calling）。
+     */
     @Bean
     public ChatClient visionChatClient(ChatClient.Builder builder,
-                                       ProductSearchTool searchTool) {
-        return builder.defaultTools(searchTool).build();
+                                       ProductSearchTool searchTool,
+                                       KnowledgeSearchTool knowledgeTool) {
+        return builder
+                .defaultTools(searchTool)
+                .defaultTools(knowledgeTool)
+                .build();
     }
 }

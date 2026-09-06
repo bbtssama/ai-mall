@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.content.mapper.NoteLikeMapper">
+
+    <!--
+      直接 INSERT，不先查：重复点赞会撞 uk_note_user 唯一键，
+      由 Service 捕获 DuplicateKeyException 当作"已点赞"处理。
+      相比"先查再插"，少一次 SQL 且天然防并发（先查后插在并发下会插入两条）。
+    -->
+    <insert id="insert">
+        INSERT INTO t_note_like (note_id, user_id) VALUES (#{noteId}, #{userId})
+    </insert>
+
+    <delete id="delete">
+        DELETE FROM t_note_like WHERE note_id = #{noteId} AND user_id = #{userId}
+    </delete>
+
+    <select id="countByNote" resultType="int">
+        SELECT COUNT(*) FROM t_note_like WHERE note_id = #{noteId}
+    </select>
+
+    <!-- 批量回显：当前用户在这批笔记里点过赞的 id 集合（避免逐条查询的 N+1） -->
+    <select id="listLikedNoteIds" resultType="long">
+        SELECT note_id FROM t_note_like
+        WHERE user_id = #{userId}
+        AND note_id IN
+        <foreach collection="noteIds" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+</mapper>

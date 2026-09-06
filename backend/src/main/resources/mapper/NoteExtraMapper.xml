@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.content.mapper.NoteExtraMapper">
+
+    <!-- ============ 图片 ============ -->
+    <insert id="batchInsertImages">
+        INSERT INTO t_note_image (note_id, url, sort) VALUES
+        <foreach collection="images" item="it" separator=",">
+            (#{noteId}, #{it.url}, #{it.sort})
+        </foreach>
+    </insert>
+
+    <select id="selectImages" resultType="com.aimall.content.bean.NoteImage">
+        SELECT id, note_id, url, sort
+        FROM t_note_image
+        WHERE note_id = #{noteId}
+        ORDER BY sort ASC, id ASC
+    </select>
+
+    <delete id="deleteImages">
+        DELETE FROM t_note_image WHERE note_id = #{noteId}
+    </delete>
+
+    <!--
+      列表页批量取封面：只取每篇 sort 最小的那张。
+      用子查询先定位最小 sort，再回表取整行——避免 N+1（20 篇笔记只发 1 条 SQL）。
+    -->
+    <select id="selectCoversByNotes" resultType="com.aimall.content.bean.NoteImage">
+        SELECT t.id, t.note_id, t.url, t.sort
+        FROM t_note_image t
+        INNER JOIN (
+            SELECT note_id, MIN(sort) AS min_sort
+            FROM t_note_image
+            WHERE note_id IN
+            <foreach collection="noteIds" item="id" open="(" separator="," close=")">
+                #{id}
+            </foreach>
+            GROUP BY note_id
+        ) m ON t.note_id = m.note_id AND t.sort = m.min_sort
+    </select>
+
+    <!-- ============ 标签 ============ -->
+    <insert id="batchInsertTags">
+        INSERT INTO t_note_tag (note_id, tag) VALUES
+        <foreach collection="tags" item="it" separator=",">
+            (#{noteId}, #{it.tag})
+        </foreach>
+    </insert>
+
+    <select id="selectTags" resultType="com.aimall.content.bean.NoteTag">
+        SELECT id, note_id, tag
+        FROM t_note_tag
+        WHERE note_id = #{noteId}
+    </select>
+
+    <delete id="deleteTags">
+        DELETE FROM t_note_tag WHERE note_id = #{noteId}
+    </delete>
+
+    <select id="selectTagsByNotes" resultType="com.aimall.content.bean.NoteTag">
+        SELECT id, note_id, tag
+        FROM t_note_tag
+        WHERE note_id IN
+        <foreach collection="noteIds" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <!-- ============ 关联商品 ============ -->
+    <insert id="batchInsertProducts">
+        INSERT INTO t_note_product (note_id, product_id, remark) VALUES
+        <foreach collection="products" item="it" separator=",">
+            (#{noteId}, #{it.productId}, #{it.remark})
+        </foreach>
+    </insert>
+
+    <select id="selectProducts" resultType="com.aimall.content.bean.NoteProduct">
+        SELECT id, note_id, product_id, remark
+        FROM t_note_product
+        WHERE note_id = #{noteId}
+    </select>
+
+    <delete id="deleteProducts">
+        DELETE FROM t_note_product WHERE note_id = #{noteId}
+    </delete>
+
+    <select id="selectProductsByNotes" resultType="com.aimall.content.bean.NoteProduct">
+        SELECT id, note_id, product_id, remark
+        FROM t_note_product
+        WHERE note_id IN
+        <foreach collection="noteIds" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+</mapper>

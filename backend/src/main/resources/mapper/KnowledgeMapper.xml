@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.content.mapper.KnowledgeMapper">
+
+    <!-- ============================================================
+         文档：upsert（同一来源只保留一份，重复索引走 UPDATE）
+         ============================================================ -->
+    <insert id="upsertDoc" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_knowledge_doc (source_type, ref_id, title, chunk_count, status)
+        VALUES (#{sourceType}, #{refId}, #{title}, #{chunkCount}, #{status})
+        ON DUPLICATE KEY UPDATE
+            title       = VALUES(title),
+            chunk_count = VALUES(chunk_count),
+            status      = VALUES(status)
+    </insert>
+
+    <select id="selectDocBySource" resultType="com.aimall.content.bean.KnowledgeDoc">
+        SELECT id, source_type, ref_id, title, chunk_count, status, created_at, updated_at
+        FROM t_knowledge_doc
+        WHERE source_type = #{sourceType} AND ref_id = #{refId}
+    </select>
+
+    <select id="selectDocById" resultType="com.aimall.content.bean.KnowledgeDoc">
+        SELECT id, source_type, ref_id, title, chunk_count, status, created_at, updated_at
+        FROM t_knowledge_doc
+        WHERE id = #{id}
+    </select>
+
+    <update id="updateDocStatus">
+        UPDATE t_knowledge_doc
+        SET status      = #{status},
+            chunk_count = #{chunkCount}
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteDoc">
+        DELETE FROM t_knowledge_doc WHERE id = #{id}
+    </delete>
+
+    <!-- ============================================================
+         切片
+         ============================================================ -->
+    <insert id="batchInsertChunks">
+        INSERT INTO t_knowledge_chunk (doc_id, chunk_index, content, embedding, token_count)
+        VALUES
+        <foreach collection="chunks" item="c" separator=",">
+            (#{docId}, #{c.chunkIndex}, #{c.content}, #{c.embedding}, #{c.tokenCount})
+        </foreach>
+    </insert>
+
+    <delete id="deleteChunks">
+        DELETE FROM t_knowledge_chunk WHERE doc_id = #{docId}
+    </delete>
+
+    <select id="selectChunks" resultType="com.aimall.content.bean.KnowledgeChunk">
+        SELECT id, doc_id, chunk_index, content, embedding, token_count, created_at
+        FROM t_knowledge_chunk
+        WHERE doc_id = #{docId}
+        ORDER BY chunk_index ASC
+    </select>
+
+    <!--
+      关键词通道：MySQL FULLTEXT(ngram) 全文检索。
+      MATCH...AGAINST 的相关度得分直接用于排序，无需 Java 侧再打分。
+      注意：ngram_token_size 默认 2，所以中文单词少于 2 个字时检索不到——
+      这是 ngram 的固有特性（语义召回由向量通道补上，这就是 Hybrid 的意义）。
+    -->
+    <select id="selectByKeyword" resultType="com.aimall.content.bean.KnowledgeChunk">
+        SELECT id, doc_id, chunk_index, content, embedding, token_count, created_at
+        FROM t_knowledge_chunk
+        WHERE MATCH(content) AGAINST (#{keyword} IN NATURAL LANGUAGE MODE)
+        LIMIT #{limit}
+    </select>
+
+    <!--
+      向量通道：全量捞取"已生成向量"的切片，由 Java 侧算余弦相似度。
+      数据量上万后应改为向量库 ANN 查询（替换 VectorRetriever 实现即可）。
+    -->
+    <select id="selectAllWithEmbedding" resultType="com.aimall.content.bean.KnowledgeChunk">
+        SELECT id, doc_id, chunk_index, content, embedding, token_count, created_at
+        FROM t_knowledge_chunk
+        WHERE embedding IS NOT NULL AND embedding &lt;&gt; ''
+    </select>
+
+    <select id="countMissingEmbedding" resultType="long">
+        SELECT COUNT(*) FROM t_knowledge_chunk
+        WHERE embedding IS NULL OR embedding = ''
+    </select>
+
+</mapper>

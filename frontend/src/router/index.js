@@ -7,6 +7,10 @@ const routes = [
   { path: '/cart', name: 'cart', component: () => import('../views/Cart.vue') },
   { path: '/orders', name: 'orders', component: () => import('../views/Orders.vue') },
   { path: '/chat', name: 'chat', component: () => import('../views/Chat.vue') },
+  // V2 内容社区：种草笔记
+  { path: '/notes', name: 'notes', component: () => import('../views/Notes.vue') },
+  { path: '/notes/create', name: 'note-create', component: () => import('../views/NoteCreate.vue') },
+  { path: '/notes/:id', name: 'note-detail', component: () => import('../views/NoteDetail.vue') },
   { path: '/mine', name: 'mine', component: () => import('../views/Mine.vue') },
   { path: '/mine/addresses', name: 'addresses', component: () => import('../views/AddressManage.vue') }
 ]

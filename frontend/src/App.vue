@@ -19,6 +19,7 @@
 
         <nav class="nav">
           <router-link to="/" class="nav-link">首页</router-link>
+          <router-link to="/notes" class="nav-link">种草</router-link>
           <router-link to="/cart" class="nav-link nav-cart">
             购物车
             <el-badge v-if="cartStore.count > 0" :value="cartStore.count" class="cart-badge" />

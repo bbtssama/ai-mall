@@ -101,6 +101,15 @@
             <version>${minio.version}</version>
         </dependency>
 
+        <!-- ===== V2：RabbitMQ（AI 内容审核异步化） =====
+             为什么需要 MQ：AI 审核要 3~10 秒，不能让用户点"发布"后干等——
+             发布秒回（状态=AUDITING），审核走 MQ 异步回写。
+             同样不强制依赖：未启动 RabbitMQ 时自动降级为线程池异步审核。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
         <!-- AI：Spring AI 以 OpenAI 兼容模式接入 DeepSeek（base-url 指向 api.deepseek.com） -->
         <dependency>
             <groupId>org.springframework.ai</groupId>

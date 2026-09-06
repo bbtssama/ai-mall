@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.content.mapper.NoteMapper">
+
+    <sql id="Base_Column_List">
+        id, user_id, title, cover, content, status, audit_result,
+        hot_score, like_count, collect_count, view_count, created_at, updated_at
+    </sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_note (user_id, title, cover, content, status,
+                            hot_score, like_count, collect_count, view_count)
+        VALUES (#{userId}, #{title}, #{cover}, #{content}, #{status},
+                0, 0, 0, 0)
+    </insert>
+
+    <select id="selectById" resultType="com.aimall.content.bean.Note">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_note
+        WHERE id = #{id}
+    </select>
+
+    <!-- ============================================================
+         游标分页 + 中文全文检索（Feed 流 / 搜索共用）
+         ============================================================ -->
+    <sql id="pageWhere">
+        <where>
+            <if test="status != null and status != ''">
+                AND status = #{status}
+            </if>
+            <if test="userId != null">
+                AND user_id = #{userId}
+            </if>
+            <!-- MySQL FULLTEXT + ngram 解析器：中文关键词检索（无需 ES） -->
+            <if test="keyword != null and keyword != ''">
+                AND MATCH(title, content) AGAINST (#{keyword} IN NATURAL LANGUAGE MODE)
+            </if>
+            <if test="tag != null and tag != ''">
+                AND id IN (SELECT note_id FROM t_note_tag WHERE tag = #{tag})
+            </if>
+            <!--
+              ★ 游标必须与排序键配套，否则会漏数据：
+                - 按最新排(id DESC)：游标 = id < cursorId
+                - 按热度排(hot_score DESC, id DESC)：游标是二元组
+                  (hot_score < cursorHot) OR (hot_score = cursorHot AND id < cursorId)
+                  只用 id 做游标会漏掉"热度更高但 id 更小"的笔记。
+            -->
+            <choose>
+                <when test="orderBy != null and orderBy == 'newest'">
+                    <if test="cursorId != null">
+                        AND id &lt; #{cursorId}
+                    </if>
+                </when>
+                <otherwise>
+                    <if test="cursorHot != null and cursorId != null">
+                        AND (hot_score &lt; #{cursorHot}
+                        OR (hot_score = #{cursorHot} AND id &lt; #{cursorId}))
+                    </if>
+                </otherwise>
+            </choose>
+        </where>
+    </sql>
+
+    <select id="selectPage" resultType="com.aimall.content.bean.Note">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_note
+        <include refid="pageWhere"/>
+        <choose>
+            <when test="orderBy != null and orderBy == 'newest'">
+                ORDER BY id DESC
+            </when>
+            <otherwise>
+                ORDER BY hot_score DESC, id DESC
+            </otherwise>
+        </choose>
+        <!-- 游标分页没有 offset：直接 LIMIT pageSize -->
+        LIMIT #{pageSize}
+    </select>
+
+    <!-- ============================================================
+         状态流转（带状态机条件，防重复处理）
+         ============================================================ -->
+    <update id="updateStatus">
+        UPDATE t_note
+        SET status       = #{newStatus},
+            audit_result = #{auditResult}
+        WHERE id = #{id}
+        <!-- 条件更新 = 幂等：返回 0 行说明状态已被别人改过（MQ 重投/并发审核），直接忽略 -->
+        AND status = #{expectStatus}
+    </update>
+
+    <update id="updateContent">
+        UPDATE t_note
+        SET title    = #{title},
+            content  = #{content},
+            cover    = #{cover}
+        WHERE id = #{id}
+        AND user_id = #{userId}
+    </update>
+
+    <update id="offline">
+        UPDATE t_note
+        SET status = 'OFFLINE'
+        WHERE id = #{id}
+        AND user_id = #{userId}
+    </update>
+
+    <!-- 计数增减：一律用 SET x = x ± 1，不用"先查后改"，避免并发下丢失更新 -->
+    <update id="incrViewCount">
+        UPDATE t_note SET view_count = view_count + 1 WHERE id = #{id}
+    </update>
+
+    <update id="incrLikeCount">
+        UPDATE t_note SET like_count = like_count + 1 WHERE id = #{id}
+    </update>
+
+    <update id="decrLikeCount">
+        <!-- 加 AND like_count > 0 兜底，防止计数被减成负数 -->
+        UPDATE t_note SET like_count = like_count - 1 WHERE id = #{id} AND like_count > 0
+    </update>
+
+    <update id="incrCollectCount">
+        UPDATE t_note SET collect_count = collect_count + 1 WHERE id = #{id}
+    </update>
+
+    <update id="decrCollectCount">
+        UPDATE t_note SET collect_count = collect_count - 1 WHERE id = #{id} AND collect_count > 0
+    </update>
+
+    <update id="updateHotScore">
+        UPDATE t_note SET hot_score = #{hotScore} WHERE id = #{id}
+    </update>
+
+</mapper>

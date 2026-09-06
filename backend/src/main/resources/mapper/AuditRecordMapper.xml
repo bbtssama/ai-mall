@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.content.mapper.AuditRecordMapper">
+
+    <!--
+      INSERT IGNORE = 消费端幂等的第一道防线。
+      uk(biz_type, biz_id, biz_version) 撞键时静默跳过、返回 0 行，
+      Service 据此判断"这条已审过"，直接返回即可（MQ 重复投递不会重复处理）。
+    -->
+    <insert id="insertIgnore">
+        INSERT IGNORE INTO t_audit_record
+        (biz_type, biz_id, biz_version, ai_result_json, status)
+        VALUES
+        (#{bizType}, #{bizId}, #{bizVersion}, #{aiResultJson}, #{status})
+    </insert>
+
+    <select id="selectByBiz" resultType="com.aimall.content.bean.AuditRecord">
+        SELECT id, biz_type, biz_id, biz_version, ai_result_json, status,
+               reviewer, reviewed_at, created_at
+        FROM t_audit_record
+        WHERE biz_type = #{bizType}
+        AND biz_id = #{bizId}
+        AND biz_version = #{bizVersion}
+    </select>
+
+</mapper>

@@ -40,6 +40,24 @@ export const addressApi = {
   setDefault: (id) => request.put(`/v1/addresses/${id}/default`)
 }
 
+// ---------- 内容社区（V2：种草笔记） ----------
+export const noteApi = {
+  // Feed 流：游标分页（cursorId/cursorHot 由上页末条提供）
+  page: (params) => request.get('/v1/notes', { params }),
+  detail: (id) => request.get(`/v1/notes/${id}`),
+  create: (data) => request.post('/v1/notes', data),
+  like: (id, liked) => request.post(`/v1/notes/${id}/like`, { liked }),
+  collect: (id, collected) => request.post(`/v1/notes/${id}/collect`, { collected }),
+  resubmit: (id) => request.post(`/v1/notes/${id}/resubmit`),
+  offline: (id) => request.delete(`/v1/notes/${id}`)
+}
+
+// ---------- AI 内容创作（V2） ----------
+export const aiContentApi = {
+  // AI 生成种草文案草稿（返回 {draft, editable}，用户编辑后再发布）
+  noteDraft: (data) => request.post('/v1/ai/note-draft', data)
+}
+
 // ---------- 文件上传（V1.5） ----------
 export const fileApi = {
   upload: (file, dir = 'notes') => {
