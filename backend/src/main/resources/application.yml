@@ -75,21 +75,6 @@ spring:
         ip: ${NACOS_REGISTER_IP:192.168.6.1}   # ★ 多网卡机器必须指定：自动选择会选中 VMware 虚拟网卡(192.168.49.1)，跨机器不可达
         fail-fast: false      # ★ Nacos 不在→打 WARN 照常启动（客户端自动重连，恢复后自动补注册）
 
-  resilience4j:
-    circuitbreaker:
-      instances:
-        aiService:
-          sliding-window-size: 10            # 滑动窗口：最近 10 次调用
-          failure-rate-threshold: 50         # 失败率 ≥50% 跳闸
-          wait-duration-in-open-state: 30s   # 跳闸后 30s 进半开
-          permitted-number-of-calls-in-half-open-state: 3
-          minimum-number-of-calls: 5         # 至少 5 次才开始统计（防冷启动误判）
-          automatic-transition-from-open-to-half-open-enabled: true
-    timelimiter:
-      instances:
-        aiService:
-          timeout-duration: 60s              # 单次调用上限（读超时之外兜底）
-
   ai:
     openai:
       # 当前生效：官方 DeepSeek 直连（https://api.deepseek.com），模型见下方 chat.options.model。
@@ -108,6 +93,25 @@ spring:
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: Asia/Shanghai
+
+# ===== V4：熔断（Resilience4j）——AI 链路快速失败，避免拖垮业务线程池 =====
+# ★★ 必须是【顶层】 resilience4j: —— Resilience4j 的配置前缀不挂在 spring 下；
+#   写进 spring.resilience4j 会被静默忽略（不报错，但全部参数走默认值）——
+#   这是"配置写了没生效"的典型坑（2026-09-07 评审修复，曾错挂在 spring 块内）。
+resilience4j:
+  circuitbreaker:
+    instances:
+      aiService:
+        sliding-window-size: 10            # 滑动窗口：最近 10 次调用
+        failure-rate-threshold: 50         # 失败率 ≥50% 跳闸
+        wait-duration-in-open-state: 30s   # 跳闸后 30s 进半开
+        permitted-number-of-calls-in-half-open-state: 3
+        minimum-number-of-calls: 5         # 至少 5 次才开始统计（防冷启动误判）
+        automatic-transition-from-open-to-half-open-enabled: true
+  timelimiter:
+    instances:
+      aiService:
+        timeout-duration: 60s              # 单次调用上限（读超时之外兜底）
 
 mybatis:
   mapper-locations: classpath:mapper/**/*.xml

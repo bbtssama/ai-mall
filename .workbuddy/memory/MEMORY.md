@@ -10,7 +10,7 @@
 - **V1 ✅** 单体闭环(10表,冒烟9/9):注册/商品/京东式购物车/订单(行锁CAS扣库存)/AI问答(FC+识图+SSE+会话)/派蒙TTS(自包含VITS:9944)。
 - **V1.5 ✅** 工程基建:Flyway(baseline-on-migrate接存量库)/traceId三件套(Filter+MDC+TaskDecorator)/对象存储抽象(local默认|minio懒初始化预签名)/AsyncConfig(有界队列+CallerRuns)/15个单测(mockStatic钉StpUtil)/docker-compose四件套/GitHub Actions CI。讲解文档:`V1.5工程基建详解.md`+词典。
 - **V2 ✅ 代码全量落地(待编译验证)**:内容社区(t_note等10表,ngram全文索引,游标分页含二元组游标,点赞唯一索引幂等)+AI审核MQ异步(DirectExchange+DLQ,幂等三防线:流水uk INSERT IGNORE/状态机条件更新/ERROR不误杀;毒消息吞异常ACK;MQ不可用降级@Async)+Hybrid RAG(语料=商品说明书+种草笔记;BM25+向量双通道RRF融合;EmbeddingClient可插拔:local哈希256维默认/spring-ai可切;searchDocs与searchProduct双工具Agent分流,模型自选不写if-else)+AI种草文案(RAG参与创作,温度0.8,只出草稿)+模拟数据脚本(gen_mock_data.py种子20260906→100商品/500笔记幂律分布)。讲解文档:`V2内容社区与RAG详解.md`+词典。V1.5曾有一处编译错(addHandler→addResourceHandler已修,用户已验证编译通过)。
-- **V3 规划中**:支付沙箱/Redis(缓存+点赞计数+zset榜)/延迟消息取消订单/限量发售(非秒杀!)。V4:只拆 ai-service(理由:耗时差异抢线程池+故障隔离+密钥隔离)。V5可选:护栏NL2SQL/相似推荐+ItemCF离线对比。
+- **V4 ✅ 已落地并提交(2278954/aeb7054)**:只拆 ai-service(五条理由:耗时差异/故障隔离/独立扩容/密钥隔离/模型可替换)。三应用:mall-app(8080)+ai-service(8081,ChatClient/RAG/语料归它)+gateway(9000,/internal/**拒404+traceId透传)。声明式@HttpExchange(未用Feign,零依赖);HMAC内部鉴权(client+ts+sign+5min防重放);Resilience4j熔断(⚠️配置必须顶层resilience4j:,曾错挂spring下静默失效——已修);双模式aimall.ai.mode(local默认/remote,ChatServiceImpl显式构造器按配置选实现——曾无调用方不生效已修);Nacos已部署192.168.6.102:8848(三服务启动即注册,fail-fast=false可降级;多网卡必须显式指定注册IP=192.168.6.1);gateway另有simple静态发现兜底。ai-service需真实DEEPSEEK_API_KEY;stream是伪流式(文档已注明)。V3 ✅ 见上文。V5可选:相似推荐+ItemCF离线对比未开始。
 
 ## 口径红线(面试勿错)
 

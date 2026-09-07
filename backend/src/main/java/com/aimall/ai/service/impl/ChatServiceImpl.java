@@ -57,7 +57,6 @@ import java.util.List;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class ChatServiceImpl implements ChatService {
 
     /**
@@ -75,6 +74,39 @@ public class ChatServiceImpl implements ChatService {
     private final ChatClient chatClient;
     /** 视觉链路：也带 searchProduct 工具（视觉模型支持 function calling，见 AiConfig） */
     private final ChatClient visionChatClient;
+    /**
+     * V4：AI 执行出口——local（默认，进程内上面的 ChatClient）/ remote（HTTP 调独立 ai-service）。
+     * ★ 按配置选择实现注入（不 @Autowired 具体类）：两个实现都是 AiService 的 @Service Bean，
+     * 这里用 @Value 读配置 + 构造器按名取（ObjectProvider/懒查找均可，此处最直白）。
+     * 评审修复：此前 AiService 抽象写了却无人调用——V4 双模式实际不生效（"写了≠生效"第 N 次）。
+     */
+    private final AiService aiExecution;
+
+    /**
+     * ★ V4 显式构造器：按配置选择 AI 执行实现（替代 @RequiredArgsConstructor 的"按类型注入"）。
+     *
+     * <p>为什么不 @Qualifier 写死：那样模式切换要改代码；这里读 {@code aimall.ai.mode} 配置，
+     * local（默认）→ localAiService，remote → remoteAiService——<b>切换只改配置，代码零变动</b>，
+     * 与项目可插拔家族同一思路。会话/鉴权/落库（本类职责）不随模式变。</p>
+     */
+    public ChatServiceImpl(ConversationMapper conversationMapper,
+                           MessageMapper messageMapper,
+                           ChatClient chatClient,
+                           ChatClient visionChatClient,
+                           @org.springframework.beans.factory.annotation.Qualifier("localAiService") AiService localAi,
+                           @org.springframework.beans.factory.annotation.Qualifier("remoteAiService") AiService remoteAi,
+                           @org.springframework.beans.factory.annotation.Value("${aimall.ai.mode:local}") String aiMode) {
+        this.conversationMapper = conversationMapper;
+        this.messageMapper = messageMapper;
+        this.chatClient = chatClient;
+        this.visionChatClient = visionChatClient;
+        this.aiExecution = "remote".equalsIgnoreCase(aiMode) ? remoteAi : localAi;
+        this.aiModeFlag = aiMode == null ? "local" : aiMode.toLowerCase();
+        log.info("AI 执行模式 = {}（{}）", aiModeFlag, aiExecution.getClass().getSimpleName());
+    }
+
+    /** 模式标记（构造时定格，避免每次请求读配置） */
+    private final String aiModeFlag;
 
     /**
      * 新建空会话（对应前端"新会话"按钮）。
@@ -126,7 +158,11 @@ public class ChatServiceImpl implements ChatService {
         Conversation conv = resolveConversation(req);
         String answer;
         try {
-            if (req.hasImage()) {
+            if ("remote".equals(aiModeFlag)) {
+                // ★ V4 remote 模式：整个模型调用交给独立 ai-service（鉴权/历史截断/双工具都在那边）。
+                // 本地只保留业务职责：会话、落库、自动命名——正是"业务与 AI 能力分离"的拆分本意。
+                answer = aiExecution.chat(req.getMessage(), req.getImage());
+            } else if (req.hasImage()) {
                 // 视觉链路：识别图片中的商品（多模态 UserMessage 走 messages()）
                 // visionChatClient 也挂载了 searchProduct 工具，视觉模型同样支持 function calling。
                 // .options() 按次覆盖模型与温度：当前模型与 yml 默认相同（覆盖无效），
