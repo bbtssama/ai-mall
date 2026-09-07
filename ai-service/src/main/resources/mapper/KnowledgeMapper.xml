@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  知识库 SQL（ai-service 侧）
+  表结构沿用 V2 的 t_knowledge_doc / t_knowledge_chunk（Flyway V2 已建），
+  拆分后由 ai-service 独占读写；mall-app 只能通过内部接口请求索引。
+-->
+<mapper namespace="com.aimall.ai.mapper.KnowledgeMapper">
+
+    <sql id="Chunk_Columns">
+        c.id, c.content, c.embedding,
+        d.source_type AS sourceType, d.ref_id AS refId, d.title AS title
+    </sql>
+
+    <select id="findDoc" resultType="java.lang.Long">
+        SELECT id FROM t_knowledge_doc
+        WHERE source_type = #{sourceType} AND ref_id = #{refId}
+    </select>
+
+    <insert id="insertDoc">
+        INSERT INTO t_knowledge_doc (source_type, ref_id, title, status)
+        VALUES (#{sourceType}, #{refId}, #{title}, 'PENDING')
+    </insert>
+
+    <delete id="deleteDoc">
+        DELETE FROM t_knowledge_doc WHERE id = #{id}
+    </delete>
+
+    <delete id="deleteChunks">
+        DELETE FROM t_knowledge_chunk WHERE doc_id = #{docId}
+    </delete>
+
+    <insert id="insertChunk">
+        INSERT INTO t_knowledge_chunk (doc_id, chunk_index, content, embedding)
+        VALUES (#{docId}, 0, #{content}, #{embedding})
+    </insert>
+
+    <!-- 关键词通道：ngram 全文检索（必须 WITH PARSER ngram，见 V2 词典） -->
+    <select id="selectByKeyword" resultType="com.aimall.ai.mapper.KnowledgeMapper$ChunkRow">
+        SELECT
+        <include refid="Chunk_Columns"/>
+        FROM t_knowledge_chunk c
+        JOIN t_knowledge_doc d ON d.id = c.doc_id
+        WHERE MATCH(c.content) AGAINST (#{keyword} IN NATURAL LANGUAGE MODE)
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectAllWithEmbedding" resultType="com.aimall.ai.mapper.KnowledgeMapper$ChunkRow">
+        SELECT
+        <include refid="Chunk_Columns"/>
+        FROM t_knowledge_chunk c
+        JOIN t_knowledge_doc d ON d.id = c.doc_id
+    </select>
+
+</mapper>

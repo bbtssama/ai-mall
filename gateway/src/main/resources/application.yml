@@ -1,0 +1,83 @@
+server:
+  port: 9000            # ★ 外部唯一入口：前端只认识 9000
+
+spring:
+  application:
+    name: gateway
+
+  cloud:
+    gateway:
+      # 全局跨域（前后端分离：前端 dev server 端口不同）
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowed-origin-patterns: "*"
+            allowed-methods: "*"
+            allowed-headers: "*"
+            allow-credentials: true
+
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: 120s     # AI 链路慢：读超时给足；连接超时短（快速失败）
+
+      # ===== 路由表（面试就讲这张表）=====
+      routes:
+        # ① 业务接口 → mall-app
+        - id: mall_api
+          uri: lb://mall-app          # lb:// = 负载均衡 + 服务发现（当前静态实例，见下方 discovery）
+          predicates:
+            - Path=/api/**
+          filters:
+            - StripPrefix=0
+
+        # ② 静态资源（上传的图片）→ mall-app
+        - id: mall_files
+          uri: lb://mall-app
+          predicates:
+            - Path=/files/**
+
+        # ③ 运维探针
+        - id: mall_actuator
+          uri: lb://mall-app
+          predicates:
+            - Path=/actuator/**
+
+        # ④ ★ 安全边界：内部服务间接口，外部一律拒绝
+        #    没有这条，外部只要知道 8081 就能直接打 ai-service 的 /internal/** 端点
+        - id: deny_internal
+          uri: no://op                # 不转发（no:// 是 Gateway 的"不转发"占位）
+          predicates:
+            - Path=/internal/**
+          filters:
+            - SetStatus=404           # 用 404 而非 403：不向探测者确认端点存在
+
+    # ===== 服务发现：Nacos（主）+ 静态实例（兜底）=====
+    # ① Nacos：启动即注册（fail-fast=false：Nacos 不在→打 WARN 照常启动，客户端自动重连补注册）
+    nacos:
+      discovery:
+        enabled: true
+        server-addr: ${NACOS_ADDR:192.168.6.102:8848}
+        ip: ${NACOS_REGISTER_IP:192.168.6.1}   # ★ 多网卡机器必须指定：自动选择会选中 VMware 虚拟网卡(192.168.49.1)，跨机器不可达
+        fail-fast: false
+    # ② 静态实例兜底：Nacos 挂了 lb:// 仍有解析目标（注册中心故障降级——与项目可降级哲学一致）
+    discovery:
+      client:
+        simple:
+          instances:
+            mall-app:
+              - uri: http://localhost:8080
+            ai-service:
+              - uri: http://localhost:8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+  endpoint:
+    gateway:
+      enabled: true     # /actuator/gateway/routes 可查看路由表（调试利器）
+
+logging:
+  level:
+    com.aimall.gateway: INFO

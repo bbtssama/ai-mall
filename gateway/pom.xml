@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.4.5</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.aimall</groupId>
+    <artifactId>gateway</artifactId>
+    <version>1.0.0</version>
+    <name>gateway</name>
+    <description>AI 种草商城 - 网关：统一入口 / 路由 / 过滤器（traceId 透传）</description>
+
+    <properties>
+        <java.version>17</java.version>
+        <spring-cloud.version>2024.0.1</spring-cloud.version>
+        <!-- Spring Cloud Alibaba：2023.0.3.x 支持 Nacos 2.x 客户端；
+             与 Spring Cloud 2024.0.x 混用未经官方认证但接口稳定（DiscoveryClient 未变），
+             且本项目默认 profile 下 nacos discovery 是关闭的——不启用就零影响 -->
+        <spring-cloud-alibaba.version>2023.0.3.2</spring-cloud-alibaba.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba.cloud</groupId>
+                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
+                <version>${spring-cloud-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!--
+          ★ 网关选型说明：用经典版 spring-cloud-starter-gateway（WebFlux 响应式）
+          - 它是业界主流（教程/面试/生产绝大多数都是这个），BOM 版本管理完善；
+          - 网关是**独立进程**，WebFlux 与后端 Servlet 栈互不冲突（各跑各的 JVM）；
+          - 另有一个 Servlet 版（gateway-server-webmvc），概念一致，但本项目以主流为准。
+        -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-gateway</artifactId>
+        </dependency>
+
+        <!-- 服务发现客户端（静态实现：零额外服务；切 Nacos 只需换 starter + 配置） -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-loadbalancer</artifactId>
+        </dependency>
+
+        <!-- Nacos 注册发现（V4 可选）：默认 profile 下 disabled（见 yml）。
+             启用方式：激活 nacos profile（激活参数 spring.profiles.active=nacos），
+             且虚拟机有 Nacos:8848 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

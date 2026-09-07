@@ -1,5 +1,5 @@
 # ===== Java / Maven =====
-backend/target/
+**/target/          # Maven 编译产物（覆盖所有模块：backend/ai-service/gateway）
 *.class
 *.jar
 !.mvn/wrapper/maven-wrapper.jar

@@ -7,7 +7,7 @@ spring:
     # 若将来部署生产，用命令行覆盖：--spring.profiles.active=prod
     active: local
   application:
-    name: ai-mall-backend
+    name: mall-app            # ★ 服务注册名（V4：Nacos/lb://mall-app 的解析名）
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     # 开发库：192.168.6.102（与 order-system-v2 / blog-system 同一台 MySQL）
@@ -67,6 +67,29 @@ spring:
         default-requeue-rejected: false
         prefetch: 5        # 审核是秒级慢任务，预取太多会堆积在客户端内存
 
+  cloud:
+    nacos:
+      discovery:
+        enabled: true         # 启动即注册（服务名 mall-app，控制台可见）
+        server-addr: ${NACOS_ADDR:192.168.6.102:8848}
+        ip: ${NACOS_REGISTER_IP:192.168.6.1}   # ★ 多网卡机器必须指定：自动选择会选中 VMware 虚拟网卡(192.168.49.1)，跨机器不可达
+        fail-fast: false      # ★ Nacos 不在→打 WARN 照常启动（客户端自动重连，恢复后自动补注册）
+
+  resilience4j:
+    circuitbreaker:
+      instances:
+        aiService:
+          sliding-window-size: 10            # 滑动窗口：最近 10 次调用
+          failure-rate-threshold: 50         # 失败率 ≥50% 跳闸
+          wait-duration-in-open-state: 30s   # 跳闸后 30s 进半开
+          permitted-number-of-calls-in-half-open-state: 3
+          minimum-number-of-calls: 5         # 至少 5 次才开始统计（防冷启动误判）
+          automatic-transition-from-open-to-half-open-enabled: true
+    timelimiter:
+      instances:
+        aiService:
+          timeout-duration: 60s              # 单次调用上限（读超时之外兜底）
+
   ai:
     openai:
       # 当前生效：官方 DeepSeek 直连（https://api.deepseek.com），模型见下方 chat.options.model。
@@ -97,6 +120,15 @@ mybatis:
 #   运行时说明：需在 voice-tts/ 放置模型并安装依赖（pip install -r voice-tts/requirements.txt），详见 README。
 #   若机器无 Python/模型/依赖 → 后端照常启动，TTS 自动回退本地 Edge-TTS（非派蒙音色，仅兜底）。
 aimall:
+  # ===== V4：服务化（AI 独立 + 内部调用鉴权）=====
+  # 模式：local=进程内 AI（默认，零依赖）；remote=调独立 ai-service（需先启动 8081）
+  ai:
+    mode: ${AIMALL_AI_MODE:local}
+  ai-service:
+    url: ${AI_SERVICE_URL:http://localhost:8081}    # ★ 键名与 @Value("${aimall.ai-service.url}") 对齐
+  internal:
+    secret: ${AIMALL_INTERNAL_SECRET:aimall-internal-secret}
+    client-id: mall-app
   voice:
     tts:
       # 派蒙音色主路径：本机内嵌 VITS（:9944/tts 返回 wav，PaimonBackendTtsClient 用 ffmpeg 转 mp3）。
@@ -153,6 +185,7 @@ aimall:
   # 日志目录（logback-spring.xml 通过 springProperty 读取）
   logging:
     dir: ./logs
+
 
   # ===== V3：支付 =====
   pay:

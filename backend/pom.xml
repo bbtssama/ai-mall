@@ -22,6 +22,9 @@
         <mybatis.version>3.0.4</mybatis.version>
         <sa-token.version>1.39.0</sa-token.version>
         <spring-ai.version>1.0.0</spring-ai.version>
+        <!-- Spring Cloud 版本须与 Boot 3.4.x 对应（2024.0.x 系列） -->
+        <spring-cloud.version>2024.0.1</spring-cloud.version>
+        <spring-cloud-alibaba.version>2023.0.3.2</spring-cloud-alibaba.version>
         <minio.version>8.5.17</minio.version>
     </properties>
 
@@ -32,6 +35,22 @@
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
                 <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring Cloud BOM（V4：熔断 Resilience4j 等）——版本需与 Boot 3.4.x 对齐：2024.0.x -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring Cloud Alibaba BOM（V4 可选：Nacos 注册发现，默认 profile 下 disabled） -->
+            <dependency>
+                <groupId>com.alibaba.cloud</groupId>
+                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
+                <version>${spring-cloud-alibaba.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -116,6 +135,22 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- ===== V4：熔断（Spring Cloud CircuitBreaker + Resilience4j）=====
+             为什么需要：AI 调用慢/失败时，不熔断则每个请求都要等满读超时（120s）才失败——
+             请求线程被长时间占住，这正是 V4 拆出 ai-service 要解决的"拖垮线程池"问题。
+             熔断让故障快速失败 + 恢复后自动半开试探，是故障隔离的兑现手段。 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
+        </dependency>
+
+        <!-- ===== V4 可选：Nacos 注册发现（默认 disabled，nacos profile 启用）=====
+             ★ 服务名必须是 mall-app（lb://mall-app 的解析名），见 application.yml -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
         </dependency>
 
         <!-- AI：Spring AI 以 OpenAI 兼容模式接入 DeepSeek（base-url 指向 api.deepseek.com） -->

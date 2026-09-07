@@ -71,6 +71,25 @@ services:
       - aimall
 
   # ---------- MinIO（V2 笔记图片；S3 兼容对象存储）----------
+  # ---------- Nacos（V4 可选）：注册中心 ----------
+  # ★ 默认不启用：本项目用 Spring Cloud 的 SimpleDiscoveryClient（静态服务发现）即可跑通，
+  #   与 Nacos 用的是同一个 DiscoveryClient 抽象、路由/调用写法完全一致。
+  #   想真连注册中心时：docker compose up -d nacos，然后给 gateway 加下面的配置即可，
+  #   业务代码与 lb://mall-app 这一套写法零改动。
+  #   nacos:
+  #     image: nacos/nacos-server:v2.3.2
+  #     container_name: aimall-nacos
+  #     environment:
+  #       MODE: standalone              # 单机模式（学习/演示足够）
+  #       NACOS_AUTH_ENABLE: "false"
+  #     ports:
+  #       - "8848:8848"                 # 服务注册
+  #       - "9848:9848"                 # gRPC（客户端通信）
+  #
+  #   对应配置（取消注释到 application.yml 即切换到 Nacos）：
+  #     spring.cloud.nacos.discovery.server-addr: 192.168.6.102:8848
+  #     spring.cloud.nacos.discovery.fail-fast: false    # 连不上不阻断启动（可降级）
+
   minio:
     image: minio/minio:latest
     container_name: aimall-minio
