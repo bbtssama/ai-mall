@@ -35,6 +35,8 @@ backend/uploads/
 
 # ===== 敏感配置（含 API Key，生产务必入库前移除）=====
 backend/src/main/resources/application-local.yml
+ai-service/src/main/resources/application-local.yml
+gateway/src/main/resources/application-local.yml
 .env
 .env.*
 # ===== 派蒙 Live2D 皮套 / 语音等受限第三方资产（仅本地演示，禁止提交/再分发/商用/公开）=====
