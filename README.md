@@ -60,6 +60,24 @@ cd backend && mvn test
 
 V1 基础上新增了"AI 助手语音 + Live2D 动效"：AI 回复后，前端逐句请求 TTS 并播放派蒙音色，同时派蒙 Live2D 皮套做口型/表情/动作。
 
+### 请求链路（谁调用谁，一图看完）
+
+```
+浏览器
+  │ fetch('/api/v1/voice/tts')            ← 前端只认 /api 入口，与其他接口无异
+  ▼
+Vite 代理 (/api → localhost:8080)
+  ▼
+Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
+  │
+  ├─ 主路径: POST http://127.0.0.1:9944/tts      ← 内嵌派蒙 VITS（本机 Python 子进程）
+  │          由 VitsLifecycle 随后端启动自拉起、关闭时销毁；
+  │          只绑 127.0.0.1 回环，外部/浏览器不可见
+  └─ 兜底:   Edge-TTS（后端本地合成，非派蒙音色） ← VITS 缺资产/缺依赖/未就绪时自动降级
+```
+
+要点：**9944 不是独立部署的服务**，而是后端 `ProcessBuilder` 拉起的内嵌子进程（模型推理依赖 Python 生态，故以子进程内嵌而非独立微服务，不增加部署单元）；前端对它完全无感，VITS 故障不穿透（自动降级）。解释器路径必须显式配置（`aimall.voice.tts.vits.python`），裸写 `python` 会被 PATH 漂移坑（曾因 PATH 上的 python 缺 soundfile 静默降级）。
+
 > ⚠️ **合规红线（务必先读）**
 > - 派蒙 Live2D 皮套模型、游戏语音、派蒙 6k VITS 音色模型，均为**第三方 / 他人（miHoYo IP + 社区 Paimon6k 音色）的受限资产**，许可含限制项：**仅限个人 / 学习 / 演示，禁止再分发、公开、商用**。
 > - ⚠️ **当前本机工作副本已就位这些资产**（`frontend/public/assets/model/`、`frontend/public/vendor/`、`voice-tts/` 内模型均存在，派蒙音色与动效可完整体验）。
