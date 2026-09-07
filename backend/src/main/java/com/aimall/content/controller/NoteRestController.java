@@ -42,6 +42,12 @@ public class NoteRestController {
         return R.ok(noteService.page(query));
     }
 
+    /** V3 热门榜：Redis zset 倒序 Top-N（点赞*3+收藏*5+浏览*1 加权） */
+    @GetMapping("/hot")
+    public R<java.util.List<NoteVO>> hot(@RequestParam(defaultValue = "10") int limit) {
+        return R.ok(noteService.hotRank(Math.min(Math.max(limit, 1), 50)));
+    }
+
     @GetMapping("/{id}")
     public R<NoteVO> detail(@PathVariable Long id) {
         return R.ok(noteService.detail(id));

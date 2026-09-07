@@ -35,14 +35,29 @@ spring:
       max-file-size: 10MB
       max-request-size: 20MB
 
+  # ===== V3：Redis =====
+  # 本地虚拟机 192.168.6.102:6381（有密码 123456）。未启动时 RedisOps 统一降级走 DB，应用照常运行。
+  data:
+    redis:
+      host: ${REDIS_HOST:192.168.6.102}
+      port: ${REDIS_PORT:6381}
+      password: ${REDIS_PASSWORD:123456}
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 16     # 最大连接数
+          max-idle: 8        # 最大空闲连接
+          min-idle: 2        # 最小空闲连接（预热，避免突发请求新建连接的延迟）
+          max-wait: 2000ms   # 拿连接的最长等待
+
   # ===== V2：RabbitMQ（AI 内容审核异步化）=====
   # ★ 可插拔：未启动 RabbitMQ 时发布接口照常工作（自动降级为线程池异步审核）。
   # spring-amqp 连接失败会自动后台重连，不阻断应用启动。
   rabbitmq:
-    host: ${RABBITMQ_HOST:localhost}
-    port: ${RABBITMQ_PORT:5672}
-    username: ${RABBITMQ_USER:aimall}
-    password: ${RABBITMQ_PASSWORD:aimall123}
+    host: ${RABBITMQ_HOST:192.168.6.102}
+    port: ${RABBITMQ_PORT:5673}
+    username: ${RABBITMQ_USER:admin}
+    password: ${RABBITMQ_PASSWORD:123456}
     # 发布者确认：消息到达 Broker 才算发送成功（"不丢"的发送端一半）
     publisher-confirm-type: correlated
     publisher-returns: true
@@ -93,8 +108,10 @@ aimall:
       # 内嵌 VITS 服务（vits_server.py）拉起相关
       vits:
         port: 9944
-        # Python 解释器命令（须为装好 torch/fastapi/uvicorn/soundfile 的解释器；如 G:\tts\env\python.exe）
-        python: python
+        # Python 解释器：★必须显式指向装好 torch/fastapi/uvicorn/soundfile 的解释器。
+        # 不能裸写 python（PATH 漂移）：曾因 PATH 上的 python 变成无依赖的 3.13，
+        # spawn 出的进程 ModuleNotFoundError: soundfile 直接死掉，TTS 静默降级 Edge-TTS。
+        python: ${AIMALL_VITS_PYTHON:G:/tts/env/python.exe}
         # 内嵌 VITS 目录：相对后端工作目录（从 ai-mall/backend 启动时会向上解析到 ai-mall/voice-tts）
         script-dir: voice-tts
         # /health 就绪轮询：超时与间隔（ms）
@@ -136,6 +153,14 @@ aimall:
   # 日志目录（logback-spring.xml 通过 springProperty 读取）
   logging:
     dir: ./logs
+
+  # ===== V3：支付 =====
+  pay:
+    default-channel: MOCK            # 默认渠道（MOCK 零依赖可跑通）
+    mock:
+      # 模拟渠道的 HMAC 签名密钥（生产环境务必改为环境变量注入）
+      secret: ${AIMALL_PAY_MOCK_SECRET:aimall-mock-secret}
+      cashier-url: /mock-cashier     # 前端模拟收银台路由
 
   # ===== V2：RAG 配置 =====
   # embedding 默认 local（零依赖哈希向量，字面相似）；

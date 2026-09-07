@@ -110,6 +110,14 @@
             <artifactId>spring-boot-starter-amqp</artifactId>
         </dependency>
 
+        <!-- ===== V3：Redis（缓存 / 计数 / 排行榜 / 分布式锁 / 限流） =====
+             为什么需要：商品详情读多写少、笔记点赞是热点写、热门榜要实时排序。
+             同样不强制依赖：Redis 未启动时 Redis 调用统一降级走 DB，应用照常运行。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- AI：Spring AI 以 OpenAI 兼容模式接入 DeepSeek（base-url 指向 api.deepseek.com） -->
         <dependency>
             <groupId>org.springframework.ai</groupId>

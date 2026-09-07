@@ -53,6 +53,11 @@ public class NoteServiceImpl implements NoteService {
     private final UserMapper userMapper;
     private final ProductMapper productMapper;
     private final AuditService auditService;
+    /** V3：Redis（热门榜 zset 等，可降级） */
+    private final com.aimall.common.redis.RedisOps redisOps;
+
+    /** 热门榜的 zset key（与词典/文档中的命名一致） */
+    private static final String HOT_RANK_KEY = "aimall:hot:notes";
     /** RAG 索引：下架笔记时移除语料（content → ai.rag 同应用依赖，V4 拆分后改 Feign） */
     private final com.aimall.ai.rag.RagIndexService ragIndexService;
 
@@ -367,7 +372,9 @@ public class NoteServiceImpl implements NoteService {
         }
     }
 
-    /** 热度公式：点赞*3 + 收藏*5 + 浏览*1（权重：收藏是最强的兴趣信号） */
+    /** 热度公式：点赞*3 + 收藏*5 + 浏览*1（权重：收藏是最强的兴趣信号）。
+     *  V3：算完后同步写 Redis zset（热门榜）——zAdd 全量覆盖与 DB 一致；
+     *  Redis 不可用时静默降级（榜单纯粹是展示优化，不决定可用性）。 */
     private void refreshHotScore(Long noteId) {
         Note n = noteMapper.selectById(noteId);
         if (n == null) {
@@ -375,6 +382,36 @@ public class NoteServiceImpl implements NoteService {
         }
         int score = n.getLikeCount() * 3 + n.getCollectCount() * 5 + n.getViewCount();
         noteMapper.updateHotScore(noteId, score);
+        redisOps.zAdd(HOT_RANK_KEY, String.valueOf(noteId), score);
+    }
+
+    /** 热门榜（V3）：Redis zset 倒序 Top-N，附当前热度分。 */
+    @Override
+    public List<NoteVO> hotRank(int limit) {
+        List<com.aimall.common.redis.RedisOps.RankItem> rank =
+                redisOps.zTopWithScore(HOT_RANK_KEY, limit);
+        List<NoteVO> result = new java.util.ArrayList<>(rank.size());
+        for (var item : rank) {
+            try {
+                Long noteId = Long.parseLong(item.member());
+                Note n = noteMapper.selectById(noteId);
+                if (n != null && Note.STATUS_PUBLISHED.equals(n.getStatus())) {
+                    NoteVO vo = new NoteVO();
+                    vo.setId(n.getId());
+                    vo.setTitle(n.getTitle());
+                    vo.setCover(n.getCover());
+                    vo.setLikeCount(n.getLikeCount());
+                    vo.setCollectCount(n.getCollectCount());
+                    vo.setViewCount(n.getViewCount());
+                    vo.setHotScore((int) item.score());
+                    vo.setCreatedAt(n.getCreatedAt());
+                    result.add(vo);
+                }
+            } catch (NumberFormatException ignored) {
+                // 榜内混入脏数据（理论不可达）：跳过而不是让整个榜单接口失败
+            }
+        }
+        return result;
     }
 
     private void ensurePublished(Long noteId) {

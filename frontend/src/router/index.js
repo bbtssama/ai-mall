@@ -12,7 +12,9 @@ const routes = [
   { path: '/notes/create', name: 'note-create', component: () => import('../views/NoteCreate.vue') },
   { path: '/notes/:id', name: 'note-detail', component: () => import('../views/NoteDetail.vue') },
   { path: '/mine', name: 'mine', component: () => import('../views/Mine.vue') },
-  { path: '/mine/addresses', name: 'addresses', component: () => import('../views/AddressManage.vue') }
+  { path: '/mine/addresses', name: 'addresses', component: () => import('../views/AddressManage.vue') },
+  // V3：模拟收银台（MOCK 渠道）
+  { path: '/mock-cashier', name: 'mock-cashier', component: () => import('../views/MockCashier.vue') }
 ]
 
 const router = createRouter({

@@ -18,6 +18,11 @@ public class SaTokenConfig implements WebMvcConfigurer {
                 .excludePathPatterns(
                         "/api/v1/auth/login",
                         "/api/v1/auth/register",
+                        // V3：支付回调——第三方（支付宝服务器）不可能持有我们用户的 token。
+                        // 回调接口的"身份"由【验签】保证，而不是 token：
+                        //   业务接口靠"你是谁"（认证），回调接口靠"消息是谁发的、有没有被改"（完整性）。
+                        // 若这里不放行，回调会被 401 拦掉，订单永远无法变为已支付。
+                        "/api/v1/payments/callback/**",
                         "/error"
                 );
     }

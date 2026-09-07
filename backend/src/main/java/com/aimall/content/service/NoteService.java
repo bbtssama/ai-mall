@@ -40,4 +40,10 @@ public interface NoteService {
      * 会触发新一轮审核。
      */
     void resubmit(Long noteId);
+
+    /**
+     * 热门榜（V3）：Redis zset 倒序 Top-N。
+     * Redis 不可用时返回空榜（榜单是展示优化，不决定可用性）。
+     */
+    java.util.List<NoteVO> hotRank(int limit);
 }

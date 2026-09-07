@@ -5,6 +5,7 @@ import com.aimall.ai.dto.ConversationVO;
 import com.aimall.ai.dto.MessageVO;
 import com.aimall.ai.service.ChatService;
 import com.aimall.common.api.R;
+import com.aimall.common.exception.BusinessException;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
@@ -49,6 +50,8 @@ public class ChatRestController {
 
     /** 依赖接口而非实现类：换 AI 实现（V2 加 RAG 等）Controller 不动（依赖倒置） */
     private final ChatService chatService;
+    /** V3：AI 接口限流（Redis 固定窗口，可降级） */
+    private final com.aimall.common.redis.RedisOps redisOps;
 
     /**
      * 新建空会话（前端传"新会话"占位标题，首条消息后由后端自动改名）。
@@ -83,6 +86,7 @@ public class ChatRestController {
      */
     @PostMapping
     public R<String> chat(@RequestBody @Valid ChatRequest req) {
+        checkRateLimit();
         return R.ok(chatService.chat(req));
     }
 
@@ -96,7 +100,28 @@ public class ChatRestController {
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> stream(@RequestBody @Valid ChatRequest req) {
+        checkRateLimit();
         return chatService.stream(req);
+    }
+
+    /**
+     * ★ V3：AI 接口限流（每用户 10 次/分钟）。
+     *
+     * <p>为什么 AI 接口必须限流而普通接口可以宽容：</p>
+     * <ul>
+     *   <li><b>按 token 计费</b>：一次问答真实花钱，被脚本刷一晚就是真金白银的损失；</li>
+     *   <li><b>耗时资源</b>：AI 调用秒级耗时，占住线程池，刷接口影响所有正常用户。</li>
+     * </ul>
+     * 实现是 Redis 固定窗口计数（RedisOps.allow）——Redis 不可用时<b>放行</b>：
+     * 限流组件绝不能反过来成为可用性瓶颈（拒绝服务比多花点钱更糟）。
+     */
+    private void checkRateLimit() {
+        Long userId = cn.dev33.satoken.stp.StpUtil.getLoginIdAsLong();
+        boolean allowed = redisOps.allow("aimall:rate:chat:" + userId, 10, 60);
+        if (!allowed) {
+            throw new BusinessException(com.aimall.common.api.ResultCode.AI_SERVICE_ERROR,
+                    "问得太频繁啦，休息一下再来～（每分钟 10 次）");
+        }
     }
 
     /**

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.pay.mapper.DropMapper">
+
+    <sql id="Activity_Columns">
+        id, title, product_id, sku_id, drop_price, drop_stock, per_limit,
+        start_time, end_time, status, created_at
+    </sql>
+
+    <select id="selectActivity" resultType="com.aimall.pay.bean.DropActivity">
+        SELECT
+        <include refid="Activity_Columns"/>
+        FROM t_drop_activity
+        WHERE id = #{id}
+    </select>
+
+    <!-- 进行中：按开始时间正序（先开售的在前） -->
+    <select id="selectOngoing" resultType="com.aimall.pay.bean.DropActivity">
+        SELECT
+        <include refid="Activity_Columns"/>
+        FROM t_drop_activity
+        WHERE start_time &lt;= #{now} AND end_time &gt;= #{now}
+        ORDER BY start_time ASC
+    </select>
+
+    <insert id="insertActivity" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_drop_activity (title, product_id, sku_id, drop_price, drop_stock,
+                                     per_limit, start_time, end_time, status)
+        VALUES (#{title}, #{productId}, #{skuId}, #{dropPrice}, #{dropStock},
+                #{perLimit}, #{startTime}, #{endTime}, #{status})
+    </insert>
+
+    <update id="updateStatus">
+        UPDATE t_drop_activity
+        SET status = #{newStatus}
+        WHERE id = #{id}
+        AND status = #{expectStatus}
+    </update>
+
+    <!-- 不用 INSERT IGNORE：限购冲突必须让 Service 感知（抛 DuplicateKey → 提示"限购"），
+         与点赞"静默幂等"语义不同——这里是业务失败，不是重复确认 -->
+    <insert id="insertRecord" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_drop_record (activity_id, user_id, order_id, quantity)
+        VALUES (#{activityId}, #{userId}, #{orderId}, #{quantity})
+    </insert>
+
+    <select id="selectRecord" resultType="com.aimall.pay.bean.DropRecord">
+        SELECT id, activity_id, user_id, order_id, quantity, created_at
+        FROM t_drop_record
+        WHERE activity_id = #{activityId} AND user_id = #{userId}
+    </select>
+
+</mapper>

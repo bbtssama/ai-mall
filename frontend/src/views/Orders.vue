@@ -29,6 +29,9 @@
           </div>
         </div>
         <div class="order-foot">
+          <el-button v-if="o.status === 'PENDING_PAY'" size="small" type="primary" @click="goPay(o)">
+            去支付
+          </el-button>
           <el-button v-if="o.status === 'PENDING_PAY'" size="small" type="danger" plain @click="cancel(o)">
             取消订单
           </el-button>
@@ -75,7 +78,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { orderApi } from '../api'
+import { orderApi, payApi } from '../api'
 
 const STATUS_TEXT = {
   PENDING_PAY: '待支付', PAID: '已支付', SHIPPED: '已发货',
@@ -137,6 +140,13 @@ async function cancel(o) {
   await orderApi.cancel(o.id)
   ElMessage.success('订单已取消')
   load()
+}
+
+// V3：发起支付 → 创建/复用支付单 → 跳模拟收银台
+// cashierUrl 由后端拼好（含 paymentNo/amount），前端不重复拼参数
+async function goPay(o) {
+  const vo = await payApi.create(o.id)
+  window.location.href = vo.cashierUrl
 }
 
 async function showDetail(o) {

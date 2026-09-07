@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aimall.pay.mapper.PaymentMapper">
+
+    <sql id="Base_Column_List">
+        id, payment_no, order_id, order_no, user_id, amount, channel, status,
+        third_trade_no, callback_body, paid_time, expire_time, created_at, updated_at
+    </sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO t_payment (payment_no, order_id, order_no, user_id, amount,
+                               channel, status, expire_time)
+        VALUES (#{paymentNo}, #{orderId}, #{orderNo}, #{userId}, #{amount},
+                #{channel}, #{status}, #{expireTime})
+    </insert>
+
+    <select id="selectByPaymentNo" resultType="com.aimall.pay.bean.Payment">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_payment
+        WHERE payment_no = #{paymentNo}
+    </select>
+
+    <select id="selectByOrderId" resultType="com.aimall.pay.bean.Payment">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_payment
+        WHERE order_id = #{orderId}
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
+    <!--
+      ★ 幂等的状态机 CAS：WHERE status = 期望状态
+      重复回调（网络重传/第三方重试）时第二次影响 0 行，Service 据此判断"已处理过"。
+      这比"先 SELECT 判断再 UPDATE"可靠——后者在并发下两个请求可能都读到 PAYING。
+    -->
+    <update id="updateToPaid">
+        UPDATE t_payment
+        SET status         = 'PAID',
+            third_trade_no = #{thirdTradeNo},
+            callback_body  = #{callbackBody},
+            paid_time      = NOW()
+        WHERE payment_no = #{paymentNo}
+        AND status = #{expectStatus}
+    </update>
+
+    <update id="updateToClosed">
+        UPDATE t_payment
+        SET status = 'CLOSED'
+        WHERE payment_no = #{paymentNo}
+        AND status = #{expectStatus}
+    </update>
+
+</mapper>

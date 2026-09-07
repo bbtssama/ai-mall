@@ -52,6 +52,24 @@ export const noteApi = {
   offline: (id) => request.delete(`/v1/notes/${id}`)
 }
 
+// ---------- 支付（V3） ----------
+export const payApi = {
+  create: (orderId, channel) => request.post('/v1/payments', { orderId, channel }),
+  detail: (paymentNo) => request.get(`/v1/payments/${paymentNo}`),
+  byOrder: (orderId) => request.get(`/v1/payments/order/${orderId}`),
+  // 主动查单对账（兜"回调丢失"）
+  sync: (paymentNo) => request.post(`/v1/payments/${paymentNo}/sync`),
+  // 仅 MOCK 渠道：模拟"用户在第三方完成支付"（内部走真实回调链路）
+  mockPay: (paymentNo) => request.post(`/v1/payments/mock-pay/${paymentNo}`)
+}
+
+// ---------- 限量发售（V3） ----------
+export const dropApi = {
+  ongoing: () => request.get('/v1/drops'),
+  detail: (id) => request.get(`/v1/drops/${id}`),
+  buy: (id, quantity = 1) => request.post(`/v1/drops/${id}/buy`, { quantity })
+}
+
 // ---------- AI 内容创作（V2） ----------
 export const aiContentApi = {
   // AI 生成种草文案草稿（返回 {draft, editable}，用户编辑后再发布）

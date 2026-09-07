@@ -19,6 +19,7 @@ import com.aimall.order.mapper.OrderItemMapper;
 import com.aimall.order.mapper.OrderMapper;
 import com.aimall.order.service.OrderService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,6 +31,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderServiceImpl implements OrderService {
@@ -41,6 +43,10 @@ public class OrderServiceImpl implements OrderService {
     private final ProductSkuMapper skuMapper;
     private final ProductMapper productMapper;
     private final CartMapper cartMapper;
+    /** V3：延迟消息（订单超时自动取消）。ObjectProvider 兜底——RabbitMQ 未启动时订单照常创建 */
+    private final org.springframework.beans.factory.ObjectProvider<org.springframework.amqp.rabbit.core.RabbitTemplate> rabbitTemplateProvider;
+    /** V3：订单取消时联动关闭支付单（pay 包，无循环依赖：PaymentService 只依赖 OrderMapper） */
+    private final com.aimall.pay.service.PaymentService paymentService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -105,6 +111,23 @@ public class OrderServiceImpl implements OrderService {
                     items.stream().map(OrderItemRequest::getSkuId).toList());
         }
 
+        // 5. V3：投递延迟消息 → 30 分钟后由消费者检查"是否仍待支付"，是则自动取消+回补库存。
+        //    实现方式 = TTL + 死信队列（零插件，见 OrderDelayMqConfig 的说明）。
+        //    消息体只带 orderId：消费时回查最新状态，支付/取消等竞态由消费端的状态机 CAS 兜住。
+        //
+        //    ★ 评审修正：注册为"事务提交后"再发送（afterCommit）。
+        //    早期写法直接在事务内 send——若事务回滚，消息已发出（MQ 不参与 DB 事务），
+        //    消费者 30 分钟后查到"幽灵订单"。消费端有 null 防御所以后果轻，但
+        //    "事务内发消息"本身就是反模式：正确姿势是 afterCommit（或本地消息表）。
+        //    RabbitMQ 未启动时降级为"不投递"——超时取消功能缺失，但下单主链路不受影响。
+        org.springframework.transaction.support.TransactionSynchronizationManager
+                .registerSynchronization(new org.springframework.transaction.support.TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        sendDelayMessage(order.getId());
+                    }
+                });
+
         return buildVO(order.getId(), userId);
     }
 
@@ -143,6 +166,8 @@ public class OrderServiceImpl implements OrderService {
         // 回补库存
         orderItemMapper.selectByOrderId(id)
                 .forEach(oi -> skuMapper.addStock(oi.getSkuId(), oi.getQuantity()));
+        // V3：联动关闭支付单（若用户已发起支付但未支付完成）
+        paymentService.closeIfPaying(id);
     }
 
     /** 组装详情 VO（校验订单归属） */
@@ -159,6 +184,20 @@ public class OrderServiceImpl implements OrderService {
         BeanUtils.copyProperties(order, vo);
         vo.setItems(items);
         return vo;
+    }
+
+    /** 事务提交后投递延迟取消消息（幂等由消费端状态机 CAS 保证；MQ 不可用降级为不发） */
+    private void sendDelayMessage(Long orderId) {
+        org.springframework.amqp.rabbit.core.RabbitTemplate rabbit = rabbitTemplateProvider.getIfAvailable();
+        if (rabbit == null) {
+            return;
+        }
+        try {
+            rabbit.convertAndSend(com.aimall.order.mq.OrderDelayMqConfig.DELAY_QUEUE, orderId);
+        } catch (org.springframework.amqp.AmqpException e) {
+            log.warn("延迟消息投递失败（不影响下单），超时取消将由补偿兜底 orderId={}: {}",
+                    orderId, e.getMessage());
+        }
     }
 
     /** 订单号：时间戳(17位) + 4位随机 + 用户尾号，全局唯一由插入时order_no列的唯一索引约束 uk_order_no 兜底 */

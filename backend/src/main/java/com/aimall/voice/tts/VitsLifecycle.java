@@ -111,6 +111,14 @@ public class VitsLifecycle implements SmartLifecycle {
         long[] startedAt = {System.currentTimeMillis()};
         scheduler.scheduleWithFixedDelay(() -> {
             try {
+                // ★ 进程死亡快速失败：spawn 出的 Python 缺依赖（ModuleNotFoundError 等）会秒退，
+                //   若只轮询 /health 要干等 health-timeout（90s）才告警——这里立刻发现并指路日志文件。
+                if (process != null && !process.isAlive()) {
+                    log.error("内嵌派蒙 VITS 进程已退出（常见原因：Python 环境缺依赖/版本不符），"
+                            + "详情见 voice-tts 目录下的 {}；TTS 回退 Edge-TTS", logFile);
+                    scheduler.shutdown();
+                    return;
+                }
                 if (checkHealth()) {
                     endpoint.activate("http://127.0.0.1:" + port + "/tts");
                     log.info("内嵌派蒙 VITS 就绪: http://127.0.0.1:{}/ (health=ok)，TTS 主路径已指向本机 VITS", port);
