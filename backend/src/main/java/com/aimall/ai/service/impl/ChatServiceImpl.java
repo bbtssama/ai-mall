@@ -75,34 +75,42 @@ public class ChatServiceImpl implements ChatService {
     /** 视觉链路：也带 searchProduct 工具（视觉模型支持 function calling，见 AiConfig） */
     private final ChatClient visionChatClient;
     /**
-     * V4：AI 执行出口——local（默认，进程内上面的 ChatClient）/ remote（HTTP 调独立 ai-service）。
-     * ★ 按配置选择实现注入（不 @Autowired 具体类）：两个实现都是 AiService 的 @Service Bean，
-     * 这里用 @Value 读配置 + 构造器按名取（ObjectProvider/懒查找均可，此处最直白）。
-     * 评审修复：此前 AiService 抽象写了却无人调用——V4 双模式实际不生效（"写了≠生效"第 N 次）。
+     * V4：remote 模式的 AI 执行出口（HTTP 调独立 ai-service）。
+     *
+     * <p>★ 必须用 {@code ObjectProvider} 惰性注入，不能直接注入 AiService 具体实现——
+     * <b>循环依赖事故（2026-09-09 启动失败）</b>：local 模式的实现 LocalAiService 又委托回
+     * ChatService，若构造器强注入 localAiService，就成 ChatServiceImpl ⇄ LocalAiService 的环
+     * （Boot 3 默认禁止，启动直接失败）。而事实上 <b>local 模式下 aiExecution 是条死路径</b>
+     * ——chat() 只在 remote 分支才用到它。Provider 只在 remote 分支 getObject() 才解析 bean：
+     * local 模式永远不解析（零环），remote 模式解析的 remoteAiService 不依赖 ChatService（无环）。</p>
+     *
+     * <p>评审背景：此前 AiService 抽象写了没人调用（"写了≠生效"），修复让它真正被调用后
+     * 才暴露这个环——"让配置生效"的修复自己也要过启动这一关。</p>
      */
-    private final AiService aiExecution;
+    private final org.springframework.beans.factory.ObjectProvider<AiService> remoteAiProvider;
 
     /**
-     * ★ V4 显式构造器：按配置选择 AI 执行实现（替代 @RequiredArgsConstructor 的"按类型注入"）。
+     * ★ V4 显式构造器：按配置选择 AI 执行模式（替代 @RequiredArgsConstructor 的"按类型注入"）。
      *
-     * <p>为什么不 @Qualifier 写死：那样模式切换要改代码；这里读 {@code aimall.ai.mode} 配置，
-     * local（默认）→ localAiService，remote → remoteAiService——<b>切换只改配置，代码零变动</b>，
-     * 与项目可插拔家族同一思路。会话/鉴权/落库（本类职责）不随模式变。</p>
+     * <p>为什么不 @Qualifier 写死：那样模式切换要改代码；这里读 {@code aimall.ai.mode} 配置——
+     * local（默认）直接用本类下面的 ChatClient 链路，remote 时经 remoteAiProvider 调独立服务，
+     * <b>切换只改配置，代码零变动</b>。会话/鉴权/落库（本类职责）不随模式变。</p>
      */
     public ChatServiceImpl(ConversationMapper conversationMapper,
                            MessageMapper messageMapper,
                            ChatClient chatClient,
                            ChatClient visionChatClient,
-                           @org.springframework.beans.factory.annotation.Qualifier("localAiService") AiService localAi,
-                           @org.springframework.beans.factory.annotation.Qualifier("remoteAiService") AiService remoteAi,
+                           @org.springframework.beans.factory.annotation.Qualifier("remoteAiService")
+                           org.springframework.beans.factory.ObjectProvider<AiService> remoteAiProvider,
                            @org.springframework.beans.factory.annotation.Value("${aimall.ai.mode:local}") String aiMode) {
         this.conversationMapper = conversationMapper;
         this.messageMapper = messageMapper;
         this.chatClient = chatClient;
         this.visionChatClient = visionChatClient;
-        this.aiExecution = "remote".equalsIgnoreCase(aiMode) ? remoteAi : localAi;
+        this.remoteAiProvider = remoteAiProvider;
         this.aiModeFlag = aiMode == null ? "local" : aiMode.toLowerCase();
-        log.info("AI 执行模式 = {}（{}）", aiModeFlag, aiExecution.getClass().getSimpleName());
+        // 注意：remoteAiProvider 此时只是"取货凭证"，不解析任何 bean（见字段注释的循环依赖说明）
+        log.info("AI 执行模式 = {}", aiModeFlag);
     }
 
     /** 模式标记（构造时定格，避免每次请求读配置） */
@@ -161,7 +169,8 @@ public class ChatServiceImpl implements ChatService {
             if ("remote".equals(aiModeFlag)) {
                 // ★ V4 remote 模式：整个模型调用交给独立 ai-service（鉴权/历史截断/双工具都在那边）。
                 // 本地只保留业务职责：会话、落库、自动命名——正是"业务与 AI 能力分离"的拆分本意。
-                answer = aiExecution.chat(req.getMessage(), req.getImage());
+                // Provider 到此刻才解析 remoteAiService（local 模式永远走不到这行，见字段注释）
+                answer = remoteAiProvider.getObject().chat(req.getMessage(), req.getImage());
             } else if (req.hasImage()) {
                 // 视觉链路：识别图片中的商品（多模态 UserMessage 走 messages()）
                 // visionChatClient 也挂载了 searchProduct 工具，视觉模型同样支持 function calling。
