@@ -64,4 +64,19 @@
         AND status = #{expectStatus}
     </update>
 
+    <!-- 复用行重开：uk_order_id 保证一订单一行；PAID 行永不可重开（条件守卫） -->
+    <update id="updateForRecreate">
+        UPDATE t_payment
+        SET payment_no    = #{paymentNo},
+            amount       = #{amount},
+            channel      = #{channel},
+            status       = 'PAYING',
+            expire_time  = #{expireTime},
+            third_trade_no = NULL,
+            paid_time      = NULL,
+            callback_body  = NULL
+        WHERE order_id = #{orderId}
+        AND status != 'PAID'
+    </update>
+
 </mapper>

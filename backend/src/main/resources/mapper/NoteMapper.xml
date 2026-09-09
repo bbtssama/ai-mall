@@ -22,6 +22,25 @@
         WHERE id = #{id}
     </select>
 
+    <!-- 批量查询：排行榜/列表组装的反 N+1 手段（一次 IN 拿回全部） -->
+    <select id="selectByIds" resultType="com.aimall.content.bean.Note">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_note
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <!-- 榜单全量重建候选：已发布 + 热度倒序（走 idx(status, hot_score)） -->
+    <select id="selectPublishedForRank" resultType="com.aimall.content.bean.Note">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_note
+        WHERE status = 'PUBLISHED'
+        ORDER BY hot_score DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
     <!-- 补偿扫描：审核中超时堆积的笔记（消息丢失/消费失败兜底） -->
     <select id="selectAuditingBefore" resultType="com.aimall.content.bean.Note">
         SELECT
@@ -143,6 +162,19 @@
 
     <update id="updateHotScore">
         UPDATE t_note SET hot_score = #{hotScore} WHERE id = #{id}
+    </update>
+
+    <!-- 计数增量回写（Redis 攒增量定时落库）：加法语义，delta 为本轮累计的正负增量 -->
+    <update id="applyViewDelta">
+        UPDATE t_note SET view_count = view_count + #{delta} WHERE id = #{id}
+    </update>
+
+    <update id="applyLikeDelta">
+        UPDATE t_note SET like_count = like_count + #{delta} WHERE id = #{id} AND like_count + #{delta} &gt;= 0
+    </update>
+
+    <update id="applyCollectDelta">
+        UPDATE t_note SET collect_count = collect_count + #{delta} WHERE id = #{id} AND collect_count + #{delta} &gt;= 0
     </update>
 
 </mapper>
