@@ -61,6 +61,16 @@ public interface NoteMapper {
 
     int decrCollectCount(@Param("id") Long id);
 
+    /**
+     * 计数增量批量回写（Redis 攒增量 → 定时落库用）。
+     * 加法语义（count += delta）：与 Redis 侧 HINCRBY 同为加法，无覆盖丢更新。
+     */
+    int applyViewDelta(@Param("id") Long id, @Param("delta") long delta);
+
+    int applyLikeDelta(@Param("id") Long id, @Param("delta") long delta);
+
+    int applyCollectDelta(@Param("id") Long id, @Param("delta") long delta);
+
     /** 热度分 = 点赞*3 + 收藏*5 + 浏览*1，由 Service 算好后写入（排序用） */
     int updateHotScore(@Param("id") Long id, @Param("hotScore") Integer hotScore);
 

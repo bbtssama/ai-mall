@@ -16,6 +16,7 @@ import com.aimall.content.mapper.NoteExtraMapper;
 import com.aimall.content.mapper.NoteLikeMapper;
 import com.aimall.content.mapper.NoteMapper;
 import com.aimall.content.service.AuditService;
+import com.aimall.content.service.NoteCounterStore;
 import com.aimall.content.service.NoteService;
 import com.aimall.goods.bean.Product;
 import com.aimall.goods.mapper.ProductMapper;
@@ -55,6 +56,8 @@ public class NoteServiceImpl implements NoteService {
     private final AuditService auditService;
     /** V3：Redis（热门榜 zset 等，可降级） */
     private final com.aimall.common.redis.RedisOps redisOps;
+    /** V3：计数桶（浏览/点赞/收藏的 Redis 攒增量 + 定时落库） */
+    private final com.aimall.content.service.NoteCounterStore counterStore;
 
     /** 热门榜的 zset key（与词典/文档中的命名一致） */
     private static final String HOT_RANK_KEY = "aimall:hot:notes";
@@ -128,10 +131,11 @@ public class NoteServiceImpl implements NoteService {
         if (!Note.STATUS_PUBLISHED.equals(note.getStatus()) && !mine) {
             throw new BusinessException(ResultCode.NOT_FOUND, "笔记不存在");
         }
-        // 浏览计数：本人查看不计（自己的反复编辑会刷高自己）
+        // 浏览计数（V3 改造）：Redis HINCRBY 攒增量（内存，微秒级），定时落库。
+        // 此前每次浏览 = incrViewCount + refreshHotScore（1 SELECT + 3 UPDATE）——
+        // 热点笔记行锁被高频写打爆（写放大）。现在热度刷新也由落库任务统一做。
         if (!mine) {
-            noteMapper.incrViewCount(id);
-            refreshHotScore(id);
+            incrCount(NoteCounterStore.VIEW, id, 1);
         }
         return assembleDetail(note, mine);
     }
@@ -141,12 +145,12 @@ public class NoteServiceImpl implements NoteService {
     // ------------------------------------------------------------------
 
     /**
-     * 点赞/取消：唯一索引兜底幂等。
+     * 点赞/取消：关系表唯一索引兜底幂等，计数走 Redis 增量桶。
      *
      * <p>并发场景：用户狂点红心 → 前端防抖失灵 → 两个"点赞"请求同时到达。
      * "先查后插"会插两条；这里直接 INSERT，撞 uk_note_user 抛
-     * DuplicateKeyException → 捕获当作"已点过"静默成功。计数用
-     * {@code like_count = like_count + 1} 原子自增，配合删除时的条件自减，不丢更新。</p>
+     * DuplicateKeyException → 捕获当作"已点过"静默成功。计数改为 Redis
+     * HINCRBY 攒增量（incrCount），定时批量落库——互动不再直写计数行。</p>
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -156,7 +160,7 @@ public class NoteServiceImpl implements NoteService {
         if (liked) {
             try {
                 likeMapper.insert(noteId, userId);
-                noteMapper.incrLikeCount(noteId);
+                incrCount(NoteCounterStore.LIKE, noteId, 1);
             } catch (DuplicateKeyException e) {
                 // 已点过赞：幂等静默（不报错，前端体验为"红心已是亮的"）
                 log.debug("重复点赞已忽略 noteId={} userId={}", noteId, userId);
@@ -164,10 +168,9 @@ public class NoteServiceImpl implements NoteService {
         } else {
             int rows = likeMapper.delete(noteId, userId);
             if (rows > 0) {
-                noteMapper.decrLikeCount(noteId);
+                incrCount(NoteCounterStore.LIKE, noteId, -1);
             }
         }
-        refreshHotScore(noteId);
     }
 
     @Override
@@ -178,17 +181,16 @@ public class NoteServiceImpl implements NoteService {
         if (collected) {
             try {
                 collectMapper.insert(noteId, userId);
-                noteMapper.incrCollectCount(noteId);
+                incrCount(NoteCounterStore.COLLECT, noteId, 1);
             } catch (DuplicateKeyException e) {
                 log.debug("重复收藏已忽略 noteId={} userId={}", noteId, userId);
             }
         } else {
             int rows = collectMapper.delete(noteId, userId);
             if (rows > 0) {
-                noteMapper.decrCollectCount(noteId);
+                incrCount(NoteCounterStore.COLLECT, noteId, -1);
             }
         }
-        refreshHotScore(noteId);
     }
 
     // ------------------------------------------------------------------
@@ -272,6 +274,11 @@ public class NoteServiceImpl implements NoteService {
         Set<Long> collected = me == null ? Set.of()
                 : new HashSet<>(collectMapper.listCollectedNoteIds(me, ids));
 
+        // ⑥ 计数增量（批量 HMGET ×3：DB 快照 + Redis 未落库增量 = 近实时值）
+        Map<Long, Long> likeD = counterStore.readDeltas(NoteCounterStore.LIKE, ids);
+        Map<Long, Long> collectD = counterStore.readDeltas(NoteCounterStore.COLLECT, ids);
+        Map<Long, Long> viewD = counterStore.readDeltas(NoteCounterStore.VIEW, ids);
+
         return notes.stream().map(n -> {
             NoteVO vo = new NoteVO();
             vo.setId(n.getId());
@@ -283,9 +290,9 @@ public class NoteServiceImpl implements NoteService {
             vo.setCover(n.getCover() != null ? n.getCover() : covers.get(n.getId()));
             vo.setSummary(summarize(n.getContent()));
             vo.setStatus(n.getStatus());
-            vo.setLikeCount(n.getLikeCount());
-            vo.setCollectCount(n.getCollectCount());
-            vo.setViewCount(n.getViewCount());
+            vo.setLikeCount(applyDelta(n.getLikeCount(), likeD.get(n.getId())));
+            vo.setCollectCount(applyDelta(n.getCollectCount(), collectD.get(n.getId())));
+            vo.setViewCount(applyDelta(n.getViewCount(), viewD.get(n.getId())));
             vo.setHotScore(n.getHotScore());
             vo.setLiked(liked.contains(n.getId()));
             vo.setCollected(collected.contains(n.getId()));
@@ -313,9 +320,13 @@ public class NoteServiceImpl implements NoteService {
         if (mine) {
             vo.setAuditResult(note.getAuditResult());
         }
-        vo.setLikeCount(note.getLikeCount());
-        vo.setCollectCount(note.getCollectCount());
-        vo.setViewCount(note.getViewCount());
+        // 计数 = DB 快照 + Redis 未落库增量（与列表口径一致）
+        Map<Long, Long> likeD = counterStore.readDeltas(NoteCounterStore.LIKE, List.of(note.getId()));
+        Map<Long, Long> collectD = counterStore.readDeltas(NoteCounterStore.COLLECT, List.of(note.getId()));
+        Map<Long, Long> viewD = counterStore.readDeltas(NoteCounterStore.VIEW, List.of(note.getId()));
+        vo.setLikeCount(applyDelta(note.getLikeCount(), likeD.get(note.getId())));
+        vo.setCollectCount(applyDelta(note.getCollectCount(), collectD.get(note.getId())));
+        vo.setViewCount(applyDelta(note.getViewCount(), viewD.get(note.getId())));
         vo.setHotScore(note.getHotScore());
         Long me = currentUserIdOrNull();
         vo.setLiked(me != null && !likeMapper.listLikedNoteIds(me, List.of(note.getId())).isEmpty());
@@ -415,6 +426,10 @@ public class NoteServiceImpl implements NoteService {
         for (Note n : noteMapper.selectByIds(ids)) {
             notes.put(n.getId(), n);
         }
+        // ②' 计数增量（口径与列表一致：DB 快照 + 未落库增量）
+        Map<Long, Long> likeD = counterStore.readDeltas(NoteCounterStore.LIKE, ids);
+        Map<Long, Long> collectD = counterStore.readDeltas(NoteCounterStore.COLLECT, ids);
+        Map<Long, Long> viewD = counterStore.readDeltas(NoteCounterStore.VIEW, ids);
         // ③ 按 zset 顺序组装，仅保留已发布的（下架/驳回的从榜上自然消失）
         List<NoteVO> result = new java.util.ArrayList<>(ids.size());
         for (var item : rank) {
@@ -429,9 +444,9 @@ public class NoteServiceImpl implements NoteService {
                 vo.setId(n.getId());
                 vo.setTitle(n.getTitle());
                 vo.setCover(n.getCover());
-                vo.setLikeCount(n.getLikeCount());
-                vo.setCollectCount(n.getCollectCount());
-                vo.setViewCount(n.getViewCount());
+                vo.setLikeCount(applyDelta(n.getLikeCount(), likeD.get(n.getId())));
+                vo.setCollectCount(applyDelta(n.getCollectCount(), collectD.get(n.getId())));
+                vo.setViewCount(applyDelta(n.getViewCount(), viewD.get(n.getId())));
                 vo.setHotScore((int) item.score());
                 vo.setCreatedAt(n.getCreatedAt());
                 result.add(vo);
@@ -477,6 +492,76 @@ public class NoteServiceImpl implements NoteService {
         if (n == null || !Note.STATUS_PUBLISHED.equals(n.getStatus())) {
             throw new BusinessException(ResultCode.NOT_FOUND, "笔记不存在");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 计数：Redis 攒增量 + 定时落库
+    // ------------------------------------------------------------------
+
+    /**
+     * 计数变更的唯一入口：Redis 增量桶优先，Redis 不可用降级直写 DB。
+     *
+     * <p>降级映射回原有的 ±1 方法（incrViewCount/decrLikeCount 等）——
+     * Redis 宕机时互动量直写 DB，体验回到 V2（可接受：计数是展示数据）。</p>
+     */
+    private void incrCount(String type, Long noteId, long delta) {
+        Long applied = counterStore.incr(type, noteId, delta);
+        if (applied != null) {
+            return;
+        }
+        // Redis 不可用：降级直写 DB（delta 只会是 ±1）
+        if (NoteCounterStore.VIEW.equals(type)) {
+            noteMapper.incrViewCount(noteId);
+        } else if (NoteCounterStore.LIKE.equals(type)) {
+            if (delta >= 0) {
+                noteMapper.incrLikeCount(noteId);
+            } else {
+                noteMapper.decrLikeCount(noteId);
+            }
+        } else if (NoteCounterStore.COLLECT.equals(type)) {
+            if (delta >= 0) {
+                noteMapper.incrCollectCount(noteId);
+            } else {
+                noteMapper.decrCollectCount(noteId);
+            }
+        }
+    }
+
+    /** DB 计数 + Redis 增量（读路径拼"快照+增量"）；null 增量按 0 */
+    private Integer applyDelta(Integer base, Long delta) {
+        int b = base == null ? 0 : base;
+        return b + (delta == null ? 0 : delta.intValue());
+    }
+
+    /**
+     * 落库（定时任务调用，见 NoteCounterFlushTask）：
+     * 原子取走三类增量 → 加法回写 DB → 重算受影响笔记的热度分（含 zset）。
+     *
+     * <p>★ 热度刷新收敛在这里的意义：浏览/点赞不再各自触发热度重算
+     * （原先一次浏览 = 3 次 DB 写），热度的更新频率 = 落库频率，
+     * 与流量解耦——这就是"写放大治理"的完整闭环。</p>
+     */
+    @Override
+    public void flushCounters() {
+        java.util.Set<Long> touched = new java.util.HashSet<>();
+        counterStore.takeAndClear(NoteCounterStore.VIEW).forEach((id, delta) -> {
+            noteMapper.applyViewDelta(id, delta);
+            touched.add(id);
+        });
+        counterStore.takeAndClear(NoteCounterStore.LIKE).forEach((id, delta) -> {
+            noteMapper.applyLikeDelta(id, delta);
+            touched.add(id);
+        });
+        counterStore.takeAndClear(NoteCounterStore.COLLECT).forEach((id, delta) -> {
+            noteMapper.applyCollectDelta(id, delta);
+            touched.add(id);
+        });
+        if (touched.isEmpty()) {
+            return;
+        }
+        // 回写完成后 DB 是最新值：此刻重算热度才是准的
+        touched.forEach(this::refreshHotScore);
+        log.debug("计数增量已落库，触发热度重算的笔记数={}", touched.size());
     }
 
     private String summarize(String content) {

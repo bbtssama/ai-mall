@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -236,6 +237,77 @@ public class RedisOps {
             return true;    // Redis 不可用 → 放行（限流组件不应成为可用性瓶颈）
         }
         return n <= limit;
+    }
+
+    // ------------------------------------------------------------------
+    // Hash 计数桶（浏览/点赞/收藏的"Redis 攒增量 + 定时落库"）
+    // ------------------------------------------------------------------
+
+    /**
+     * HINCRBY：field 计数加 delta。
+     *
+     * <p>★ 计数类写操作为什么要走 Redis：热点笔记的每次浏览/点赞都是对
+     * 同一行的 UPDATE（行锁串行 + redo log 落盘），高流量下写放大明显。
+     * 改为内存 HINCRBY 攒<b>增量</b>，定时批量回写 DB——写 DB 频率与流量解耦。</p>
+     *
+     * @return 自增后的值；降级返回 null（调用方应回退 DB 直写）
+     */
+    public Long hIncrBy(String key, String field, long delta) {
+        return safe(() -> stringRedisTemplate.opsForHash().increment(key, field, delta),
+                null, "hIncrBy", key);
+    }
+
+    /** HMGET 批量读计数增量；降级返回空 Map（调用方按 0 处理，读 DB 值即可） */
+    public Map<String, Long> hmGetLongs(String key, java.util.Collection<String> fields) {
+        if (fields == null || fields.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> ordered = new java.util.ArrayList<>(fields);
+        return safe(() -> {
+            List<Object> vals = stringRedisTemplate.opsForHash().multiGet(key, ordered);
+            Map<String, Long> r = new java.util.HashMap<>();
+            for (int i = 0; i < ordered.size(); i++) {
+                Object v = vals == null ? null : vals.get(i);
+                if (v != null) {
+                    try {
+                        r.put(String.valueOf(ordered.get(i)), Long.parseLong(v.toString()));
+                    } catch (NumberFormatException ignored) {
+                        // 脏值当 0：计数是展示数据，不能因一条脏数据炸整个列表
+                    }
+                }
+            }
+            return r;
+        }, Map.of(), "hmGet", key);
+    }
+
+    /**
+     * 原子"取走全部并清空"（HGETALL + DEL 同一脚本）。
+     *
+     * <p>★ 为什么必须 Lua：拆成 HGETALL → DEL 两步的话，两步之间到达的
+     * HINCRBY 会被随后的 DEL 一起删掉——增量凭空丢失（落库丢计数）。
+     * 脚本内先取后删原子执行，取走之后新到的增量进入"新一轮"，下轮再落。</p>
+     */
+    private static final String TAKE_ALL_LUA =
+            "local all = redis.call('hgetall', KEYS[1]) " +
+            "redis.call('del', KEYS[1]) " +
+            "return all";
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public Map<String, Long> takeAllAndClear(String key) {
+        return safe(() -> {
+            Object rawObj = stringRedisTemplate.execute(
+                    new DefaultRedisScript(TAKE_ALL_LUA, List.class), List.of(key));
+            Map<String, Long> r = new java.util.HashMap<>();
+            if (rawObj instanceof List<?> raw) {
+                for (int i = 0; i + 1 < raw.size(); i += 2) {
+                    try {
+                        r.put(String.valueOf(raw.get(i)), Long.parseLong(String.valueOf(raw.get(i + 1))));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            return r;
+        }, Map.of(), "takeAllAndClear", key);
     }
 
     // ------------------------------------------------------------------

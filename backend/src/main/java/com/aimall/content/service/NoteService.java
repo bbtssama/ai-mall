@@ -52,4 +52,10 @@ public interface NoteService {
      * Redis 数据丢失/漂移后，以 DB 为真值恢复（冷启动自愈）。
      */
     void rebuildHotRank();
+
+    /**
+     * 计数增量落库（定时任务调用）：把 Redis 攒的浏览/点赞/收藏增量
+     * 加法回写 DB，并重算受影响笔记的热度分。加法语义保证不丢不重。
+     */
+    void flushCounters();
 }
