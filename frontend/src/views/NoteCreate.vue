@@ -81,8 +81,9 @@ async function generate () {
   aiLoading.value = true
   try {
     const res = await aiContentApi.noteDraft({ brief: aiBrief.value, productId: aiProductId.value || undefined })
-    let draft = {}
-    try { draft = JSON.parse(res.draft) } catch { draft = { content: res.draft } }
+    // 后端已解析为结构化对象 {title, content, tags}（解析/降级都在服务端收口，
+    // 前端不再 JSON.parse——早期字符串契约下 parse 一失败整串 JSON 会糊进正文框）
+    const draft = res.draft || {}
     if (draft.title) form.value.title = draft.title
     if (draft.content) form.value.content = draft.content
     if (Array.isArray(draft.tags) && draft.tags.length) form.value.tags = draft.tags.slice(0, 10)

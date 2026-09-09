@@ -59,6 +59,15 @@ class OrderServiceImplTest {
     private ProductMapper productMapper;
     @Mock
     private CartMapper cartMapper;
+    /** V3：订单取消时联动关支付单（create 不触发，但构造器注入需要存在） */
+    @Mock
+    private com.aimall.pay.service.PaymentService paymentService;
+    /** 可靠性大修缮：延迟取消消息唯一出口（mock 后 sendAfterCommit 为 no-op） */
+    @Mock
+    private com.aimall.order.mq.OrderDelayMessageSender delayMessageSender;
+    /** 可靠性大修缮：下单幂等 token（mock 后 consumeToken 返回 null=fail-open 放行） */
+    @Mock
+    private com.aimall.common.redis.RedisOps redisOps;
 
     @InjectMocks
     private OrderServiceImpl orderService;
