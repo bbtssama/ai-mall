@@ -48,6 +48,9 @@ public class OrderDelayMqConfig {
     public static final String CANCEL_ROUTING_KEY = "order.cancel";
     /** 死信路由键：delay 队列过期后按此 key 重新路由到本交换机 */
     public static final String DLX_ROUTING_KEY = "order.cancel.dlx";
+    /** 取消队列的消费失败死信队列（P1：取消链路此前无 DLX，失败=消息消失） */
+    public static final String CANCEL_DLQ = "aimall.order.cancel.dlq";
+    public static final String CANCEL_DLQ_ROUTING_KEY = "order.cancel.fail";
 
     /** 订单支付超时时间（毫秒）：30 分钟 */
     public static final long ORDER_TTL_MILLIS = 30 * 60 * 1000L;
@@ -76,9 +79,25 @@ public class OrderDelayMqConfig {
         return QueueBuilder.durable(DELAY_QUEUE).withArguments(args).build();
     }
 
+    /**
+     * 取消队列也挂死信（P1 修复）：消费端抛出的未知异常经容器 reject 后
+     * （default-requeue-rejected=false）转入 DLQ 人工兜底，而不是凭空消失。
+     *
+     * <p>⚠️ 注意：RabbitMQ 不允许"参数不同的同名队列"重复声明——
+     * 已有旧版（无 DLX 参数）队列的环境需先删除旧队列再启动：
+     * {@code rabbitmqadmin delete queue name=aimall.order.cancel.queue}。</p>
+     */
     @Bean
     public Queue orderCancelQueue() {
-        return QueueBuilder.durable(CANCEL_QUEUE).build();
+        return QueueBuilder.durable(CANCEL_QUEUE)
+                .deadLetterExchange(ORDER_EXCHANGE)
+                .deadLetterRoutingKey(CANCEL_DLQ_ROUTING_KEY)
+                .build();
+    }
+
+    @Bean
+    public Queue orderCancelDlq() {
+        return QueueBuilder.durable(CANCEL_DLQ).build();
     }
 
     /** 取消队列绑定：正常 routing key */
@@ -95,5 +114,13 @@ public class OrderDelayMqConfig {
         return BindingBuilder.bind(orderCancelQueue())
                 .to(orderExchange())
                 .with(DLX_ROUTING_KEY);
+    }
+
+    /** 取消队列的消费失败死信绑定 */
+    @Bean
+    public Binding cancelDlqBinding() {
+        return BindingBuilder.bind(orderCancelDlq())
+                .to(orderExchange())
+                .with(CANCEL_DLQ_ROUTING_KEY);
     }
 }

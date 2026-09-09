@@ -27,9 +27,13 @@ import java.time.LocalDateTime;
  * <p><b>解法：状态机 CAS</b>——{@code updateStatus WHERE status='PENDING_PAY'}，
  * 谁先改到谁生效，另一个得到 0 行直接返回。这与扣库存的"行锁 CAS"是同一套思想。</p>
  *
- * <h2>为什么回补库存也要在"取消成功"之后</h2>
- * 只有真正把状态改成 CANCELLED 的那个线程才回补库存——
- * 顺序错了就会出现"状态没变但库存加了"的不一致。
+ * <h2>★ 事务边界（P2 修复）：异常必须冒出方法，不许在事务内吞掉</h2>
+ * 早期写法是 try-catch 把异常吞在 @Transactional 方法<b>内部</b>——
+ * 异常不冒出代理，Spring 无从感知，<b>半截事务照样提交</b>：比如状态已改、
+ * 库存已回补，最后 closeIfPaying 抛异常 → 回滚不生效，支付单永远 PAYING。
+ * 正确姿势：让异常从监听方法冒出 → ① 当前事务回滚（不留半截状态）
+ * → ② 监听容器 reject（default-requeue-rejected=false，不重入队防毒消息循环）
+ * → ③ 队列死信路由进 DLQ 等人工。补偿任务是最终兜底。
  */
 @Slf4j
 @Component
@@ -41,24 +45,22 @@ public class OrderCancelConsumer {
     private final ProductSkuMapper skuMapper;
     private final PaymentService paymentService;
 
+    /**
+     * 监听取消消息：一行委托，异常刻意不 catch——见类注释"事务边界"。
+     */
     @RabbitListener(queues = OrderDelayMqConfig.CANCEL_QUEUE)
     @Transactional(rollbackFor = Exception.class)
     public void onCancelMessage(Long orderId) {
-        try {
-            cancelIfStillPending(orderId);
-        } catch (Exception e) {
-            // 吞异常不重入队：超时取消失败可由补偿任务/人工兜底，
-            // 无限重试只会打爆日志（与审核消费端同样的取舍）
-            log.error("超时取消订单失败（已记日志，不重试）orderId={} : {}", orderId, e.getMessage(), e);
-        }
+        cancelIfStillPending(orderId);
     }
 
     /**
      * 仅当订单仍是待支付时才取消 —— 幂等 + 防与支付回调竞争。
+     * 补偿任务（CompensationTask）也复用本方法：与消息路径完全同语义。
      *
-     * <p>★ 注意这里<b>刻意不加</b> @Transactional：本方法只被同类的
-     * onCancelMessage（已带事务）自调用——自调用不走代理，注解是摆设
-     * （与 @Async 自调用失效同源，V2 修过一次）。事务由外层监听方法统一开启。</p>
+     * <p>★ 注意这里<b>刻意不加</b> @Transactional：本方法只被
+     * onCancelMessage（已带事务）与补偿任务自调用——自调用不走代理，
+     * 注解是摆设（与 @Async 自调用失效同源）。事务由外层统一开启。</p>
      *
      * @return 是否真的执行了取消
      */
