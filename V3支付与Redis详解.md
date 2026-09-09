@@ -966,6 +966,8 @@ public boolean sync(String paymentNo) {
 
 用户反复点"去支付"会创建几张支付单？看 `create` 的复用逻辑：
 
+> **★ 2026-09-09 修缮更新**：下面这段"关旧建新"是 V3 原始实现，已升级为**一订单一行模型**——Flyway V4 给 `t_payment` 加了 `uk_order_id` 唯一索引，并发双击撞索引抛 DuplicateKey → 捕获后回查复用（与点赞幂等同款"唯一索引+冲突回查"）。CLOSED/过期后不再是"插新行"，而是**复用该行重开**（换 payment_no、重置渠道/金额/过期时间，`updateForRecreate` 带 `status != 'PAID'` 条件守卫）。原始实现保留在下方供对照——"查完再插"的窗口正是这次修缮要消灭的东西。
+
 ```java
 Payment exist = paymentMapper.selectByOrderId(orderId);
 if (exist != null && Payment.STATUS_PAID.equals(exist.getStatus())) {
@@ -1064,19 +1066,13 @@ RabbitMQ **只检查队首**消息是否过期（性能考虑，不扫描全队�
 
 ## 8.5 消费端：三方竞争同一订单
 
-`OrderCancelConsumer`（逐段讲）：
+`OrderCancelConsumer`（逐段讲，2026-09-09 修缮后版本）：
 
 ```java
 @RabbitListener(queues = OrderDelayMqConfig.CANCEL_QUEUE)
 @Transactional(rollbackFor = Exception.class)
 public void onCancelMessage(Long orderId) {
-    try {
-        cancelIfStillPending(orderId);
-    } catch (Exception e) {
-        // 吞异常不重入队：超时取消失败可由补偿兜底
-        // 无限重试只会打爆日志（与 V2 审核消费端同一取舍）
-        log.error("超时取消订单失败（已记日志，不重试）orderId={}", orderId, e);
-    }
+    cancelIfStillPending(orderId);   // ★ 异常刻意不 catch——见下方"事务边界"
 }
 
 public boolean cancelIfStillPending(Long orderId) {   // ★ 刻意不加 @Transactional（自调用失效，见第 11 章问题7）
@@ -1097,6 +1093,10 @@ public boolean cancelIfStillPending(Long orderId) {   // ★ 刻意不加 @Trans
     return true;
 }
 ```
+
+**★ 事务边界（P2 修缮，高频考点）**：早期版本在 `@Transactional` 方法**内部** try-catch 吞掉异常——异常不冒出 AOP 代理，Spring 无从感知，**半截事务照样提交**：比如状态已改、库存已回补，最后 `closeIfPaying` 抛异常 → 回滚不生效，支付单永远 PAYING。正确姿势：让异常从监听方法冒出 → ① 当前事务回滚（不留半截状态）→ ② 监听容器 reject（`default-requeue-rejected=false`，不重入队防毒消息循环）→ ③ 队列死信路由进 DLQ 等人工。**"在事务方法里吞异常"和"事务内发消息"是同一族反模式：都骗过了事务管理器。**
+
+> 另外：补偿任务（`CompensationTask.cancelTimeoutOrders`）也直接调用 `onCancelMessage`——它与消息路径完全同语义（同事务、同 CAS），这是"补偿=重放"能成立的前提。
 
 **为什么这里并发如此真实**——三个线程会同时盯上同一个订单：
 
@@ -1136,6 +1136,8 @@ TransactionSynchronizationManager.registerSynchronization(
 
 MQ **不参与数据库事务**（两个独立系统），"事务内发消息"永远存在"回滚但消息已飞"的窗口。标准解法两档：`afterCommit`（轻量，本项目用）/[本地消息表](V3支付与Redis详解【知识词典】.md#本地消息表)（消息与业务同事务落库、定时扫描投递，强一致场景用）。这个知识点面试出现率极高。
 
+**★ 2026-09-09 修缮：收敛为唯一出口**。这段注册逻辑如今封装在 `OrderDelayMessageSender.sendAfterCommit()`——早期只有普通下单发这条消息，后来限量发售也建订单却**忘了发**（P0：抢购单永不超时取消，限量库存被死单永久占用）。根因是"建单必发超时取消"这个约束散落各处靠人记。收敛成唯一组件后，任何建单路径（普通/秒杀/将来的拼团）都调它，漏发=漏调方法，一眼可见。**"散落的隐式约束"是迭代型项目最常见的腐化方式。**
+
 ## 本章动手作业
 
 1. 把 `ORDER_TTL_MILLIS` 临时改成 `60000`（1 分钟），下一单不付款，掐表看 1 分钟后日志"订单超时未支付已自动取消并回补库存"；验证 t_product_sku 的 stock 加回来了。
@@ -1168,22 +1170,26 @@ t4                                    UPDATE stock=-1, 下单成功   ← 超卖
 
 "先查后改"在并发下的固有漏洞——两步之间别人可以插队。V1 的答案是行锁 CAS（`UPDATE ... WHERE stock>=?`），V3 在它前面再加一层 Redis。
 
-## 9.3 三层防护全景
+## 9.3 削峰链路全景（2026-09-09 重构：Redis 预减 + MQ 异步下单）
+
+> **重构说明**：V3 原始实现是"同步建单"——HTTP 线程里直接跑完预减+CAS+建单。2026-09-09 修缮为经典**削峰形态**：HTTP 线程只做内存级操作，建单交给 MQ 消费者异步完成。为什么必须改：发售瞬间 1 万 QPS 直怼 DB，行锁排队 + 连接池打爆——**同步模型里"DB 扛不扛得住"与"是否超卖"是两件事，前者同样致命**。
 
 ```
-请求 ──► [第1层 Redis Lua原子预减]   挡99%流量（内存操作，不碰DB）
-              │ 预减成功（或 Redis 不可用降级）
-              ▼
-         [第2层 DB行锁CAS]          UPDATE ... WHERE stock>=?（V1 同款）
-              │ 扣减成功
-              ▼
-         [第3层 限购唯一索引]        uk(activity_id,user_id) 一人一单
-              │ 全过
-              ▼
-           订单创建（PENDING_PAY，后续走支付/超时取消同一套）
+HTTP 线程（毫秒级返回，只有内存操作）        MQ 消费线程（匀速，扛 DB 写）
+──────────────────────────────────        ──────────────────────────────────
+① 校验活动/时间/限购（读库一次）
+② Lua 原子预减（判重+扣减同一脚本）           ① 回查活动（不信任消息体）
+③ 投递 DropOrderMessage ──────► ──────►    ② DB 行锁 CAS 扣库存（防超卖底线）
+④ 立即返回 QUEUED（前端开始轮询）            ③ 建订单 + t_drop_record(uk 幂等)
+                                            ④ afterCommit 挂 30min 超时取消
+                                            失败 → 回补 Redis + 失败标记
 ```
 
-**为什么要三层而不是只有 DB CAS**——DB CAS 本身不超卖，但发售瞬间 1 万 QPS 全打到 MySQL（行锁排队），DB 就是瓶颈。第 1 层在内存里就把 9990 个"注定失败"的请求挡掉——**Redis 是流量盾牌，DB 是正确性兜底**，各司其职。
+**"挡量"与"削峰"是两件事，缺一不可**（面试金句）：
+- Lua 预减是**准入闸门**——放行的消息数 ≤ 库存量，抢完后洪峰在 Redis 纯内存被拒绝，DB 完全无感；
+- MQ 是**节奏器**——通过闸门的瞬时洪峰被摊平成消费速率，DB 行锁不再被万级请求争抢。
+
+**接口形态也随之改变**：`buy` 只返回 `{status:"QUEUED"}`（订单还不存在！），前端每 1~2 秒轮询 `GET /drops/{id}/result`，拿到 `SUCCESS(orderId)` 才跳订单页——这是秒杀类系统的标准交互。
 
 ## 9.4 第一层：Lua 逐行讲（0 基础：Lua 是什么）
 
@@ -1191,72 +1197,84 @@ Lua 是一门轻量脚本语言，Redis 内置了它的解释器——**EVAL 一
 
 ```lua
 local stock = tonumber(redis.call('get', KEYS[1]) or '-1')
---          ↑ KEYS[1] 是脚本的第1个key（调用时传入）
+--          ↑ KEYS[1] = 库存键 aimall:drop:stock:{活动id}
 if stock < 0 then return -2 end
---          ↑ -2 = 键不存在（未预热或 Redis 刚好挂了）→ 调用方降级走 DB
+--          ↑ -2 = 键不存在（未预热）→ 触发懒预热后让用户重试
+if redis.call('exists', KEYS[2]) == 1 then return -3 end
+--          ↑ KEYS[2] = 受理标记 aimall:drop:user:{活动id}:{userId}
+--            -3 = 重复提交（同一用户的消息还在队列里）
 if stock < tonumber(ARGV[1]) then return -1 end
---          ↑ -1 = 库存不足（ARGV[1] 是第1个参数 = 购买数量）
+--          ↑ -1 = 库存不足（ARGV[1] = 购买数量）
+redis.call('set', KEYS[2], ARGV[1], 'EX', tonumber(ARGV[2]))
+--          ↑ 判重通过才写受理标记（ARGV[2] = 标记 TTL）
 return redis.call('decrby', KEYS[1], ARGV[1])
 --          ↑ 原子扣减，返回剩余量（≥0）
 ```
 
-Java 侧调用（DropService.buy）：
-
-```java
-Long remain = redisOps.eval(DEDUCT_LUA,
-        List.of(STOCK_KEY_PREFIX + activityId), String.valueOf(quantity));
-boolean redisDeducted = remain != null && remain >= 0;   // ★ 记住"我扣了"——失败要还
-if (remain != null && remain == -1) {
-    throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH, "已被抢完");
-}
-// remain == null / -2：Redis 不可用或未预热 → 降级，直接走 DB 兜底（第2层）
-```
+**为什么"判重+扣减"必须在同一脚本**：拆成两步（先 EXISTS 再 DECRBY）的话，同一用户的两个并发请求可能都通过判重、各自扣一次库存——名额被同一人占两份。这也是把"防重复提交"从应用层下沉到 Redis 的原因：HTTP 线程无状态，挡不住同一用户的双击。
 
 **为什么不用分布式锁**——"判断+扣减"是一次原子计数，Lua 一发入魂；加锁方案每次"加锁→读→改→解锁"两次网络往返还全局串行化。**锁适合保护复杂临界区（一长段业务逻辑），简单原子计数用 Lua 更快更简单**——这句对比是面试金句。
 
-**库存怎么进 Redis 的**（预热）：
+**库存怎么进 Redis 的**（预热，P0 修缮后版本）：
 
 ```java
 public void warmUpIfAbsent(Long activityId) {
-    if (redisOps.get(STOCK_KEY_PREFIX + activityId).isEmpty()) {   // 只在无键时灌
-        warmUp(activityId);   // SET stock:活动id = drop_stock
-    }
+    if (redisOps.get(stockKey(activityId)).isPresent()) return;   // 快路径
+    // ★ SET NX：判断+写入原子化（早期 GET 判空再 SET 是 check-then-act，
+    //   并发首访两个请求都判"未预热"，后一个 SET 会把已扣减的库存重置回全量=超卖）
+    boolean written = redisOps.setIfAbsent(stockKey(activityId),
+            String.valueOf(act.getDropStock()), 24 * 3600);
 }
 ```
 
-用 IfAbsent（存在就不动）而不是无条件 SET——无条件重灌会把"已被抢掉的数量"重置回总量（评审修正的问题 11）。
+## 9.5 消费端：事务建单 + 失败三分流（评审揪出的 P0 集中营）
 
-## 9.5 第二、三层与失败回补（评审揪出的 P0）
+消费端是 `DropOrderExecutor`（独立 bean 而非 DropService 私有方法——本地降级路径要经代理调用事务方法，自调用不走 AOP 会裸奔）：
 
 ```java
-try {
-    return doBuyInDb(userId, act, quantity);
-} catch (RuntimeException e) {
-    // ★ 失败必须回补 Redis：限购撞uk / DB CAS没过 / 订单插入失败……
-    //   任何一步失败，Redis 已扣的量若不还 → 名额白吃 → "看起来抢完了实际有货"
-    //   ——对用户是资损。INCRBY 与 DECRBY 对称。
-    if (redisDeducted) {
-        redisOps.eval(INCRBY_LUA, List.of(STOCK_KEY_PREFIX + activityId),
-                String.valueOf(quantity));
+public void execute(DropOrderMessage msg) {
+    try {
+        createDropOrder(msg);                    // @Transactional：CAS 扣库存 + 建单 + uk 限购
+    } catch (DuplicateKeyException e) {
+        dropRedis.rollbackDeduct(...);            // 重复投递：uk 已有记录，幂等跳过+回补
+    } catch (BusinessException e) {
+        dropRedis.rollbackDeduct(...);           // 业务失败（库存不足等）：回补+写失败标记
+        dropRedis.markFailed(...);               //   前端轮询到 FAILED（重试也不会成功，ACK）
     }
-    throw e;
+    // 其他异常原样抛出 → 容器 reject → 死信队列人工兜底
 }
 ```
 
-`doBuyInDb` 内部：行锁 CAS 扣 SKU 库存（V1 同款）→ 创建订单（单号沿用 V1 生成器风格，`uk_order_no` 兜底）→ 插 `t_drop_record`（撞 `uk(activity_id,user_id)` 抛 DuplicateKey → 提示"每人限购一次"）。
+三类异常三套路数，这是削峰版"失败回补"的完整形态：
+
+| 异常 | 含义 | 处理 |
+|---|---|---|
+| `DuplicateKeyException` | uk 冲突 = 该用户已建单成功（重复投递/并发提交） | 回补本条消息的预减，幂等跳过 |
+| `BusinessException` | 业务性失败（库存不足/时间不符） | 回补预减 + 失败标记，ACK 不重试 |
+| 其他 `Exception` | 未知故障（DB 抖动） | 重抛 → reject → **DLQ 等人工** |
+
+**回补的 Lua 也是原子的**（库存加回 + 删受理标记同一脚本）——拆开执行时，两步之间用户重试提交会被删了一半的标记挡住或放过，窗口内行为不可预期。
+
+**建单事务内的关键一行**：`delayMessageSender.sendAfterCommit(order.getId())`——秒杀订单同样挂 30 分钟超时取消（P0-3 修缮：早期抢购单永不超时，限量库存被死单永久占用）。
 
 **语义澄清（评审问题 12）**：唯一索引硬保证**一人一次成功**；`per_limit` 约束**单次**购买上限。组合语义="每人可成功一次、单次最多 per_limit 件"。
 
 ## 9.6 一致性边界（诚实说，面试加分）
 
-预减（Redis）与实扣（DB）是两个存储，**没有事务**：回补也可能失败（Redis 恰好挂了）、TTL 到期重灌会覆盖。所以这是**最终一致**：活动结束后对账（Redis 剩余 vs DB 应余）校正。能主动讲清"我知道边界在哪、怎么补"的候选人不多——大多数只会背"Redis 预减防超卖"。
+预减（Redis）与实扣（DB）是两个存储，**没有事务**：回补也可能失败（Redis 恰好挂了）、TTL 到期重灌会覆盖。所以这是**最终一致**：
+- 活动结束后对账（Redis 剩余 vs DB 应余）校正；
+- "已受理但订单还没建好"的窗口期由前端轮询 `result` 掩盖（QUEUED → SUCCESS/FAILED）；
+- 消息彻底丢失（MQ 宕机）由降级路径兜住：MQ 不可用时改走本地线程池异步建单（与审核降级同款），Redis 也不可用则 DB CAS + uk 硬扛。
+
+能主动讲清"我知道边界在哪、怎么补"的候选人不多——大多数只会背"Redis 预减防超卖"。
 
 ## 本章动手作业
 
 1. 手工插一条活动数据（drop_stock=5, per_limit=1），`GET /api/v1/drops/{id}` 触发预热，`redis-cli GET aimall:drop:stock:{id}` 应为 5。
-2. 同一用户抢两次 → 第二次"每人限购一次"；换不同用户各抢一次看 Redis 计数递减。
-3. 换 5 个用户并发抢 5 件 → 刚好 5 个成功；第 6 个 → "已被抢完"且**日志无 SQL**（被第 1 层挡住，这就是"挡 99%"）。
-4. 思考：如果不回补，攻击者可以用什么手法把库存"刷没"？（答：用一个永远会失败的身份反复触发抢购——每次都白吃一个名额。）
+2. `POST /drops/{id}/buy` → 立刻返回 QUEUED（注意：不再是订单号！）；1~2 秒后 `GET /drops/{id}/result` → SUCCESS 带 orderId。
+3. 同一用户抢两次 → 第二次"请勿重复抢购"（Lua 判重 -3）；换不同用户各抢一次看 Redis 计数递减。
+4. 换 5 个用户并发抢 5 件 → 5 个 QUEUED + 5 个 SUCCESS；第 6 个 → "已被抢完"且**日志无建单 SQL**（被第 1 层挡住）。
+5. 思考：如果不回补，攻击者可以用什么手法把库存"刷没"？（答：用一个永远会失败的身份反复触发抢购——每次都白吃一个名额。）
 
 ---
 
@@ -1371,13 +1389,20 @@ private void checkRateLimit() {
 #    [ ] DEL key 后互斥重建；查不存在 id 两次后空值标记生效
 #    [ ] 停 Redis → 接口照常 + WARN 降级日志；限流放行（fail-open）
 
-# 5. 限量发售（自建活动数据）
+# 5. 限量发售（自建活动数据，削峰链路）
+#    [ ] POST /drops/{id}/buy → 立即返回 QUEUED（不是订单号）
+#    [ ] 轮询 GET /drops/{id}/result → 1~2 秒内 SUCCESS 带 orderId
 #    [ ] 预热后 Redis 计数正确；并发不多卖不虚卖
-#    [ ] 重复抢购 → 限购；抢完 → 第1层拦截（日志无 SQL）
-#    [ ] 失败后 Redis 计数回补
-
+#    [ ] 同用户重复抢购 → "请勿重复抢购"（Lua 判重）；抢完 → 第1层拦截（日志无建单 SQL）
+#    [ ] 失败后 Redis 计数回补 + result 轮询到 FAILED
+#    [ ] 抢购成功不付款 → 30min 超时自动取消并回补库存（与普通订单同款）
 # 6. 限流：11 连问第 11 次拒绝
-# 7. 单测：mvn test → PaymentServiceTest 5 用例全绿
+# 7. 定时任务（@EnableScheduling 已开）
+#    [ ] CompensationTask：订单超时兜底/审核堆积重送/支付查单对账（日志可 grep "[补偿]"）
+#    [ ] NoteCounterFlushTask：点赞后 60s 内 t_note.like_count 落库 + hot_score 重算
+#    [ ] HotRankRebuildTask：DEL 掉 zset 后 30min 内自动重建
+# 8. 下单幂等：结算弹窗双击"提交订单"两次 → 第二次"请勿重复提交订单"
+# 9. 单测：mvn test → PaymentServiceTest 5 用例全绿
 ```
 
 ## 12.2 面试速查表（30 秒一答）

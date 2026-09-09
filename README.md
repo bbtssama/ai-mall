@@ -3,13 +3,15 @@
 > 面向初级 Java 求职的核心实战项目：内容社区为流量入口、电商交易为变现主干、AI 为智能引擎。
 > 完整设计文档：`求职2026-8/项目设计文档.md`（本仓库为 `Projects/ai-mall`）。
 
-## 技术栈（V1）
+## 技术栈（V1 → V4 全景）
 
 | 层 | 技术 |
 |---|---|
 | 后端 | Spring Boot 3.4.5 · Java 17 · MyBatis（XML 手写 SQL）· Sa-Token（无状态 Token） |
-| 数据 | MySQL 8（192.168.6.102:3306 / ai_mall）· **Flyway 版本管理**（V1.5） |
+| 数据 | MySQL 8（192.168.6.102:3306 / ai_mall）· **Flyway 版本管理**（V1.5，迁移至 V4） |
+| 缓存/中间件 | Redis（缓存三兄弟/计数增量桶/排行榜 zset/分布式锁/限流）· RabbitMQ（审核异步/延迟取消/削峰建单） |
 | AI | Spring AI 1.0 + 官方 DeepSeek（OpenAI 兼容，`application.yml` 当前模型 `deepseek-v4-flash-vision-exp`；可切换 OpenCode Go 中转，该 base-url 在配置中已注释备用） |
+| 服务化（V4） | Nacos 注册发现 + Spring Cloud Gateway + Resilience4j 熔断（仅 AI 独立成服务，主体保持单体） |
 | 语音/动效（可选） | `com.aimall.voice`（纯派蒙 TTS 引擎）+ 前端 `src/voice/`（Live2D 皮套 + TTS 播放队列） |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + axios（SSE 流式对话） |
 
@@ -19,12 +21,14 @@
 ai-mall/
 ├── backend/                  # Spring Boot 单体（按域分包，为 V4 拆服务埋伏笔）
 │   └── src/main/java/com/aimall/
-│       ├── common/           # R 统一返回 / 全局异常 / 分页 / traceId 链路 / 对象存储抽象(V1.5)
-│       ├── config/           # MyBatis / Sa-Token / CORS / BCrypt / Spring AI / 线程池(V1.5)
-│       ├── user/             # 注册/登录/当前用户
-│       ├── goods/            # 商品列表/详情/SKU / 购物车（V1 MySQL 版）
-│       ├── order/            # 下单（行锁 CAS 扣库存+事务）/ 订单列表/详情/取消
-│       ├── ai/               # 会话管理 / AI 问答（Agent 商品搜索工具 + 图片识别 + SSE 流式）
+│       ├── common/           # R 统一返回 / 全局异常 / 分页 / traceId 链路 / Redis 门面 / 补偿任务
+│       ├── config/           # MyBatis / Sa-Token / CORS / BCrypt / Spring AI / 线程池 / 调度 / MQ 生产者回调
+│       ├── user/             # 注册/登录/当前用户/地址簿
+│       ├── goods/            # 商品列表/详情/SKU / 购物车 / 商品详情缓存（缓存三兄弟）
+│       ├── content/          # 笔记/Feed/点赞收藏 / 审核MQ / 计数增量桶 / 热榜重建任务
+│       ├── order/            # 下单（行锁 CAS+幂等token）/ 订单列表/取消 / 延迟消息(TTL+DLX)
+│       ├── pay/              # 支付闭环（验签/幂等/金额核对）+ 限量发售（Redis预减+MQ削峰）
+│       ├── ai/               # 会话管理 / AI 问答（Agent 工具 + 图片识别 + SSE 流式）/ RAG
 │       └── voice/            # 独立派蒙 TTS 引擎（可选，POST /api/v1/voice/tts）
 ├── frontend/                 # Vue3 + Vite 前端
 │   └── src/voice/            # Live2D 皮套组件 + TTS 播放队列（可选）
@@ -162,12 +166,35 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 | **AI 种草文案** | RAG 检索真实用户反馈参与创作，只出草稿绝不自动发布 |
 | **模拟数据** | `scripts/gen_mock_data.py` 生成 100 商品 + 500 笔记（幂律分布/含缺点段），`sql/mock_data.sql` 幂等导入 |
 
-## 演进预告
+## 演进路线（当前进度）
 
 - **V1.5 工程基建**：✅ 已完成（Flyway / traceId 可观测 / 对象存储抽象 / 测试 / Compose / CI，见上文）
 - **V2 内容社区+RAG**：✅ 已完成（笔记/MQ 审核异步/Hybrid RAG/AI 文案/模拟数据，见上文）
-- **V3**：Redis（缓存三兄弟/点赞计数/排行榜）、RabbitMQ 延迟消息（订单超时取消）、沙箱支付、限量发售防超卖
-- **V4**：按域拆微服务（仅独立 ai-service + Gateway/Nacos/Feign，主体保持单体）
+- **V3 支付+Redis+MQ**：✅ 已完成（详见 `V3支付与Redis详解.md`）
+  - Redis：商品详情缓存三兄弟（空值缓存/互斥锁/随机TTL）、计数增量桶（HINCRBY 攒增量+定时落库）、热门榜 zset、AI 限流（Lua 原子固定窗口）
+  - RabbitMQ：审核异步、订单超时取消（TTL+DLX 队列级延迟）、限量发售削峰建单；生产者 Confirm/Returns 回调落地
+  - 支付闭环：验签/幂等（uk_order_id 一订单一行）/金额核对/主动查单
+  - 限量发售：**Redis 预减（Lua 判重+扣减）+ MQ 异步下单削峰**，前端轮询结果
+- **V4 服务化**：✅ 已完成（详见 `V4服务化详解.md`）：仅独立 ai-service + Gateway + Nacos + Resilience4j 熔断，主体保持单体
 - **V5**：Agent 客服（查订单/物流）、相似推荐+热门榜（ItemCF 离线对比）、受限 NL2SQL 商家看板
 
+## 可靠性大修缮（2026-09-09，P0/P1/P2 系统性修复）
+
+一次从"传统后端岗位"视角的全面评审后修复，8 个独立 commit：
+
+| 修复 | 内容 |
+|---|---|
+| **抢购参数校验** | `quantity` 裸 Map 接参可传负数反向刷库存 → DTO `@Min/@Max` 拦死 |
+| **预热竞态** | check-then-set 并发首访可重置库存 → `SET NX` 原子预热 |
+| **削峰重构** | 限量发售从"同步建单"改为经典 **Redis 预减 + MQ 异步下单**：Lua 判重+扣减同脚本 → 投递 → 消费端事务建单（CAS+uk）→ 失败三分流（回补/标记/DLQ）；新增 `/drops/{id}/result` 轮询 |
+| **秒杀单超时取消** | 抢购订单此前永不超时（死单占库存）→ `OrderDelayMessageSender` 统一出口，与普通下单同款 30min 延迟取消 |
+| **定时补偿三合一** | `CompensationTask`：订单超时兜底 / 审核堆积重送 / 支付查单对账——异步链路的最终一致性收敛 |
+| **MQ 生产者确认** | confirm/returns 配了但没人消费（摆设）→ `RabbitTemplateCustomizer` 注册回调；取消队列补死信 |
+| **消费端事务边界** | `@Transactional` 内吞异常导致半截事务提交 → 异常冒出代理回滚 + DLQ |
+| **写放大治理** | 计数（浏览/点赞/收藏）从"每次互动 3 次 DB 写"改为 Redis HINCRBY 攒增量 + 60s 定时落库；热度刷新收敛到落库路径 |
+| **热门榜** | Top50 循环逐条查（N+1）→ IN 批量；zset 定时全量重建（冷启动自愈） |
+| **支付幂等** | "查完再插"并发产生两张 PAYING 单 → `uk_order_id` 一订单一行 + 冲突回查复用 |
+| **下单幂等** | 双击提交=两张单 → 一次性 token（签发/DEL 原子消费，Redis 不可用 fail-open） |
+
 > ⚠️ `application.yml` 的 AI 中转 Key 已改为**环境变量注入**（`${DEEPSEEK_API_KEY:}`，无默认值）；本地运行请先设置该环境变量，勿把真实 Key 提交入库。
+> ⚠️ V4 迁移改了 `t_payment` 唯一索引、取消队列加了 DLX 参数：旧环境需先 `rabbitmqadmin delete queue name=aimall.order.cancel.queue` 再启动（队列参数不可变）。

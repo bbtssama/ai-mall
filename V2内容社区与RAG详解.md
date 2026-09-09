@@ -345,6 +345,8 @@ public void like(Long noteId, boolean liked) {
 3. **取消点赞判断 rows>0 才减**——本来没点过时 delete 返回 0，不减计数（防负数偏移）。
 4. **幂等的语义是"静默"**——点赞是"状态确认"型操作，重复=已达成，不报错。对比：限量发售撞限购 uk 是"业务失败"要提示——**同一个异常，两种业务语义，按场景选**（面试可讲）。
 
+> **★ 2026-09-09 修缮更新（V3 后期：计数上 Redis）**：上面是 V2 原始实现（计数直写 DB）。V3 后期为治理写放大（热点笔记每次互动 3 次 DB 写），计数改为 Redis Hash 攒**增量**（`HINCRBY aimall:cnt:like {noteId} 1`）+ 60s 定时任务加法回写；`refreshHotScore` 也从互动路径收敛到落库路径。本节的"唯一索引幂等 + 事务保关系表"完全不变（关系表仍是 DB 事务），只有计数出口变了——Redis 不可用时自动降级回上面这套直写逻辑（V2 代码即降级路径，老代码没白写）。详见 `V3支付与Redis详解.md` 词典"计数增量桶"。
+
 ## 4.3 计数不丢失：原子自增 vs 先读后写
 
 计数 SQL 必须写 `SET like_count = like_count + 1`（原子），**不能** Java 里 `setLikeCount(vo.getLikeCount()+1)`：
