@@ -22,6 +22,17 @@
         WHERE id = #{id}
     </select>
 
+    <!-- 补偿扫描：审核中超时堆积的笔记（消息丢失/消费失败兜底） -->
+    <select id="selectAuditingBefore" resultType="com.aimall.content.bean.Note">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_note
+        WHERE status = 'AUDITING'
+        AND created_at &lt; #{before}
+        ORDER BY created_at ASC
+        LIMIT #{limit}
+    </select>
+
     <!-- ============================================================
          游标分页 + 中文全文检索（Feed 流 / 搜索共用）
          ============================================================ -->

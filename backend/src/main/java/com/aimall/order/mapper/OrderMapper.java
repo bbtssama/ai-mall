@@ -24,6 +24,10 @@ public interface OrderMapper {
 
     long countByUserId(@Param("userId") Long userId);
 
+    /** 补偿扫描：超时未支付的待处理订单（延迟消息丢失/投递失败时的兜底） */
+    List<Order> selectTimeoutPending(@Param("before") LocalDateTime before,
+                                      @Param("limit") int limit);
+
     /** 返回受影响行数，主键回填 order.id */
     int insert(Order order);
 

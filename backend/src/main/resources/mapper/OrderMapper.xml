@@ -33,6 +33,17 @@
         SELECT COUNT(*) FROM t_order WHERE user_id = #{userId}
     </select>
 
+    <!-- 补偿扫描：超时仍未取消的待支付订单（延迟消息丢失时的兜底）。
+         小数据量直接全表过滤状态；量级上来后可加 (status, created_at) 索引 -->
+    <select id="selectTimeoutPending" resultType="com.aimall.order.bean.Order">
+        SELECT <include refid="baseCols"/>
+        FROM t_order
+        WHERE status = 'PENDING_PAY'
+        AND created_at &lt; #{before}
+        ORDER BY created_at ASC
+        LIMIT #{limit}
+    </select>
+
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO t_order (order_no, user_id, total_amount, status, receiver_name,
                              receiver_phone, receiver_address)

@@ -25,6 +25,10 @@ public interface NoteMapper {
 
     Note selectById(@Param("id") Long id);
 
+    /** 补偿扫描：堆积在"审核中"超时的笔记（MQ 消息丢失/消费失败时的兜底） */
+    List<Note> selectAuditingBefore(@Param("before") java.time.LocalDateTime before,
+                                    @Param("limit") int limit);
+
     /** 游标分页列表（含关键词/标签/状态过滤） */
     List<Note> selectPage(NoteQuery query);
 

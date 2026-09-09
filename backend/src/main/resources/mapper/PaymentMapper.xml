@@ -31,6 +31,17 @@
         LIMIT 1
     </select>
 
+    <!-- 对账扫描：超时仍 PAYING 的支付单（回调丢失时主动查单的兜底入口） -->
+    <select id="selectPayingBefore" resultType="com.aimall.pay.bean.Payment">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM t_payment
+        WHERE status = 'PAYING'
+        AND created_at &lt; #{before}
+        ORDER BY created_at ASC
+        LIMIT #{limit}
+    </select>
+
     <!--
       ★ 幂等的状态机 CAS：WHERE status = 期望状态
       重复回调（网络重传/第三方重试）时第二次影响 0 行，Service 据此判断"已处理过"。
