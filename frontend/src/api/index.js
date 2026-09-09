@@ -64,10 +64,15 @@ export const payApi = {
 }
 
 // ---------- 限量发售（V3） ----------
+// 削峰链路：buy 只返回"已受理(QUEUED)"，订单由 MQ 消费者异步创建；
+// 前端拿到 QUEUED 后每 1~2 秒轮询 result，SUCCESS 时携带 orderId 跳订单页。
 export const dropApi = {
   ongoing: () => request.get('/v1/drops'),
   detail: (id) => request.get(`/v1/drops/${id}`),
-  buy: (id, quantity = 1) => request.post(`/v1/drops/${id}/buy`, { quantity })
+  // 提交抢购：返回 {status:'QUEUED', message}
+  buy: (id, quantity = 1) => request.post(`/v1/drops/${id}/buy`, { quantity }),
+  // 抢购结果轮询：{status:'QUEUED|SUCCESS|FAILED|NONE', orderId}
+  result: (id) => request.get(`/v1/drops/${id}/result`)
 }
 
 // ---------- AI 内容创作（V2） ----------
