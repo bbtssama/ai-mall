@@ -58,6 +58,8 @@ public class NoteServiceImpl implements NoteService {
 
     /** 热门榜的 zset key（与词典/文档中的命名一致） */
     private static final String HOT_RANK_KEY = "aimall:hot:notes";
+    /** 榜单全量重建的候选规模：全站笔记量级远小于此，够覆盖 */
+    private static final int HOT_RANK_REBUILD_SIZE = 1000;
     /** RAG 索引：下架笔记时移除语料（content → ai.rag 同应用依赖，V4 拆分后改 Feign） */
     private final com.aimall.ai.rag.RagIndexService ragIndexService;
 
@@ -380,38 +382,94 @@ public class NoteServiceImpl implements NoteService {
         if (n == null) {
             return;
         }
-        int score = n.getLikeCount() * 3 + n.getCollectCount() * 5 + n.getViewCount();
+        int score = hotScoreOf(n);
         noteMapper.updateHotScore(noteId, score);
         redisOps.zAdd(HOT_RANK_KEY, String.valueOf(noteId), score);
     }
 
-    /** 热门榜（V3）：Redis zset 倒序 Top-N，附当前热度分。 */
+    /** 热门榜（V3）：Redis zset 倒序 Top-N，附当前热度分。
+     *  ★ P2 修复：早期实现榜单循环逐条 selectById（Top50 = 50 次 SQL）——
+     *  与列表接口辛苦做的"5 条批量 SQL"自相矛盾。现在 zset 只出 id 顺序，
+     *  明细一次 IN 查询批量拿回（反 N+1 的又一实例）。 */
     @Override
     public List<NoteVO> hotRank(int limit) {
         List<com.aimall.common.redis.RedisOps.RankItem> rank =
                 redisOps.zTopWithScore(HOT_RANK_KEY, limit);
-        List<NoteVO> result = new java.util.ArrayList<>(rank.size());
+        if (rank.isEmpty()) {
+            return List.of();
+        }
+        // ① 收集榜单 id（保持 zset 顺序）
+        List<Long> ids = new java.util.ArrayList<>(rank.size());
         for (var item : rank) {
             try {
-                Long noteId = Long.parseLong(item.member());
-                Note n = noteMapper.selectById(noteId);
-                if (n != null && Note.STATUS_PUBLISHED.equals(n.getStatus())) {
-                    NoteVO vo = new NoteVO();
-                    vo.setId(n.getId());
-                    vo.setTitle(n.getTitle());
-                    vo.setCover(n.getCover());
-                    vo.setLikeCount(n.getLikeCount());
-                    vo.setCollectCount(n.getCollectCount());
-                    vo.setViewCount(n.getViewCount());
-                    vo.setHotScore((int) item.score());
-                    vo.setCreatedAt(n.getCreatedAt());
-                    result.add(vo);
-                }
+                ids.add(Long.parseLong(item.member()));
             } catch (NumberFormatException ignored) {
                 // 榜内混入脏数据（理论不可达）：跳过而不是让整个榜单接口失败
             }
         }
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        // ② 一次 IN 查询批量拿明细（而不是 N 次 selectById）
+        Map<Long, Note> notes = new HashMap<>();
+        for (Note n : noteMapper.selectByIds(ids)) {
+            notes.put(n.getId(), n);
+        }
+        // ③ 按 zset 顺序组装，仅保留已发布的（下架/驳回的从榜上自然消失）
+        List<NoteVO> result = new java.util.ArrayList<>(ids.size());
+        for (var item : rank) {
+            Long noteId = null;
+            try {
+                noteId = Long.parseLong(item.member());
+            } catch (NumberFormatException ignored) {
+            }
+            Note n = noteId == null ? null : notes.get(noteId);
+            if (n != null && Note.STATUS_PUBLISHED.equals(n.getStatus())) {
+                NoteVO vo = new NoteVO();
+                vo.setId(n.getId());
+                vo.setTitle(n.getTitle());
+                vo.setCover(n.getCover());
+                vo.setLikeCount(n.getLikeCount());
+                vo.setCollectCount(n.getCollectCount());
+                vo.setViewCount(n.getViewCount());
+                vo.setHotScore((int) item.score());
+                vo.setCreatedAt(n.getCreatedAt());
+                result.add(vo);
+            }
+        }
         return result;
+    }
+
+    /**
+     * 全量重建热门榜 zset（定时任务调用，见 HotRankRebuildTask）。
+     *
+     * <p>★ 解决两个问题：</p>
+     * <ul>
+     *   <li><b>冷启动</b>：Redis 重启数据全失，原实现只靠"逐条互动"慢慢恢复，
+     *       榜单会越用越空。重建以 DB 热度分为准，一次灌满；</li>
+     *   <li><b>漂移</b>：refreshHotScore 只在互动时写 zset，DB 与 zset 长期
+     *       并行更新难免不一致（删 key 竞态/降级窗口），周期性对账收敛。</li>
+     * </ul>
+     * <p>语义：先删后全量灌入（覆盖式重建）。删除与灌入之间有毫秒级空窗，
+     * 榜单接口短暂返回空——榜单是展示优化，可接受（若不可接受，
+     * 换"写影子 key + RENAME 原子切换"）。</p>
+     */
+    @Override
+    public void rebuildHotRank() {
+        List<Note> top = noteMapper.selectPublishedForRank(HOT_RANK_REBUILD_SIZE);
+        if (top.isEmpty()) {
+            return;
+        }
+        redisOps.delete(HOT_RANK_KEY);
+        for (Note n : top) {
+            redisOps.zAdd(HOT_RANK_KEY, String.valueOf(n.getId()), hotScoreOf(n));
+        }
+        log.info("热门榜已全量重建，成员数={}", top.size());
+    }
+
+    /** 热度分 = 点赞*3 + 收藏*5 + 浏览*1（refreshHotScore/rebuildHotRank 共用同一公式） */
+    private int hotScoreOf(Note n) {
+        return n.getLikeCount() * 3 + n.getCollectCount() * 5 + n.getViewCount();
     }
 
     private void ensurePublished(Long noteId) {

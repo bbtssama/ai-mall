@@ -46,4 +46,10 @@ public interface NoteService {
      * Redis 不可用时返回空榜（榜单是展示优化，不决定可用性）。
      */
     java.util.List<NoteVO> hotRank(int limit);
+
+    /**
+     * 全量重建热门榜 zset（定时任务调用）：
+     * Redis 数据丢失/漂移后，以 DB 为真值恢复（冷启动自愈）。
+     */
+    void rebuildHotRank();
 }

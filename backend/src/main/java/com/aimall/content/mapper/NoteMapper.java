@@ -25,6 +25,12 @@ public interface NoteMapper {
 
     Note selectById(@Param("id") Long id);
 
+    /** 批量查询（排行榜/列表组装反 N+1 用） */
+    List<Note> selectByIds(@Param("ids") List<Long> ids);
+
+    /** 榜单全量重建候选：已发布笔记按热度倒序取前 N */
+    List<Note> selectPublishedForRank(@Param("limit") int limit);
+
     /** 补偿扫描：堆积在"审核中"超时的笔记（MQ 消息丢失/消费失败时的兜底） */
     List<Note> selectAuditingBefore(@Param("before") java.time.LocalDateTime before,
                                     @Param("limit") int limit);
