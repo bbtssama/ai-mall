@@ -29,6 +29,10 @@ request.interceptors.response.use(
       localStorage.removeItem('user')
       ElMessage.warning('登录已过期，请重新登录')
       router.push('/login')
+    } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+      // 超时 ≠ 网络不通：请求可能仍在服务端正常处理（AI 类长耗时接口），
+      // 与"网络异常"混在一起会误导排查——单独提示
+      ElMessage.error('请求超时，请稍后重试')
     } else {
       ElMessage.error(err.response?.data?.msg || '网络异常，请稍后再试')
     }

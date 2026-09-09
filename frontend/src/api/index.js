@@ -79,8 +79,11 @@ export const dropApi = {
 
 // ---------- AI 内容创作（V2） ----------
 export const aiContentApi = {
-  // AI 生成种草文案草稿（返回 {draft, editable}，用户编辑后再发布）
-  noteDraft: (data) => request.post('/v1/ai/note-draft', data)
+  // AI 生成种草文案草稿（返回 {draft:{title,content,tags}, editable}，用户编辑后再发布）
+  // ★ timeout 单独放宽到 120s：reasoning 模型的非流式创作调用总耗时经常 >30s
+  //   （reasoning_content + 数百 token 正文），沿用全局 30s 会让前端先超时 abort
+  //   （表现即"网络异常"），而后端其实还在正常处理——长耗时接口必须显式覆盖全局超时。
+  noteDraft: (data) => request.post('/v1/ai/note-draft', data, { timeout: 120000 })
 }
 
 // ---------- 文件上传（V1.5） ----------
@@ -100,7 +103,8 @@ export const chatApi = {
   conversations: () => request.get('/v1/chat/conversations'),
   createConversation: (data) => request.post('/v1/chat/conversations', data),
   messages: (id) => request.get(`/v1/chat/conversations/${id}/messages`),
-  send: (data) => request.post('/v1/chat', data),
+  // 非流式问答（开发测试用，SSE 主走 sendStream）：AI 生成耗时长，超时放宽到 120s
+  send: (data) => request.post('/v1/chat', data, { timeout: 120000 }),
   // SSE 流式：POST /api/v1/chat/stream，逐块回调 onChunk
   sendStream: async (data, onChunk, onDone, onError) => {
     const resp = await fetch('/api/v1/chat/stream', {
