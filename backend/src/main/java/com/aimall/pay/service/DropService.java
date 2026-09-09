@@ -66,7 +66,7 @@ public class DropService {
     private final OrderMapper orderMapper;
     private final ProductSkuMapper skuMapper;
 
-    /** 活动开始时把库存预热进 Redis */
+    /** 活动开始时把库存预热进 Redis（强制覆盖语义：开售事件触发，以 DB 为准重置） */
     public void warmUp(Long activityId) {
         DropActivity act = dropMapper.selectActivity(activityId);
         if (act == null) {
@@ -76,10 +76,27 @@ public class DropService {
         log.info("限量发售库存已预热 activityId={} stock={}", activityId, act.getDropStock());
     }
 
-    /** 懒预热：Redis 里没有库存键时才灌（幂等，避免覆盖进行中的扣减） */
+    /**
+     * 懒预热：仅当 Redis 里<b>确实没有</b>库存键时才灌入。
+     *
+     * <p>★ P0 修复：早期实现是 check-then-set（GET 判空 → SET 覆盖），
+     * 并发首访时两个请求都会判"未预热"，后一个 SET 会把<b>已经扣减过的库存重置回全量</b>
+     * ——直接超卖。现在用 SET NX（{@code setIfAbsent}）原子化"判断+写入"，
+     * 只有一个请求能真正灌入，其余的发现键已存在自然跳过。</p>
+     */
     public void warmUpIfAbsent(Long activityId) {
-        if (redisOps.get(STOCK_KEY_PREFIX + activityId).isEmpty()) {
-            warmUp(activityId);
+        if (redisOps.get(STOCK_KEY_PREFIX + activityId).isPresent()) {
+            return;
+        }
+        DropActivity act = dropMapper.selectActivity(activityId);
+        if (act == null) {
+            return;
+        }
+        // NX 写入：并发下只有第一个成功；Redis 恰好不可用时 safe() 返回 false（静默降级走 DB）
+        boolean written = redisOps.setIfAbsent(
+                STOCK_KEY_PREFIX + activityId, String.valueOf(act.getDropStock()), 24 * 3600);
+        if (written) {
+            log.info("限量发售库存懒预热完成 activityId={} stock={}", activityId, act.getDropStock());
         }
     }
 

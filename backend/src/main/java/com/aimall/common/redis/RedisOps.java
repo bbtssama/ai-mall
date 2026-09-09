@@ -52,6 +52,21 @@ public class RedisOps {
         }, false, "set", key);
     }
 
+    /**
+     * 仅当 key 不存在时写入（SET NX PX）。
+     *
+     * <p>★ 典型场景：库存预热。check-then-set（先 GET 再 SET）在并发首访时
+     * 会把两个请求都判为"未预热"，后一个无条件 SET 会<b>覆盖进行中的扣减</b>——
+     * 库存被重置回全量 = 超卖。NX 语义把"判断+写入"原子化，天然幂等。</p>
+     *
+     * @return 是否真的写入了（false = key 已存在或 Redis 不可用）
+     */
+    public boolean setIfAbsent(String key, String value, long ttlSeconds) {
+        return safe(() -> Boolean.TRUE.equals(stringRedisTemplate.opsForValue()
+                        .setIfAbsent(key, value, ttlSeconds, TimeUnit.SECONDS)),
+                false, "setIfAbsent", key);
+    }
+
     /** 写入对象（走 JSON 序列化，见 RedisConfig） */
     public void setObject(String key, Object value, long ttlSeconds) {
         safe(() -> {

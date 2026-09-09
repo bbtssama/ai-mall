@@ -9,7 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
-import java.util.Map;
+
+import com.aimall.pay.dto.DropBuyRequest;
 
 /**
  * 限量发售接口。
@@ -44,9 +45,8 @@ public class DropController {
     }
 
     @PostMapping("/{id}/buy")
-    public R<Long> buy(@PathVariable Long id, @RequestBody Map<String, Integer> body) {
+    public R<Long> buy(@PathVariable Long id, @RequestBody @jakarta.validation.Valid DropBuyRequest body) {
         Long userId = StpUtil.getLoginIdAsLong();
-        int quantity = body.getOrDefault("quantity", 1);
-        return R.ok(dropService.buy(userId, id, quantity));
+        return R.ok(dropService.buy(userId, id, body.getQuantity()));
     }
 }
