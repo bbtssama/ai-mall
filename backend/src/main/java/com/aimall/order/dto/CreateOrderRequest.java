@@ -32,4 +32,10 @@ public class CreateOrderRequest {
      * false/null = 商品页直接购买，不清理购物车。
      */
     private Boolean fromCart;
+
+    /**
+     * 幂等 token（防双击重复下单）：结算页加载时由后端签发，提交时带回。
+     * 可空——兼容不接入 token 的调用方（此时退化为无防重）。
+     */
+    private String idempotentToken;
 }

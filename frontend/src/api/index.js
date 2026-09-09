@@ -25,6 +25,8 @@ export const cartApi = {
 
 // ---------- 订单 ----------
 export const orderApi = {
+  // 幂等 token：结算弹窗打开时领取，提交订单时带回（防双击重复下单）
+  token: () => request.get('/v1/orders/token'),
   create: (data) => request.post('/v1/orders', data),
   page: (params) => request.get('/v1/orders', { params }),
   detail: (id) => request.get(`/v1/orders/${id}`),

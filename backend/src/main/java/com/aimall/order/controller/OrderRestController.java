@@ -25,6 +25,15 @@ public class OrderRestController {
 
     private final OrderService orderService;
 
+    /**
+     * 签发下单幂等 token：结算页加载时请求一次，提交订单时带回。
+     * 双击"提交订单"的第二次会因 token 已被消费而被拒（防重复下单）。
+     */
+    @GetMapping("/token")
+    public R<String> idempotentToken() {
+        return R.ok(orderService.createIdempotentToken());
+    }
+
     @PostMapping
     public R<OrderVO> create(@RequestBody @Valid CreateOrderRequest req) {
         return R.ok(orderService.create(req));

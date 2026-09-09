@@ -310,6 +310,20 @@ public class RedisOps {
         }, Map.of(), "takeAllAndClear", key);
     }
 
+    /**
+     * 一次性消费 token：DEL 是原子的——删除成功即"只此一次"。
+     *
+     * <p>幂等 token 的经典语义：签发时 SET（TTL 兜底防泄漏），提交时 DEL；
+     * 返回 true=首次消费放行，false=已被用过拒绝。第二次提交同一个 token
+     * 删不到任何东西（返回 0），天然防重。</p>
+     *
+     * @return true=消费成功放行；false=token 已被使用/不存在；null=Redis 不可用
+     *         （降级放行——fail-open，别让 Redis 故障挡住正常下单）
+     */
+    public Boolean consumeToken(String key) {
+        return safe(() -> stringRedisTemplate.delete(key), null, "consumeToken", key);
+    }
+
     // ------------------------------------------------------------------
     // 降级包装
     // ------------------------------------------------------------------

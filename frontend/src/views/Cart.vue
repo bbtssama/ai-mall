@@ -149,6 +149,8 @@ const items = ref([])
 const loading = ref(false)
 const checkoutVisible = ref(false)
 const submitting = ref(false)
+// 下单幂等 token：弹窗打开时领取，提交时带回；后端一次性消费（防双击重复下单）
+const orderToken = ref('')
 
 // 收货地址簿
 const addresses = ref([])
@@ -258,6 +260,12 @@ async function loadAddresses(selectDefault = true) {
 
 async function openCheckout() {
   await loadAddresses(true)
+  // 领取幂等 token：每次打开结算弹窗都取新的（上一次未用的自然过期）
+  try {
+    orderToken.value = await orderApi.token() || ''
+  } catch {
+    orderToken.value = ''   // 领取失败不挡下单（后端 token 可空兼容）
+  }
 }
 
 async function saveNewAddr() {
@@ -324,7 +332,8 @@ async function submitOrder() {
       items: selectedItems.value.map(i => ({ skuId: i.skuId, quantity: i.quantity })),
       receiverName: addr.receiver,
       receiverPhone: addr.phone,
-      receiverAddress: addr.fullAddress
+      receiverAddress: addr.fullAddress,
+      idempotentToken: orderToken.value || undefined
     })
     ElMessage.success(`下单成功：${order.orderNo}`)
     selectedItems.value.forEach(i => checkedIds.value.delete(i.id))

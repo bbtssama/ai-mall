@@ -16,6 +16,12 @@ public interface OrderService {
      */
     OrderVO create(CreateOrderRequest req);
 
+    /**
+     * 签发下单幂等 token（结算页加载时调用，TTL 10 分钟一次性使用）。
+     * 双击"提交订单"的第二次会因 token 已被消费而被拒。
+     */
+    String createIdempotentToken();
+
     PageResult<OrderVO> pageMyOrders(PageQuery query);
 
     OrderVO detail(Long id);
