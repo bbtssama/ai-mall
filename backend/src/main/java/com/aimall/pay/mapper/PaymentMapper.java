@@ -33,4 +33,15 @@ public interface PaymentMapper {
     /** 关闭支付单（超时/订单取消）：同样带状态机条件 */
     int updateToClosed(@Param("paymentNo") String paymentNo,
                        @Param("expectStatus") String expectStatus);
+
+    /**
+     * 复用行重开支付（uk_order_id 模型下，同一订单只有一行支付单）：
+     * 换 payment_no、重置金额/渠道/过期时间，仅当该行<b>不是 PAID</b>才生效。
+     * 返回 0 = 已支付（或行不存在），调用方按"已支付"分支处理。
+     */
+    int updateForRecreate(@Param("orderId") Long orderId,
+                          @Param("paymentNo") String paymentNo,
+                          @Param("amount") java.math.BigDecimal amount,
+                          @Param("channel") String channel,
+                          @Param("expireTime") java.time.LocalDateTime expireTime);
 }

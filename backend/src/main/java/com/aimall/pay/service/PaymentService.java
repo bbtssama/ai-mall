@@ -70,8 +70,16 @@ public class PaymentService {
     /**
      * 发起支付：为订单创建支付单，返回收银台信息。
      *
-     * <p>幂等：同一订单重复发起支付时，若已有有效支付单（PAYING/PAID）直接复用，
-     * 避免产生两张待支付的单。</p>
+     * <p>★ 幂等模型（P2 修复后）：一个订单<b>只有一行支付单</b>（uk_order_id 兜底）。</p>
+     * <pre>
+     *   无行            → 插入 PAYING
+     *   PAID            → 直接复用（已支付过，回显同一收银台信息）
+     *   PAYING 未过期   → 复用（防双击产生两张单）
+     *   CLOSED / 已过期 → 复用行<b>重开</b>：换 payment_no、重置渠道/金额/过期时间
+     * </pre>
+     * <p>并发双击的兜底：两个请求同时走到"无行→插入"，第二个撞 uk_order_id
+     * 抛 DuplicateKeyException → 捕获后回查复用（经典"唯一索引+冲突回查"，
+     * 与点赞幂等同款）。早期"查完再插"的窗口在并发下会产生两张 PAYING 单。</p>
      */
     @Transactional(rollbackFor = Exception.class)
     public PayCreateVO create(Long orderId, String channel) {
@@ -84,34 +92,50 @@ public class PaymentService {
             throw new BusinessException(ResultCode.ORDER_STATUS_INVALID, "仅待支付订单可发起支付");
         }
 
-        // 复用已有支付单（幂等）：避免用户反复点"去支付"产生多张单。
-        // ★评审修正：PAYING 但已过期的单不能复用——过期单的回调/支付渠道侧已不可支付，
-        // 复用它用户会永远付不了款。正确语义：关旧建新。
         Payment exist = paymentMapper.selectByOrderId(orderId);
         if (exist != null && Payment.STATUS_PAID.equals(exist.getStatus())) {
             return toVO(exist, router.resolve(exist.getChannel()));
         }
-        if (exist != null && Payment.STATUS_PAYING.equals(exist.getStatus())) {
-            boolean expired = exist.getExpireTime() != null
-                    && exist.getExpireTime().isBefore(LocalDateTime.now());
-            if (!expired) {
-                return toVO(exist, router.resolve(exist.getChannel()));
-            }
-            paymentMapper.updateToClosed(exist.getPaymentNo(), Payment.STATUS_PAYING);
+        if (exist != null && Payment.STATUS_PAYING.equals(exist.getStatus())
+                && (exist.getExpireTime() == null
+                    || exist.getExpireTime().isAfter(LocalDateTime.now()))) {
+            // 有效 PAYING 单：直接复用（幂等——防双击多单）
+            return toVO(exist, router.resolve(exist.getChannel()));
         }
 
+        if (exist == null) {
+            // 首次：插入（并发第二个插入撞 uk_order_id → 回查复用）
+            Payment p = buildPayment(order, channel);
+            try {
+                paymentMapper.insert(p);
+            } catch (org.springframework.dao.DuplicateKeyException e) {
+                return toVO(paymentMapper.selectByOrderId(orderId), router.resolve(channel));
+            }
+            return toVO(p, router.resolve(channel));
+        }
+
+        // CLOSED 或过期 PAYING：复用行重开（过期单在渠道侧已不可支付，复用会永远付不了款）
+        String newPaymentNo = generatePaymentNo(userId);
+        int rows = paymentMapper.updateForRecreate(orderId, newPaymentNo,
+                order.getTotalAmount(), channel, LocalDateTime.now().plusMinutes(PAY_EXPIRE_MINUTES));
+        if (rows == 0) {
+            // 重开瞬间已被并发线程置为 PAID：按已支付处理
+            return toVO(paymentMapper.selectByOrderId(orderId), router.resolve(channel));
+        }
+        return toVO(paymentMapper.selectByOrderId(orderId), router.resolve(channel));
+    }
+
+    private Payment buildPayment(Order order, String channel) {
         Payment p = new Payment();
-        p.setPaymentNo(generatePaymentNo(userId));
-        p.setOrderId(orderId);
+        p.setPaymentNo(generatePaymentNo(order.getUserId()));
+        p.setOrderId(order.getId());
         p.setOrderNo(order.getOrderNo());
-        p.setUserId(userId);
+        p.setUserId(order.getUserId());
         p.setAmount(order.getTotalAmount());
         p.setChannel(channel);
         p.setStatus(Payment.STATUS_PAYING);
         p.setExpireTime(LocalDateTime.now().plusMinutes(PAY_EXPIRE_MINUTES));
-        paymentMapper.insert(p);
-
-        return toVO(p, router.resolve(channel));
+        return p;
     }
 
     /**
