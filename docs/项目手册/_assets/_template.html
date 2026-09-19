@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>【页面标题】 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="【页码，如 03】">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+
+<main class="main">
+
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>【分组名，如 一 · 结构与业务链路】</b></div>
+    <h1>【页码】 · 【页面标题】</h1>
+    <p class="lede">【一句话导语：这页解决什么问题、看完能回答什么】</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 XX 分钟</span>
+      <span class="badge badge-star">面试权重 ★★★</span>
+      <span class="badge badge-gray">涉及 N 张表 / M 个类</span>
+    </div>
+  </header>
+
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START  以下为本页正文，由子代理撰写
+       ==================================================================== -->
+
+  <h2><span class="h2n">X.1</span>章节标题</h2>
+
+  <div class="card">
+    <h3 class="card-title">技术点名称 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：xxx.java / XxxMapper.xml</p>
+
+    <!-- 第 1 层：始终可见 —— 一句话是什么 + 为什么需要它 -->
+    <p><strong>一句话：</strong>……</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      ……
+    </div>
+
+    <!-- 第 2 层：折叠 —— 机制与真实代码 -->
+    <details class="lvl mech">
+      <summary>机制与代码</summary>
+      <div class="lvl-body">
+        <p>……</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">OrderServiceImpl.java</span><span class="loc">:88-96</span></div>
+          <pre><code>……真实代码……</code></pre>
+        </div>
+      </div>
+    </details>
+
+    <!-- 第 3 层：折叠 —— 面试怎么讲 -->
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          ……
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          ……
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+
+</main>
+
+<script src="_assets/app.js"></script>
+</body>
+</html>

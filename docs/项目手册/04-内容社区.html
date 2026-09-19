@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 内容社区 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="04">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>一 · 结构与业务链路</b></div>
+    <h1>04 · 内容社区</h1>
+    <p class="lede">这页讲项目的「流量入口」——内容社区。它把一个普通 CRUD 商城变成了真实场景，代价是引入两个绕不开的技术问题：<b>高并发互动</b>（点赞/收藏/浏览，热点行被反复写）与<b>非结构化数据检索</b>（用户写的笔记怎么搜得到）。看完你能讲清：Feed 流为什么不能用 OFFSET 深分页、二元组游标凭什么必须存在、20 篇笔记怎么做到不发出 41 次查询、中文全文检索为什么必须 ngram。</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 30 分钟</span>
+      <span class="badge badge-star">面试权重 ★★★</span>
+      <span class="badge badge-gray">涉及 10 张表 / 32 个类</span>
+    </div>
+  </header>
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START  以下为本页正文，由子代理撰写
+       ==================================================================== -->
+  <div class="callout brand">
+    <span class="ct">本页的分工边界（先看这条，免得看串）</span>
+    本页只讲<b>内容域自己的设计取舍</b>。凡是「跨页面横切主题」一律一句话带过并注明去向：
+    <b>MQ 可靠性闭环</b>（confirm/returns、死信、补偿任务、幂等三防线细节）、<b>缓存三兄弟</b>、<b>限流</b>、<b>降级体系</b> 全部在 <a href="05-高并发与可靠性.html">05 高并发与可靠性</a> 讲透。
+  </div>
+
+  <!-- ================= 4.1 ================= -->
+  <h2><span class="h2n">4.1</span>内容域全景：10 张表各管一件事</h2>
+  <p>内容社区听起来很玄，拆开就是一件事：<b>把「用户写的东西」存下来、排好序、能被搜到、能被互动</b>。V2 迁移文件 <code>V2__content_and_rag.sql</code> 用 10 张表把这四件事拆开，每张表只管一件。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th style="width:170px">表名</th><th>一句话职责</th><th style="width:250px">关键约束 / 索引</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>t_note</code></td><td><b>笔记主表</b>：标题/正文/状态机 + 三个冗余计数 + 中文全文索引</td><td>PK <code>id</code> · <code>idx(status, created_at)</code> · <code>idx(hot_score)</code> · <code>FULLTEXT(title, content) ngram</code></td></tr>
+        <tr><td><code>t_note_image</code></td><td>图集：一篇最多 9 张，<code>sort</code> 小的在前；列表页的封面 = 最小的那张</td><td><code>idx_note(note_id)</code></td></tr>
+        <tr><td><code>t_note_tag</code></td><td>标签：独立表，不是主表加一个 JSON 列</td><td><code>idx_note</code> · <code>idx_tag</code></td></tr>
+        <tr><td><code>t_note_product</code></td><td><b>种草清单</b>：笔记 ↔ 商品的关联表，还带一句推荐语</td><td><code>idx_note</code> · <code>idx_product</code></td></tr>
+        <tr><td><code>t_note_like</code></td><td>点赞关系（谁赞了哪篇）</td><td><b>UNIQUE <code>uk_note_user(note_id, user_id)</code></b></td></tr>
+        <tr><td><code>t_note_collect</code></td><td>收藏关系，与点赞表同构</td><td><b>UNIQUE <code>uk_note_user(note_id, user_id)</code></b></td></tr>
+        <tr><td><code>t_user_follow</code></td><td>关注关系。<b>表已建、零代码使用</b>——关注流属于 V5 规划</td><td>UNIQUE <code>uk_user_follow(user_id, follow_user_id)</code></td></tr>
+        <tr><td><code>t_audit_record</code></td><td><b>审核流水</b>：AI 原始返回留痕（可翻案、可人工复核）</td><td><b>UNIQUE <code>uk_biz(biz_type, biz_id, biz_version)</code></b></td></tr>
+        <tr><td><code>t_knowledge_doc</code></td><td>RAG 文档头：一份说明书 / 一篇笔记对应一行</td><td>UNIQUE <code>uk_source(source_type, ref_id)</code></td></tr>
+        <tr><td><code>t_knowledge_chunk</code></td><td>RAG 切片：正文切成小段 + 向量（JSON 数组）</td><td><code>idx_doc</code> · <code>FULLTEXT(content) ngram</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="callout analogy">
+    <span class="ct">打个比方</span>
+    这 10 张表就是<b>一间小出版社的部门分工</b>：<code>t_note</code> 是编辑部（正文和状态），<code>t_note_image</code> 是美编（配图），<code>t_note_tag</code> 是目录员（贴分类标签），<code>t_note_product</code> 是商务（把文章和商品挂钩），<code>t_note_like/collect</code> 是读者留言簿，<code>t_audit_record</code> 是审稿档案室，最后两张 <code>t_knowledge_*</code> 是给 AI 用的资料卡片柜。
+    <b>关键点：没有一张表是「顺便建的」</b>——每加一张表都对应一个「不做就会出问题」的场景。
+  </div>
+  <details class="lvl mech">
+    <summary>机制与代码：三个「为什么单独建表」的决策</summary>
+    <div class="lvl-body">
+      <p><b>① 标签为什么独立成表，不在 <code>t_note</code> 加 JSON 列？</b>JSON 列三样都弱：<b>不能高效索引</b>（按标签筛选要全表扫）、<b>不能聚合</b>（将来做热门话题榜要 GROUP BY）、<b>不能加约束</b>。独立表一行一个标签，<code>idx_tag</code> 直接支持「按标签筛笔记」。</p>
+      <p><b>② 审核为什么有独立流水表？</b>AI 判定是<b>概率性</b>的——会判错。判错就要能翻案（<code>ai_result_json</code> 存原始返回）、要能人工复核（<code>reviewer</code> 字段）、要能幂等（版本唯一键）。只在主表打一个状态，出问题就是黑箱。</p>
+      <p><b>③ 关注表建了却不用，算过度设计吗？</b>不算。表是<b>数据结构</b>（Flyway 迁移只增不改，早建晚建成本一样），接口是<b>行为</b>（等 V5 关注流真要做时再加）。这是"按需演进"的边界感，不是过度设计。</p>
+      <div class="codeblock">
+        <div class="cb-head"><span class="fn">db/migration/V2__content_and_rag.sql</span><span class="loc">:19-39（t_note 主表节选）</span></div>
+        <pre><code>CREATE TABLE IF NOT EXISTS t_note (
+    id            BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    title         VARCHAR(100) NOT NULL COMMENT '标题',
+    content       TEXT         NOT NULL COMMENT '正文（支持换行，纯文本/简单富文本）',
+    status        VARCHAR(20)  NOT NULL DEFAULT 'AUDITING' COMMENT 'AUDITING审核中 PUBLISHED已发布 REJECTED已驳回 OFFLINE已下架',
+    hot_score     INT          NOT NULL DEFAULT 0 COMMENT '热度分（点赞*3+收藏*5+浏览*1，V3 由 Redis zset 接管排序）',
+    like_count    INT          NOT NULL DEFAULT 0 COMMENT '点赞数（冗余计数，V3 改为 Redis 计数+定时落库）',
+    collect_count INT          NOT NULL DEFAULT 0 COMMENT '收藏数',
+    view_count    INT          NOT NULL DEFAULT 0 COMMENT '浏览数',
+    ...
+    KEY idx_status_created (status, created_at),
+    KEY idx_hot (hot_score),
+    FULLTEXT KEY ft_title_content (title, content) WITH PARSER ngram
+) ENGINE = InnoDB COMMENT ='种草笔记表';</code></pre>
+      </div>
+      <p>注意三个计数字段（<code>like_count</code> / <code>collect_count</code> / <code>view_count</code>）是<b>冗余计数</b>：列表页每篇都要显示，如果每次去 <code>SELECT COUNT(*)</code> 聚合，一页 20 篇就是 20 次聚合。宁可存冗余值 + 写时维护——<b>用写成本换读成本</b>，这是内容类系统最常见的取舍。</p>
+    </div>
+  </details>
+  <details class="lvl talk">
+    <summary>面试怎么讲</summary>
+    <div class="lvl-body">
+      <div class="callout talk">
+        <span class="ct">30 秒版本</span>
+        "内容域我建了 10 张表，按职责拆：主表 <code>t_note</code> 存正文、状态机和冗余计数；三张附属表存图片、标签、关联商品；两张关系表存点赞收藏，靠联合唯一索引做幂等；一张审核流水表留痕；两张 RAG 表给 AI 当语料。<b>三个设计决策值得说：标签独立建表是为了可索引可聚合；审核单独建流水表是因为 AI 判定是概率性的、必须能翻案；关注表建了但没写接口，因为表是数据结构、接口是行为，按需演进。</b>"
+      </div>
+      <div class="callout warn">
+        <span class="ct">别说错</span>
+        被问到「关注流怎么实现的」，正确答案是<b>「没实现」</b>：<code>t_user_follow</code> 表在迁移脚本里存在，但<b>零代码使用</b>，关注流属 V5 规划。<b>不要硬编一个不存在的接口</b>——技术点不吹大，机制讲透，比编一个假功能安全得多。被继续追问时可以说："游标分页这套机制不变，关注流只是把 WHERE 换成 <code>user_id IN (关注列表)</code>。"
+      </div>
+    </div>
+  </details>
+
+  <!-- ================= 4.2 ================= -->
+  <h2><span class="h2n">4.2</span>笔记模型：一篇笔记怎么关联多个商品和多个标签</h2>
+
+  <div class="card">
+    <h3 class="card-title">一对多用关联表，不用字段拼接 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>NoteCreateRequest.java</code> / <code>NoteExtraMapper.xml</code> / <code>NoteServiceImpl.saveExtras</code></p>
+    <p><strong>一句话：</strong>一篇种草笔记要挂「最多 9 张图 + 最多 10 个标签 + 若干个关联商品」，这是<b>一对多</b>；项目用三张关联表存，而不是在 <code>t_note</code> 里塞 <code>tags = "平价好物,通勤穿搭"</code> 这种拼接字符串。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      拼接字符串就像<b>把一本书的所有标签写在一张便利贴上贴在书脊</b>——看着省事，但你想找「所有贴着『通勤穿搭』的书」时，只能一本一本翻过来读那张便利贴，没有任何目录能帮你。
+      关联表则是<b>图书馆的索引卡片柜</b>：一行一条关系，随时能按标签反查、能统计「这个标签下有几本书」、能保证不重复。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：请求 DTO 与批量写入</summary>
+      <div class="lvl-body">
+        <p>请求体里三块附属信息都是<b>列表</b>，校验注解直接卡住产品约束（图最多 9 张、标签最多 10 个）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/dto/NoteCreateRequest.java</span><span class="loc">:19-36</span></div>
+          <pre><code>@NotBlank(message = "标题不能为空")
+@Size(max = 100, message = "标题最多 100 字")
+private String title;
+@NotBlank(message = "正文不能为空")
+@Size(max = 20000, message = "正文最多 20000 字")
+private String content;
+@Size(max = 9, message = "最多 9 张图片")
+private List&lt;String&gt; images;
+@Size(max = 10, message = "最多 10 个标签")
+private List&lt;String&gt; tags;
+private List&lt;RefProduct&gt; products;   // 关联商品（种草清单）</code></pre>
+        </div>
+        <p>写入时三张关联表都是<b>一条 INSERT 批量插多行</b>，而不是循环 N 条 SQL：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">resources/mapper/NoteExtraMapper.xml</span><span class="loc">:44-49（标签）、:71-76（关联商品）</span></div>
+          <pre><code>&lt;insert id="batchInsertTags"&gt;
+    INSERT INTO t_note_tag (note_id, tag) VALUES
+    &lt;foreach collection="tags" item="it" separator=","&gt;
+        (#{noteId}, #{it.tag})
+    &lt;/foreach&gt;
+&lt;/insert&gt;
+&lt;insert id="batchInsertProducts"&gt;
+    INSERT INTO t_note_product (note_id, product_id, remark) VALUES
+    &lt;foreach collection="products" item="it" separator=","&gt;
+        (#{noteId}, #{it.productId}, #{it.remark})
+    &lt;/foreach&gt;
+&lt;/insert&gt;</code></pre>
+        </div>
+        <p>主表 + 三张关联表的写入在<b>同一个事务</b>里（<code>NoteServiceImpl.create</code> 上的 <code>@Transactional(rollbackFor = Exception.class)</code>，NoteServiceImpl.java:80-100），避免「主表有了但图片丢了」的半截脏数据。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "笔记和商品、标签是多对多关系，我用三张关联表存：<code>t_note_image</code>、<code>t_note_tag</code>、<code>t_note_product</code>。<b>不用字段拼接的原因有三条：能索引（按标签筛选走 <code>idx_tag</code>）、能聚合（将来做热门话题榜要 GROUP BY）、能加约束和扩展</b>。其中 <code>t_note_product</code> 还带一个 <code>remark</code> 字段存推荐语，它是内容域和电商域的接缝——用户从笔记直接跳到商品下单。写入用一条批量 INSERT，和主表同事务。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          不要说「用 MySQL 的 JSON 字段也能做，还省一张表」——那等于把「可索引 + 可聚合」两项能力扔掉，而且被追问「按标签查第 3 页怎么做」时就答不下去了。关联表是<b>关系型数据库的标准解法</b>，这里不需要任何"聪明"的设计。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.3 ================= -->
+  <h2><span class="h2n">4.3</span>Feed 流：为什么 <code>LIMIT 100000, 20</code> 不行</h2>
+
+  <div class="card">
+    <h3 class="card-title">OFFSET 深分页的成本，与游标分页的代价 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>NoteQuery.java</code>（类注释就是这题的答案） · <code>NoteMapper.xml#pageWhere + selectPage</code></p>
+    <p><strong>一句话：</strong>Feed 流是「一直往下滑」的场景，用 <code>LIMIT offset, size</code> 翻到深处时，MySQL 必须<b>先扫描并丢弃前 offset 行</b>才能返回 size 行——用户滑得越深，你付的扫描成本越高，这个曲线在产品上就是「惩罚深度用户」。游标分页把这笔账变成常数。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      OFFSET 分页像<b>老师点名叫第 5000 号同学上台</b>：他必须从第 1 号开始逐个念过去，「5000 号之前的 4999 个人我都不需要，但我必须一个个数到那里」。
+      游标分页像<b>直接说「从刚才那位同学后面接着来」</b>：上一页最后一条的 id 就是那个「刚才那位」，<code>WHERE id &lt; cursorId</code> 靠主键索引直接定位到起点，翻到第几页开销都一样。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：复杂度对比 + 真实 SQL</summary>
+      <div class="lvl-body">
+        <p>先把「慢在哪」说透：关键不在「返回了 20 行」，而在<b>为了这 20 行必须先读过 10 万行</b>——被 <code>LIMIT</code> 丢弃的行照样要走一遍索引、照样可能回表。<code>t_note</code> 的 <code>content</code> 是 TEXT 字段，朴素写法连大字段都得读出来。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">朴素 OFFSET 写法（反例）</span><span class="loc">t_note · content 为 TEXT</span></div>
+          <pre><code>SELECT * FROM t_note ORDER BY id DESC LIMIT 100000, 20;
+-- MySQL 的执行方式：扫描并丢弃前 100000 行，然后返回 20 行</code></pre>
+        </div>
+        <div class="vs">
+          <div class="bad">
+            <h5>OFFSET 深分页</h5>
+            <p>复杂度 <code>O(offset + size)</code>，<b>随页深线性增长</b>。</p>
+            <p>定位方式：扫过并丢弃前面所有行。</p>
+            <p>并发新增数据会<b>错位/重复</b>：你翻第 2 页时有人新发一条，第 1 页的末条被推到第 2 页，<code>LIMIT 20,20</code> 会把它再显示一次。</p>
+            <p>唯一优势：能跳页。</p>
+          </div>
+          <div class="good">
+            <h5>游标分页（本项目）</h5>
+            <p>复杂度 <code>O(logN + size)</code>，<b>与翻到第几页无关</b>。</p>
+            <p>定位方式：<code>WHERE id &lt; cursor</code> 用主键索引直接跳到起点。</p>
+            <p>并发新增<b>不受影响</b>：游标锚定在具体 id 上，新数据只会出现在最前面。</p>
+            <p>代价：不能跳页、不能显示总页数。</p>
+          </div>
+        </div>
+        <p>真实的 SQL 长这样，注意最后那行注释——<b>游标分页最直观的标志就是 SQL 里根本没有 offset 这个数</b>：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">resources/mapper/NoteMapper.xml</span><span class="loc">:96-111（selectPage）</span></div>
+          <pre><code>&lt;select id="selectPage" resultType="com.aimall.content.bean.Note"&gt;
+    SELECT &lt;include refid="Base_Column_List"/&gt; FROM t_note
+    &lt;include refid="pageWhere"/&gt;
+    &lt;choose&gt;
+        &lt;when test="orderBy != null and orderBy == 'newest'"&gt;ORDER BY id DESC&lt;/when&gt;
+        &lt;otherwise&gt;ORDER BY hot_score DESC, id DESC&lt;/otherwise&gt;
+    &lt;/choose&gt;
+    &lt;!-- 游标分页没有 offset：直接 LIMIT pageSize --&gt;
+    LIMIT #{pageSize}
+&lt;/select&gt;</code></pre>
+        </div>
+        <p>服务层判断「还有没有下一页」也很朴素——本次拿满一页就认为还有：<code>boolean hasMore = notes.size() &gt;= query.getPageSize();</code>（NoteServiceImpl.java:118）。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲（含「代价」这一段，必须主动说）</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "<code>LIMIT 100000, 20</code> 慢的原因不是返回 20 行，而是<b>为了这 20 行必须先扫描并丢弃前 10 万行</b>，这些被丢弃的行照样走索引。所以 OFFSET 的复杂度是 <code>O(offset + size)</code>，页数越深越慢。我改用游标分页：第一页照常 <code>LIMIT 20</code>，第二页带上上一页最后一条的 id，写成 <code>WHERE id &lt; cursorId ORDER BY id DESC LIMIT 20</code>——靠主键索引直接定位起点，复杂度 <code>O(logN + size)</code>。<b>代价我也能说：它不能跳到第 N 页，只能连续翻，所以后台管理那种要跳页的列表我还是用 offset——两种方案按场景选，不是谁替代谁。</b>"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          三处容易踩：<br>
+          <b>① 不要说「游标分页全面优于 OFFSET」</b>——它不能跳页、不能显示总数，是有代价的交换。承认边界比绝对化说法加分。<br>
+          <b>② 别把慢的原因说成「返回数据多」</b>——返回的都是 20 条，差别在扫描量。<br>
+          <b>③ 如果对方追问「非要用 offset 怎么办」</b>，答<b>延迟关联</b>：子查询只走覆盖索引拿 id（不回表、不读 TEXT），外层再按主键取 20 行——它省掉了 10 万次回表，但<b>扫描量随页深增长这件事没解决</b>，要根治还是游标。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.4 ================= -->
+  <h2><span class="h2n">4.4</span>二元组游标 <code>(hot_score, id)</code> <span class="badge badge-red">本页最易讲错</span></h2>
+
+  <div class="card">
+    <h3 class="card-title">为什么最新排序一个 id 就够，热度排序就必须两个 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>NoteMapper.xml#pageWhere:73-94</code> · <code>NoteQuery.java:34-42</code></p>
+    <p><strong>一句话：</strong>游标必须和排序键<b>配套</b>。按 <code>id</code> 排序时，<code>id</code> 单调且唯一，「下一页」定义得出来，单列游标就够；按 <code>hot_score DESC, id DESC</code> 排序时，<b>热度会并列</b>，单列游标在页边界上会漏数据——所以游标必须是 <code>(hot_score, id)</code> 这个<b>二元组</b>。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      排序键就是<b>排队规则</b>，游标就是「队伍从哪儿继续」的那句话。<br>
+      如果队伍按「号码」排（id 递增、人人不重号），你说「从 105 号之后继续」毫无歧义。<br>
+      但如果队伍按「考试分数」排，而<b>满队都是 100 分的人</b>，你只说「从 100 分之后继续」——后面那些同样考 100 分的人就被你一句话跳过了。必须补一句「100 分里，从 105 号之后继续」，才说得清。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：用 5 条热度都是 100 的笔记走一遍</summary>
+      <div class="lvl-body">
+        <p>设 5 篇笔记的热度<b>全是 100</b>，id 分别是 1081 / 1077 / 1065 / 1042 / 1013，页大小 = 2。查询是 <code>ORDER BY hot_score DESC, id DESC</code>。</p>
+        <p><b>第 1 页：</b>没有游标条件，返回 <code>1081, 1077</code>。前端把「上一页最后一条」的排序值带回来：<code>{hotScore: 100, id: 1077}</code>。</p>
+        <p><b>第 2 页 · 错误写法（只用 hot_score 单列游标）：</b></p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">单列游标（反例）</span><span class="loc">漏掉同热度后续笔记</span></div>
+          <pre><code>WHERE hot_score &lt; 100 ORDER BY hot_score DESC, id DESC LIMIT 2;
+-- 结果：空集！
+-- 因为剩下 1065 / 1042 / 1013 三篇的热度都等于 100，
+-- 严格小于 100 一条都不满足 → 用户往下滑，Feed 直接断了（漏 3 条）</code></pre>
+        </div>
+        <p><b>第 2 页 · 正确写法（二元组游标）：</b></p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">二元组游标（本项目）</span><span class="loc">先比热度，平了再比 id</span></div>
+          <pre><code>WHERE hot_score &lt; 100
+   OR (hot_score = 100 AND id &lt; 1077)
+ORDER BY hot_score DESC, id DESC LIMIT 2;
+-- 结果：1065, 1042  （正确）
+-- 第 3 页游标变成 (100, 1042) → 1013 → 正常收尾</code></pre>
+        </div>
+        <p><b>那「只用 id」行不行？</b>在这个「热度全相同」的例子里<b>侥幸正确</b>（因为热度全平，id 逆序恰好等于排序序）。但现实中热度是分层的，一旦分层就错位——排序序是 <code>(200,id30) → (150,id45) → (100,id50) → (100,id40)</code> 时，第 1 页返回 200/30 与 150/45，单列 id 游标写 <code>id &lt; 45</code>，就会把本该出现在第 2 页的 <code>100/50</code> 直接跳过。所以<b>不能用「热度相同时碰巧对」赌正确性</b>。</p>
+        <p>真实 SQL 原文（注意上面那段<b>警告注释就写在代码里</b>）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">resources/mapper/NoteMapper.xml</span><span class="loc">:73-94（pageWhere 的游标段）</span></div>
+          <pre><code>&lt;!--
+  ★ 游标必须与排序键配套，否则会漏数据：
+    - 按最新排(id DESC)：游标 = id &lt; cursorId
+    - 按热度排(hot_score DESC, id DESC)：游标是二元组
+      (hot_score &lt; cursorHot) OR (hot_score = cursorHot AND id &lt; cursorId)
+      只用 id 做游标会漏掉"热度更高但 id 更小"的笔记。
+--&gt;
+&lt;choose&gt;
+    &lt;when test="orderBy != null and orderBy == 'newest'"&gt;
+        &lt;if test="cursorId != null"&gt;
+            AND id &lt; #{cursorId}
+        &lt;/if&gt;
+    &lt;/when&gt;
+    &lt;otherwise&gt;
+        &lt;if test="cursorHot != null and cursorId != null"&gt;
+            AND (hot_score &lt; #{cursorHot}
+            OR (hot_score = #{cursorHot} AND id &lt; #{cursorId}))
+        &lt;/if&gt;
+    &lt;/otherwise&gt;
+&lt;/choose&gt;</code></pre>
+        </div>
+        <p>载体是 <code>NoteQuery</code> 的两个字段：<code>cursorId</code>（主游标）和 <code>cursorHot</code>（「热度排序时的游标第二分量」）——<b>前端只要把上一页最后一条的 id + hotScore 一起带回来就行</b>（NoteQuery.java:39-42）。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "游标必须和排序键配套。<b>按最新排序时 <code>id</code> 单调唯一，单列游标就够</b>，写 <code>WHERE id &lt; cursorId</code>；<b>按热度排序时热度会并列</b>，两篇笔记可能都是 100 分，如果游标只带热度，<code>WHERE hot_score &lt; 100</code> 会把剩下所有 100 分的笔记全漏掉；只用 id 又不行，因为热度排序下 id 无序，页边界会错位。所以游标是 <code>(hot_score, id)</code> 二元组：<code>WHERE hot_score &lt; ? OR (hot_score = ? AND id &lt; ?)</code>。<b>通用规律是：排序键有 N 列，游标就是 N 元组，最后一列必须是唯一键</b>——比如按创建时间排，游标就该是 <code>(created_at, id)</code>。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 不要说「游标就是一个 id」</b>——这是本页最容易翻车的一句话。默认排序是热度，两个字段都得带。<br>
+          <b>② 不要只说结论不说后果</b>——「漏数据」三个字太轻。要能说出「同一热度的笔记在页边界整批消失，用户看到的 Feed 会断」，这才叫懂。<br>
+          <b>③ 主动补一句边界</b>：热度分是<b>运行期会变</b>的排序值（点赞让 hot_score 变大），所以热度排序天然存在轻微「漂移」；<code>id</code> 自增永不变，最稳。Feed 类场景常用发布时间/id 排序，就是为这个。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.5 ================= -->
+  <h2><span class="h2n">4.5</span>N+1 攻防：20 篇笔记怎么不发出 41 次查询</h2>
+
+  <div class="card">
+    <h3 class="card-title">列表接口优化的第一答：批量 IN + 内存分组 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>NoteServiceImpl.assembleList:236-305</code> · <code>NoteExtraMapper.xml</code> / <code>NoteLikeMapper.xml</code></p>
+    <p><strong>一句话：</strong>Feed 返回 20 篇笔记，每篇都要显示作者昵称、封面、标签、关联商品、「我点过赞吗」——如果在循环里逐篇去查，就是 1 次列表 + 20×N 次关联查询（101 条 SQL）。解法是<b>先把 20 个 id 收起来，一次 IN 查回来，再在内存里分组拼装</b>。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      N+1 就像<b>你拿着 20 张购物清单，跑 20 趟超市，每趟只买一样东西</b>——买的东西没错，但你花了 20 次路上时间。
+      批量查询是<b>把 20 张清单合成一张，跑一趟全买回来，回家再按清单分堆</b>。慢的从来不是 SQL 本身，是<b>往返次数</b>：每次网络往返 1~2ms，100 次就是 100~200ms，列表接口的 RT 就是这样爆掉的。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：真实的批量组装</summary>
+      <div class="lvl-body">
+        <p>先把 20 个 id 收成一个列表，然后<b>每个「维度」只发一条 SQL</b>，结果在内存里按 noteId 分组：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:236-280（assembleList 节选）</span></div>
+          <pre><code>Long me = currentUserIdOrNull();
+List&lt;Long&gt; ids = notes.stream().map(Note::getId).toList();
+// ② 封面（批量：每篇取 sort 最小一张）
+Map&lt;Long, String&gt; covers = new HashMap&lt;&gt;();
+extraMapper.selectCoversByNotes(ids)
+        .forEach(img -&gt; covers.putIfAbsent(img.getNoteId(), img.getUrl()));
+// ③ 标签（批量）
+Map&lt;Long, List&lt;String&gt;&gt; tags = new HashMap&lt;&gt;();
+extraMapper.selectTagsByNotes(ids)
+        .forEach(t -&gt; tags.computeIfAbsent(t.getNoteId(), k -&gt; new java.util.ArrayList&lt;&gt;())
+                .add(t.getTag()));
+// ④ 关联商品（批量）
+for (NoteProduct np : extraMapper.selectProductsByNotes(ids)) {
+    Product p = productMapper.selectById(np.getProductId());   // ← 商品名仍按 id 回查
+    ...
+}
+// ⑤ 我的互动态（批量：点赞/收藏）
+Set&lt;Long&gt; liked = me == null ? Set.of()
+        : new HashSet&lt;&gt;(likeMapper.listLikedNoteIds(me, ids));
+Set&lt;Long&gt; collected = me == null ? Set.of()
+        : new HashSet&lt;&gt;(collectMapper.listCollectedNoteIds(me, ids));</code></pre>
+        </div>
+        <p>封面那条 SQL 值得单独看——它用子查询先定位每篇的 <code>MIN(sort)</code>，再回表取整行，<b>一条 SQL 解决「20 篇笔记各取一张封面」</b>：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">resources/mapper/NoteExtraMapper.xml</span><span class="loc">:29-41（selectCoversByNotes）</span></div>
+          <pre><code>&lt;select id="selectCoversByNotes" resultType="com.aimall.content.bean.NoteImage"&gt;
+    SELECT t.id, t.note_id, t.url, t.sort
+    FROM t_note_image t
+    INNER JOIN (
+        SELECT note_id, MIN(sort) AS min_sort
+        FROM t_note_image
+        WHERE note_id IN
+        &lt;foreach collection="noteIds" item="id" open="(" separator="," close=")"&gt;
+            #{id}
+        &lt;/foreach&gt;
+        GROUP BY note_id
+    ) m ON t.note_id = m.note_id AND t.sort = m.min_sort
+&lt;/select&gt;</code></pre>
+        </div>
+        <p>互动状态同样批量回查（<code>listLikedNoteIds</code> 一次 IN 拿回「我在这批笔记里点过赞的 id 集合」，NoteLikeMapper.xml:24-31），热门榜读取也复用同一思路（见 4.8）。</p>
+        <div class="callout warn">
+          <span class="ct">诚实标注：还剩两处「按 id 回查」</span>
+          上面 ①②③⑤ 已经把 <b>三张关联表 + 两张关系表</b> 压成批量查询；但作者（<code>users.computeIfAbsent(n.getUserId(), userMapper::selectById)</code>）和关联商品的商品名（<code>productMapper.selectById</code>）仍然是<b>逐个 id 回查</b>——注释里按 authorId / productId 去重了，所以不是 41 次，但条数仍与<b>不同作者数 / 不同商品数</b>相关。这是可以主动交代的残余 N+1，根治方式一模一样：一次 <code>IN</code> 批量查 + 内存 Map。
+        </div>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "Feed 列表要展示作者、封面、标签、关联商品和我的点赞态。如果在循环里逐条查，20 篇就是 100 多条 SQL，<b>慢的不是 SQL 本身而是往返次数</b>。我的做法是：先把这 20 个 id 收成一个列表，<b>每个维度只发一条 IN 查询</b>——图片、标签、关联商品、点赞集合、收藏集合，然后全部塞进 Map，在内存里按 noteId 分组拼装。封面那条还用了子查询取每篇 <code>MIN(sort)</code>，一条 SQL 解决『每篇取一张封面』。<b>结果是查询条数不再随页大小增长。</b>"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 不要说「用了 IN 就一定是固定几条 SQL」</b>——本项目作者与商品仍是按 id 去重回查，残余的 N+1 要主动承认，然后补一句「根治方式是同样的 IN + Map」。这段话讲出来比硬说「固定 5 条」安全得多。<br>
+          <b>② IN 不是越长越好</b>——几百上千个 id 会让 SQL 变长、优化器代价估算失真，标准做法是分批（如每 500 个一批）。本项目榜单 limit 夹在 1~50，规模小所以单批够，但边界要知道。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.6 ================= -->
+  <h2><span class="h2n">4.6</span>中文全文检索：FULLTEXT + ngram</h2>
+
+  <div class="card">
+    <h3 class="card-title">为什么中文必须加 <code>WITH PARSER ngram</code> <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>V2__content_and_rag.sql:38 / :151</code> · <code>NoteMapper.xml:66-69</code> · <code>KnowledgeMapper.xml:69-74</code></p>
+    <p><strong>一句话：</strong>用户搜「降噪耳机」，如果用 <code>LIKE '%降噪%'</code> 就是全表扫描（前缀通配让 B+ 树索引全废）；如果建默认的 <code>FULLTEXT</code> 索引，中文<b>一句话会被当成一个词</b>，检索照样全失效。所以中文全文索引必须显式声明 <code>WITH PARSER ngram</code>，让 MySQL 按 <b>2 个字符一组</b> 切词建索引。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      MySQL 的默认全文解析器是<b>为英文设计的</b>：英文有空格，「noise cancelling headphones」天然就是三个词，按空格切开就行。
+      中文写「主动降噪耳机」<b>中间一个空格都没有</b>，默认解析器看它就是一整个词——你搜「降噪」，库里没有任何一个「词」等于「降噪」，自然一条都搜不到。
+      ngram 解析器的做法是<b>改用「两字一截」的切法</b>：主动 / 动降 / 降噪 / 噪耳 / 耳机。这样「降噪」这个词在索引里真实存在，才搜得到。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：真实的索引 DDL 与查询</summary>
+      <div class="lvl-body">
+        <p>索引建表时就声明了，两张表各一个：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V2__content_and_rag.sql</span><span class="loc">:37-38（t_note）与 :151（t_knowledge_chunk）</span></div>
+          <pre><code>-- ★ ngram 中文全文索引：笔记标题+正文的关键词检索
+FULLTEXT KEY ft_title_content (title, content) WITH PARSER ngram
+-- t_knowledge_chunk 上的那一个（RAG 关键词通道用）
+FULLTEXT KEY ft_content (content) WITH PARSER ngram</code></pre>
+        </div>
+        <p>切片是「两字一截」，<code>ngram_token_size</code> 默认 = 2：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">ngram 切词示意</span><span class="loc">ngram_token_size = 2（默认）</span></div>
+          <pre><code>"主动降噪耳机" →  主动 | 动降 | 降噪 | 噪耳 | 耳机</code></pre>
+        </div>
+        <p>查询用 <code>MATCH ... AGAINST</code>。笔记搜索的入口写在 Feed 的 where 片段里，可以和其他条件叠加：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">resources/mapper/NoteMapper.xml</span><span class="loc">:66-69</span></div>
+          <pre><code>&lt;!-- MySQL FULLTEXT + ngram 解析器：中文关键词检索 --&gt;
+&lt;if test="keyword != null and keyword != ''"&gt;
+    AND MATCH(title, content) AGAINST (#{keyword} IN NATURAL LANGUAGE MODE)
+&lt;/if&gt;</code></pre>
+        </div>
+        <p>RAG 的关键词通道用的是同一个机制，而且 <code>MATCH...AGAINST</code> 自带的相关度得分<b>直接用于排序</b>，不需要 Java 侧再打分（KnowledgeMapper.xml:63-74）。</p>
+        <p><b>「搜单字搜不到」是设计使然，不是 bug：</b>索引里的 token 都是 2 个字符，你搜单字「梨」时压根产生不出 token，自然没有命中。文档里也把它写成了验收动作——搜「降噪」有结果，搜一个只出现在正文的单字应该搜不到，<b>能复现这个现象才叫真懂 ngram</b>。</p>
+      </div>
+    </details>
+    <div class="redline">
+      <b>口径红线 · 「为什么不上 ES」这一段必须说对</b><br>
+      正确说法：<b>「当前还没有做成熟的搜索方案。ES 是明确规划中的升级方向，触发条件是检索需求超出 MySQL 全文索引的能力——相关度排序调权、复杂查询、多字段权重。」</b>（笔记检索这里，MySQL FULLTEXT + ngram 是一套真实落地的方案，但它<b>不等于</b>一个成熟的搜索引擎方案。）<br>
+      <b>严禁说法：</b>「因为数据量只有几百条，所以不用 ES / 上 ES 是过度设计 / 装航空母舰」。这是<b>规模借口</b>，两条硬伤：① 面试官接着问「那 50 万条呢」你没有答案；② 等于主动承认项目没见过规模。
+      <div class="callout danger" style="margin-top:10px">
+        <span class="ct">特别注意：迁移文件里的注释不要照抄</span>
+        <code>V2__content_and_rag.sql:37</code> 的注释里写着「V2 不上 ES，数据量 500 篇足够」——<b>这句话不要念出来</b>，它正是被禁的规模借口。用它做背景理解可以，对外口径统一用上面的「触发条件 + 已铺好的退路」。
+      </div>
+      <div class="callout warn" style="margin-top:10px">
+        <span class="ct">顺带一条，别串页</span>
+        这套话术<b>只适用于笔记检索</b>。商品搜索是 <code>LIKE</code> 模糊匹配，<b>「还没做成熟搜索方案」，不要包装成选型</b>；也不要说「商品用 MySQL 全文索引搜」——全文索引用在<b>笔记</b>上。
+      </div>
+    </div>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "中文全文检索我踩过两道坑。<b>第一道是 <code>LIKE '%关键词%'</code></b>：前缀通配让 B+ 树索引失效，等于全表扫描。<b>第二道是默认的 FULLTEXT</b>：MySQL 默认解析器按空格分词，中文整句没有空格，会被当成一个词，检索全部失效。所以我用 <code>WITH PARSER ngram</code>，它按两字一组切词——「主动降噪耳机」切成 主动/动降/降噪/噪耳/耳机，索引建在这些二元组上，搜「降噪」才命中。<b>它的代价是纯字面切词、没有语义，而且单字搜不到（token 是 2 字），这是设计使然。语义那部分交给向量通道，这也是 RAG 用 Hybrid 双通道的原因。</b>"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 绝不说「因为数据量小所以不用 ES」</b>——见上面的红线。被追问「那要 ES 干嘛」时答：检索需求超出 MySQL 全文索引能力时（相关度排序调权、复杂布尔/聚合查询、多字段权重），ES 是明确的升级方向，而且检索层已经做了抽象，换实现即可。<br>
+          <b>② 不要吹 ngram 是「智能分词」</b>——它是纯字面的定长切词，没有任何词典和语义。主动说出这个边界反而加分。<br>
+          <b>③ 不要把「单字搜不到」说成 bug 或待优化项</b>——它是 2-gram 的固有特性，不是缺陷。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.7 ================= -->
+  <h2><span class="h2n">4.7</span>点赞收藏：唯一索引幂等 + 计数不丢</h2>
+
+  <div class="card">
+    <h3 class="card-title">狂点红心也只会有一条记录 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>NoteServiceImpl.like:157-174</code> · <code>NoteLikeMapper.xml:6-13</code> · <code>V2__content_and_rag.sql:77</code></p>
+    <p><strong>一句话：</strong>用户狂点红心（前端防抖失灵）时，两个「点赞」请求会同时到达。如果代码先 <code>SELECT</code> 再 <code>INSERT</code>，两个线程都会查到「没点过」然后各插一条——正确性交给 <b><code>t_note_like</code> 上的联合唯一索引</b>兜底，撞键就当作「已点过」静默成功。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      「先查后插」就像<b>两个人同时走进一间空会议室，都探头看了一眼说『没人，我进去』</b>——他们看的那一眼是同一瞬间，所以两个人都进去了。
+      唯一索引则像<b>会议室门口那把只有一把钥匙的锁</b>：两个人同时伸手，物理上只有一个能拧开，另一个撞在锁上。把并发正确性交给数据库的<b>唯一约束（物理层面拒绝）</b>，比在应用代码里判断可靠得多。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：直接 INSERT + 原子自增</summary>
+      <div class="lvl-body">
+        <p>唯一索引的声明（点赞与收藏两张表同构）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V2__content_and_rag.sql</span><span class="loc">:70-79（t_note_like）</span></div>
+          <pre><code>-- ★ 联合唯一索引 = 天然幂等：重复点赞会撞唯一键，无需先查再插
+CREATE TABLE IF NOT EXISTS t_note_like (
+    id         BIGINT   NOT NULL AUTO_INCREMENT COMMENT '主键',
+    note_id    BIGINT   NOT NULL COMMENT '笔记 id',
+    user_id    BIGINT   NOT NULL COMMENT '点赞用户 id',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_note_user (note_id, user_id),
+    KEY idx_user (user_id)
+) ENGINE = InnoDB COMMENT ='笔记点赞表(联合唯一索引保证幂等)';</code></pre>
+        </div>
+        <p>代码只负责「直接插 + 捕获撞键」，取消点赞时<b>只有真删掉行才减计数</b>（防负数偏移）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:155-174（like）</span></div>
+          <pre><code>@Override
+@Transactional(rollbackFor = Exception.class)
+public void like(Long noteId, boolean liked) {
+    Long userId = StpUtil.getLoginIdAsLong();
+    ensurePublished(noteId);
+    if (liked) {
+        try {
+            likeMapper.insert(noteId, userId);
+            incrCount(NoteCounterStore.LIKE, noteId, 1);
+        } catch (DuplicateKeyException e) {
+            // 已点过赞：幂等静默（不报错，前端体验为"红心已是亮的"）
+            log.debug("重复点赞已忽略 noteId={} userId={}", noteId, userId);
+        }
+    } else {
+        int rows = likeMapper.delete(noteId, userId);
+        if (rows &gt; 0) {
+            incrCount(NoteCounterStore.LIKE, noteId, -1);
+        }
+    }
+}</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">resources/mapper/NoteLikeMapper.xml</span><span class="loc">:6-13（为什么可以直接 INSERT）</span></div>
+          <pre><code>&lt;!--
+  直接 INSERT，不先查：重复点赞会撞 uk_note_user 唯一键，
+  由 Service 捕获 DuplicateKeyException 当作"已点过"处理。
+  相比"先查再插"，少一次 SQL 且天然防并发（先查后插在并发下会插入两条）。
+--&gt;
+&lt;insert id="insert"&gt;
+    INSERT INTO t_note_like (note_id, user_id) VALUES (#{noteId}, #{userId})
+&lt;/insert&gt;</code></pre>
+        </div>
+        <p><b>计数不丢：一律用 SQL 原子自增，不在 Java 里「先读后写」。</b></p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">resources/mapper/NoteMapper.xml</span><span class="loc">:141-161（计数增减 + 防负数兜底）</span></div>
+          <pre><code>&lt;!-- 计数增减：一律用 SET x = x ± 1，不用"先查后改"，避免并发下丢失更新 --&gt;
+&lt;update id="incrViewCount"&gt;
+    UPDATE t_note SET view_count = view_count + 1 WHERE id = #{id}
+&lt;/update&gt;
+&lt;update id="decrLikeCount"&gt;
+    &lt;!-- 加 AND like_count &gt; 0 兜底，防止计数被减成负数 --&gt;
+    UPDATE t_note SET like_count = like_count - 1 WHERE id = #{id} AND like_count &gt; 0
+&lt;/update&gt;</code></pre>
+        </div>
+        <p>反例是 Java 侧 <code>setLikeCount(vo.getLikeCount() + 1)</code>：两个请求都读到 100、各自写回 101，<b>丢一次更新</b>。原子自增把「读 + 算 + 写」压进一条 SQL，由 InnoDB 的行锁保证不丢。</p>
+        <p><b>V3 之后计数出口变了：改为 Redis 攒增量 + 定时落库。</b>原因是<b>写放大</b>——热点笔记每来一次浏览，原先要做「查 → 更新计数 → 重算热度」共 3 次 DB 写，热点行的行锁被高频写打爆。现在改成：互动只往 Redis Hash 里 <code>HINCRBY</code> 攒<b>增量</b>（内存，微秒级），每 60 秒由定时任务原子取走并做加法回写 DB。读路径取「DB 快照 + 未落库增量」，所以用户看到的仍是近实时值。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/NoteCounterStore.java</span><span class="loc">:14-28（为什么存增量而不是全量）</span></div>
+          <pre><code> *   互动发生：  HINCRBY aimall:cnt:{type}  {noteId}  ±1     （内存，微秒级）
+ *   读计数：    DB 快照值 + HMGET 增量                       （近实时）
+ *   定时落库：  Lua 原子取走全部增量 → UPDATE x_count += delta（批量回写）
+ *
+ * 为什么不存全量（GET-改-写回）：落库窗口内"Redis 全量值"与"DB 值"
+ * 互相覆盖，丢失更新的窗口永远存在。存增量则两侧都是加法，
+ * 天然可交换、可重试，没有覆盖语义。</code></pre>
+        </div>
+        <p><b>降级路径还在</b>：Redis 不可用时 <code>incrCount</code> 返回 null，自动回退到上面那套 DB 直写（<code>incrLikeCount</code> / <code>decrLikeCount</code>），体验回到 V2 但功能不坏（NoteServiceImpl.java:501-528）。<b>计数桶的细节（Lua 原子取走、落库任务、一致性等级口径）在 <a href="05-高并发与可靠性.html">05 高并发与可靠性</a> 讲透，本页不重复。</b></p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "点赞的幂等<b>不靠代码判断，靠数据库唯一索引</b>：<code>t_note_like</code> 上有 <code>uk_note_user(note_id, user_id)</code>，代码直接 <code>INSERT</code> 不先查，撞键抛 <code>DuplicateKeyException</code> 就当作『已点过』静默成功。<b>为什么不能先查后插？那是典型的 TOCTOU 竞态</b>——两个线程的 SELECT 都在对方 INSERT 之前完成，都以为没点过，结果插两条。把并发正确性交给唯一约束，成本最低也最可靠。<br>
+          计数我用 <code>SET like_count = like_count + 1</code> 原子自增，不在 Java 里先读后写，否则并发下会丢更新。V3 之后为了治理写放大，计数改成 Redis <code>HINCRBY</code> 攒增量、60 秒定时批量落库——<b>关键是存 delta 不是全量：两侧都是加法，天然可交换可重试，没有覆盖丢更新的窗口</b>；读的时候是 DB 快照 + 未落库增量，近实时。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 命名纪律：说「幂等设计」，不要说「幂等四式」</b>——那是自造名词，会被追问「哪四式、谁定义的」。正确说法是「幂等设计，我用了四种手段：唯一索引 / 状态机条件更新 / 一次性 token / 消费端回查」。<br>
+          <b>② 别说「先查一下更安全」</b>——那恰好是错的写法。<br>
+          <b>③ 别说「计数放 Redis 是为了快」就完事</b>——真实动机是<b>写放大治理</b>（热点行被反复写），而且要说清代价与兜底：Redis 宕机会丢未落库增量，但计数是<b>展示数据不是资金数据</b>，一致性等级刻意与订单/支付区分开。<br>
+          <b>④ 点赞的静默幂等是有语义选择的</b>：点赞是「状态确认」型操作，重复 = 目标已达成，所以静默；而限量发售的限购撞键要<b>报业务错</b>——同一招在不同业务语义下处置不同，能讲这条说明你理解的是语义而不是方案。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.8 ================= -->
+  <h2><span class="h2n">4.8</span>热门榜：Redis zset + 双轨刷新</h2>
+
+  <div class="card">
+    <h3 class="card-title">增量保实时，全量保自愈 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：<code>NoteServiceImpl.hotRank:405-456</code> / <code>rebuildHotRank:472-483</code> · <code>HotRankRebuildTask.java:25</code> · <code>RedisOps.zAdd / zTopWithScore</code></p>
+    <p><strong>一句话：</strong>热门榜要「按热度取 Top-N」，Redis <code>zset</code> 是唯一一个同时满足<b>成员唯一 + 按分数自动有序 + 支持 Top-N/查排名</b>的结构，这些操作全是 <code>O(log N)</code> 级别；同时榜单用<b>两条轨道</b>维护——互动时增量刷新保证实时，定时全量重建保证「Redis 挂了也能自己爬起来」。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      zset 像<b>一个会自动重新排队的候诊大厅</b>：新病人（笔记）进来时，护士就把他插到正确的位置（写入时付出 <code>O(log N)</code>），所以任何时候叫号（读 Top-N）都能直接从头念，不用现场把全厅的人重新排一遍。
+      如果把排行榜放在 MySQL 里 <code>ORDER BY hot_score DESC LIMIT 50</code>，就变成<b>每次叫号都要全院重新排一次队</b>（filesort）——而这是个<b>高频写 + 高频读</b>的场景，这条路走不通。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：热度公式、读榜反 N+1、双轨刷新</summary>
+      <div class="lvl-body">
+        <p><b>热度公式（真实代码，两个方法共用同一份）：</b>点赞 ×3 + 收藏 ×5 + 浏览 ×1。<b>权重差异是有意的</b>——收藏是最强的兴趣信号，浏览最廉价、最容易被刷。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:485-488</span></div>
+          <pre><code>/** 热度分 = 点赞*3 + 收藏*5 + 浏览*1（refreshHotScore/rebuildHotRank 共用同一公式） */
+private int hotScoreOf(Note n) {
+    return n.getLikeCount() * 3 + n.getCollectCount() * 5 + n.getViewCount();
+}</code></pre>
+        </div>
+        <p><b>读榜：zset 只出 id 顺序，明细一次 IN 批量回查</b>——这条是「反 N+1」在榜单上的复用（代码注释里明确记了一次 P2 修复：早期实现是循环逐条 <code>selectById</code>，Top50 = 50 次 SQL，与列表接口辛苦做的批量查询自相矛盾）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:405-432（hotRank 节选）</span></div>
+          <pre><code>List&lt;com.aimall.common.redis.RedisOps.RankItem&gt; rank =
+        redisOps.zTopWithScore(HOT_RANK_KEY, limit);          // ① zset 只出 id + score，保持顺序
+if (rank.isEmpty()) { return List.of(); }
+List&lt;Long&gt; ids = new java.util.ArrayList&lt;&gt;(rank.size());
+for (var item : rank) {
+    try { ids.add(Long.parseLong(item.member())); }
+    catch (NumberFormatException ignored) { /* 脏数据跳过而不是整个接口失败 */ }
+}
+// ② 一次 IN 查询批量拿明细（而不是 N 次 selectById）
+Map&lt;Long, Note&gt; notes = new HashMap&lt;&gt;();
+for (Note n : noteMapper.selectByIds(ids)) { notes.put(n.getId(), n); }</code></pre>
+        </div>
+        <p>两个细节值得点一下：<b>① 排序的真相在 zset 里</b>——<code>IN</code> 查询返回的顺序不保证与传入顺序一致，所以最后一步是<b>按 zset 顺序组装</b>，DB 只负责补明细；<b>② 状态过滤放在内存里做</b>（<code>STATUS_PUBLISHED</code> 判断在 Java 侧），下架/驳回的笔记「自然消失」，代价是 zset 里会残留失效 id——所以需要定期重建（NoteServiceImpl.java:433-454）。<code>zTopWithScore</code> 的复杂度是 <code>O(log N + M)</code>，M = 取回条数。</p>
+        <p><b>双轨刷新：</b></p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:458-483（rebuildHotRank 的注释与实现）</span></div>
+          <pre><code> *   &lt;li&gt;&lt;b&gt;冷启动&lt;/b&gt;：Redis 重启数据全失，原实现只靠"逐条互动"慢慢恢复，
+ *       榜单会越用越空。重建以 DB 热度分为准，一次灌满；&lt;/li&gt;
+ *   &lt;li&gt;&lt;b&gt;漂移&lt;/b&gt;：refreshHotScore 只在互动时写 zset，DB 与 zset 长期
+ *       并行更新难免不一致（删 key 竞态/降级窗口），周期性对账收敛。&lt;/li&gt;
+ * 语义：先删后全量灌入（覆盖式重建）。删除与灌入之间有毫秒级空窗，
+ * 榜单接口短暂返回空——榜单是展示优化，可接受（若不可接受，
+ * 换"写影子 key + RENAME 原子切换"）。
+ */
+public void rebuildHotRank() {
+    List&lt;Note&gt; top = noteMapper.selectPublishedForRank(HOT_RANK_REBUILD_SIZE);
+    if (top.isEmpty()) { return; }
+    redisOps.delete(HOT_RANK_KEY);
+    for (Note n : top) {
+        redisOps.zAdd(HOT_RANK_KEY, String.valueOf(n.getId()), hotScoreOf(n));
+    }
+}</code></pre>
+        </div>
+        <p>定时器每 30 分钟跑一次（首次延迟 3 分钟）：<code>@Scheduled(fixedDelay = 30 * 60 * 1000, initialDelay = 3 * 60 * 1000)</code>（HotRankRebuildTask.java:25）。zset 的 key 是 <code>aimall:hot:notes</code>，重建候选上限 <code>HOT_RANK_REBUILD_SIZE = 1000</code>（NoteServiceImpl.java:63-65）。</p>
+        <div class="callout warn">
+          <span class="ct">可以主动交代的真实缺陷（说出来比不说值钱）</span>
+          <b>① 口径不一致</b>：全量重建只灌<b>热度最高的 1000 篇</b>，但增量刷新（<code>refreshHotScore</code>）<b>不受这个限制</b>——任何被点赞的笔记都会 <code>zAdd</code> 进榜。结果是一篇靠点赞爬进榜、但排名在 1000 名之外的笔记，<b>下一次全量重建会把它静默擦掉</b>，榜单随重建周期出现锯齿抖动。这不是性能问题，是<b>正确性问题</b>（增量与全量的口径必须一致）；解法有：增量侧加同样的边界判断、全量侧不做 delete 而是「灌全部 + 定期裁剪」、或用影子 key 原子切换。<br>
+          <b>② 先删后灌有毫秒级空窗</b>，这期间读榜单会拿到空列表。标准解法是<b>影子 key + <code>RENAME</code> 原子替换</b>（Redis 的 RENAME 是原子的）。本项目接受这个空窗，因为榜单是<b>派生数据</b>——但要主动说「我知道标准解法是影子 key」，否则就是没意识到。
+        </div>
+        <div class="callout ok">
+          <span class="ct">边界一句话（这条也是分水岭）</span>
+          <b>榜单是派生数据，可以容忍短暂不准</b>——这正是敢用「增量 + 最终一致」的前提。反过来说：<b>库存、金额是账目数据，绝不能这么干</b>，必须强一致 + 条件更新兜底。能主动画出这条线，才算真懂自己为什么敢用 zset。
+        </div>
+        <p><b>限流（一句话带过）：</b>AI 对话接口用 Redis <code>INCR</code> + <code>EXPIRE</code> 的 <b>Lua 原子固定窗口</b>（<code>aimall:rate:chat:{userId}</code>，10 次 / 60 秒；<code>RedisOps.allow</code>，RedisOps.java:226-245）。为什么不拆成两条命令、固定窗口的 2 倍边界缺陷、Redis 挂了为什么是<b>放行</b>而不是拒绝——全部在 <a href="05-高并发与可靠性.html">05 高并发与可靠性</a> 讲透。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "热门榜我用 Redis zset，因为排行榜需要三件事：去重、按分数排序、取 Top-N——只有 zset 一条结构同时满足，而且都是 <code>O(log N)</code> 级别。热度公式是<b>点赞×3 + 收藏×5 + 浏览×1</b>，收藏权重最高，因为它是最强的兴趣信号。<b>维护用双轨：增量刷新保实时</b>（每次互动重算这一篇的热度写回 zset，Redis 挂了静默降级不影响主业务）；<b>定时全量重建保自愈</b>——每 30 分钟以 DB 为真值重灌一遍，解决 Redis 重启后榜单空掉、以及长期增量累积的漂移。<b>榜单读取时 zset 只出 id 顺序，明细用一次 IN 批量回查，避免 N+1，而且最后要按 zset 顺序组装，因为 IN 不保证顺序。</b>"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 不要把重建说成「为了性能」</b>——它的价值是<b>正确性自愈</b>：只有增量的话，Redis 一重启榜单就空了，而且没人互动就永远补不回来。<br>
+          <b>② 「增量保实时，全量保自愈」这句话要能背</b>，并且能答出「只有增量会怎样」「只有全量会怎样」。<br>
+          <b>③ 主动交代缺陷</b>：本项目全量只灌 Top1000、增量不设限，口径不一致会导致榜单抖动；先删后灌还有毫秒级空窗。敢主动讲这条，比「我用 zset 做了排行榜」值钱得多——它证明你在 review 自己的代码。<br>
+          <b>④ 别把 zset 说成「Redis 里放了个有序 List」</b>——底层是 <b>skiplist + dict</b>：dict 负责按成员 <code>O(1)</code> 找分数，skiplist 负责按分数有序与范围查询。被问「为什么跳表不用红黑树」就答：跳表实现更简单、范围查询天然友好（原地顺序遍历）、平衡维护成本低。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.9 ================= -->
+  <h2><span class="h2n">4.9</span>笔记发布与 AI 审核：为什么必须异步</h2>
+
+  <div class="card">
+    <h3 class="card-title">发布秒回 + 异步审核 + 三重降级链 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>AuditServiceImpl.java</code> · <code>AuditMqConfig.java</code> · <code>AuditConsumer.java</code> · <code>AuditMessage.java</code></p>
+    <p><strong>一句话：</strong>AI 审核一次要 3~10 秒。同步做法是用户点「发布」后请求挂 10 秒才返回——用户第三次点发布时就卸载了。所以发布接口只做「落库为审核中」就立刻返回，审核交给 MQ 异步做，<b>发布接口的 RT 与审核耗时彻底无关</b>。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      这就像<b>投稿给杂志社</b>：你交稿的瞬间（发布）就拿到回执说「已收到，编辑部审核中」，而不是站在前台等编辑读完 10 秒再让你走。
+      审核结果稍后更新到你的稿件状态上（审核通过 = 已发布 / 驳回 = 附原因）——<b>「受理」和「结果」分离</b>，这就是异步解耦在业务上的样子。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：延迟账 + MQ 拓扑 + 三重降级</summary>
+      <div class="lvl-body">
+        <p><b>先算这笔延迟账：</b>审核 3~10 秒。若同步，每次发布接口 RT = 3~10 秒，占着的还是 Tomcat 工作线程；若异步，发布接口 RT = 一次落库（毫秒级），审核在后台跑，用户看到的状态是「审核中」。<b>体验由架构保证，不靠祈祷 AI 快。</b></p>
+        <p><b>MQ 拓扑与三个决策：</b>DirectExchange + 审核队列 + 死信队列；路由键 <code>note.audit</code>；消息体只带 id。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/mq/AuditMqConfig.java</span><span class="loc">:44-66（拓扑常量与队列声明）</span></div>
+          <pre><code>/** 业务交换机 */
+public static final String EXCHANGE = "aimall.content.exchange";
+/** 审核队列 */
+public static final String AUDIT_QUEUE = "aimall.note.audit.queue";
+/** 审核路由键 */
+public static final String AUDIT_ROUTING_KEY = "note.audit";
+/** 审核死信队列（重试耗尽后进入，等人工/恢复后处理） */
+public static final String AUDIT_DLQ = "aimall.note.audit.dlq";
+@Bean
+public Queue auditQueue() {
+    return QueueBuilder.durable(AUDIT_QUEUE)
+            .deadLetterExchange(EXCHANGE)
+            .deadLetterRoutingKey(AUDIT_DLQ)
+            .build();
+}</code></pre>
+        </div>
+        <p>三个决策的理由都写在代码注释里：<b>① 为什么 DirectExchange 而不是 Topic/Fanout</b>——当前只有一种消息（笔记审核），精确匹配 routingKey 最简单直白，Topic 留给将来有「note.* / order.#」通配需求的场景，<b>按需演进、不预支复杂度</b>；<b>② 为什么配死信队列</b>——消费端重试耗尽的消息进 DLQ 而不是丢弃，<b>「失败可被发现」优于「失败被无限重试」</b>；<b>③ 消息只带 id</b>——消费时回查最新内容（消息在队列里躺着时笔记可能已被编辑，审核的仍是最新版），消息体小、敏感内容不进 Broker。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/mq/AuditMessage.java</span><span class="loc">:13</span></div>
+          <pre><code>public record AuditMessage(Long noteId, int bizVersion) {</code></pre>
+        </div>
+        <p><b>三重降级链</b>（这是项目「可插拔 + 零依赖能启动」原则的又一次实践）：</p>
+        <div class="flow vertical">
+          <div class="flow-node"><span class="n">1</span><span class="d">MQ 可用 → 发消息（note.audit）→ 消费者 auditOnce()。这是主路径。</span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">2</span><span class="d">MQ 不可用（未启动/断连）→ 捕获 AmqpException，改交本地有界线程池执行 auditOnce()。体验一致，只是没有削峰与重试。</span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">3</span><span class="d">AI 调用失败 → 记 ERROR 流水，笔记停留 AUDITING 等人工，绝不误杀内容。</span></div>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:67-100（submit 与本地降级）</span></div>
+          <pre><code>@Override
+public void submit(Note note) {
+    AuditMessage msg = new AuditMessage(note.getId(), 1);
+    RabbitTemplate rabbit = rabbitTemplateProvider.getIfAvailable();
+    if (rabbit != null) {
+        try {
+            rabbit.convertAndSend(AuditMqConfig.EXCHANGE,
+                    AuditMqConfig.AUDIT_ROUTING_KEY, msg);
+            log.info("审核消息已入队 noteId={}", note.getId());
+            return;
+        } catch (AmqpException e) {
+            // MQ 不可用（未启动/断连）：不炸发布接口，降级本地线程池
+            log.warn("MQ 不可用，审核降级为本地线程池异步: {}", e.getMessage());
+        }
+    }
+    submitLocal(note.getId());
+}
+/** 本地降级路径：手动提交（不用 @Async，因为类内自调用不走代理、注解会失效） */
+private void submitLocal(Long noteId) {
+    taskExecutor.execute(() -&gt; {
+        try {
+            Note note = noteMapper.selectById(noteId);
+            if (note != null) { auditOnce(note); }
+        } catch (Exception e) {
+            log.error("本地异步审核失败 noteId={}: {}", noteId, e.getMessage(), e);
+        }
+    });
+}</code></pre>
+        </div>
+        <p><b>幂等三防线</b>（MQ 的语义是 at-least-once，重复投递是常态不是异常）——这里只列标题 + 一句话，<b>细节与「消费端为什么吞异常 ACK」在 <a href="05-高并发与可靠性.html">05 高并发与可靠性</a> 讲透</b>：</p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th style="width:80px">防线</th><th>机制（真实代码）</th><th>挡什么</th></tr></thead>
+            <tbody>
+              <tr><td><b>①</b></td><td>流水表 <code>uk(biz_type, biz_id, biz_version)</code> + <code>INSERT IGNORE</code> 返回 0 行 → 直接返回</td><td>MQ 重复投递（最常见）</td></tr>
+              <tr><td><b>②</b></td><td>笔记状态机条件更新：<code>WHERE id=? AND status='AUDITING'</code>，返回 0 行说明已被别人改过 → 忽略</td><td>并发审核 / 编辑后重审</td></tr>
+              <tr><td><b>③</b></td><td>AI 失败只记 <code>ERROR</code> 流水、<b>不动笔记状态</b>，停 <code>AUDITING</code> 等人工</td><td><b>不误杀</b>——宁可不作为，不可乱作为</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:121-137（防线 ① 与 ②）</span></div>
+          <pre><code>// 幂等第一道防线：INSERT IGNORE 撞 uk(biz,biz,version) 返回 0 → 已处理过，直接返回
+int rows = saveRecord(note.getId(), 1,
+        verdict.pass() ? AuditRecord.STATUS_PASS : AuditRecord.STATUS_REJECT, ...);
+if (rows == 0) {
+    log.info("重复审核消息（幂等跳过）noteId={}", note.getId());
+    return;
+}
+// 幂等第二道防线：状态机条件更新（WHERE status='AUDITING'）
+// 重试/重投时笔记可能已流转，返回 0 行属正常
+String newStatus = verdict.pass() ? Note.STATUS_PUBLISHED : Note.STATUS_REJECTED;
+int updated = noteMapper.updateStatus(note.getId(),
+        Note.STATUS_AUDITING, newStatus, verdict.reason());</code></pre>
+        </div>
+        <p>审核通过后还有一步「进语料」：<code>ragIndexService.index(SOURCE_NOTE, ...)</code> 把这篇笔记送进 RAG 知识库，失败只打 WARN 不影响发布（索引可补建）——这就是内容社区「用户内容养 AI」的那条飞轮的接线处。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "笔记发布我做成了<b>发布秒回 + 异步审核</b>。AI 审核一次要 3~10 秒，如果同步做，用户点发布要挂 10 秒，体验直接崩。我的做法是：发布接口只把笔记落库成 <code>AUDITING</code> 就立刻返回，审核走 RabbitMQ 异步。<b>MQ 拓扑是 DirectExchange + 一个 durable 队列 + 一个死信队列，路由键 <code>note.audit</code>；用 Direct 是因为当前只有一种消息，按需演进不预支复杂度</b>。消费端有三道幂等防线：流水表的版本唯一键 <code>INSERT IGNORE</code> 挡 MQ 重投，笔记状态机的条件更新挡并发，AI 失败只记 ERROR 流水、让笔记停在审核中不误杀。<b>MQ 不可用时会自动降级到本地线程池，发布照常秒回</b>——这是项目『零依赖能启动』的硬约束。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 不要说「用 MQ 是因为它快」</b>——MQ 不减少总耗时，它换的是<b>让用户不必等</b>，并把失败重试的能力带上。说清「异步解耦 + 失败可重试」。<br>
+          <b>② 不要说「审核失败会一直重试直到成功」</b>——本项目消费端<b>吞异常 ACK、不重入队</b>，因为 AI 服务挂掉时重试一万次也不会成功，只会打爆日志；兜底是 ERROR 流水 + 死信队列。这条口径必须与 05 页一致。<br>
+          <b>③ 不要吹「事务里发消息保证一致」</b>——MQ 不参与 DB 事务，事务内发消息永远有「回滚了但消息已飞」的窗口。本项目把 <code>submit</code> 放在事务边界之后调用，正是为了避开「消费者先于事务提交读到空笔记」的竞态。<br>
+          <b>④ 分布式/可靠性细节不要在本页硬答</b>——被追问 confirm/returns、死信重投、补偿任务，直接说「这部分在可靠性设计里我按发送端/Broker/消费端三段做」，然后展开到 05 页那套内容。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 4.10 ================= -->
+  <h2><span class="h2n">4.10</span>面试话术：两道必考题的 30 秒答案</h2>
+  <p>本页的内容在面试里最终会收敛成两个问题。<b>下面两段建议逐字背下来</b>，然后按自己的语速改顺。</p>
+
+  <div class="card">
+    <h3 class="card-title">「深分页怎么优化？」<span class="badge badge-red">高频必考</span></h3>
+    <p class="card-sub">把「原理 + 方案 + 代价」三件事都说到，才算答完整</p>
+    <div class="callout talk">
+      <span class="ct">30 秒版本（逐字可用）</span>
+      "<code>LIMIT 100000, 20</code> 慢的原因不是返回 20 行，而是<b>MySQL 必须先扫描并丢弃前 10 万行</b>，被丢弃的行照样走索引，所以 OFFSET 的复杂度是 <code>O(offset + size)</code>，页数越深越慢。<br>
+      我改用<b>游标分页</b>：把「第几页」换成「从哪继续」，第一页照常 <code>LIMIT 20</code>，下一页带上上一页最后一条的排序值。<b>最新排序时游标就是一个 id</b>，<code>WHERE id &lt; cursorId ORDER BY id DESC LIMIT 20</code>，靠主键索引直接定位，复杂度 <code>O(logN + size)</code>，翻到第几页开销都一样。<br>
+      <b>但热度排序时游标必须是 <code>(hot_score, id)</code> 二元组</b>——因为热度会并列，只带热度会漏掉同分的后续笔记，只带 id 又会因为 id 无序而错位，所以写成 <code>WHERE hot_score &lt; ? OR (hot_score = ? AND id &lt; ?)</code>。通用规律是<b>排序键 N 列、游标就是 N 元组，最后一列必须唯一</b>。<br>
+      <b>代价我也说清楚：游标分页不能跳页，所以后台管理那种需要跳页的列表我还是用 offset——两种方案按场景选，不是谁替代谁。</b>"
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">「你们怎么做内容检索的？」<span class="badge badge-red">口径高危</span></h3>
+    <p class="card-sub">这题真正的考点不是「你用了什么」，而是「你有没有在用规模当借口」</p>
+    <div class="callout talk">
+      <span class="ct">30 秒版本（逐字可用）</span>
+      "内容检索我走的是 MySQL 全文索引：<code>t_note</code> 上建了 <code>FULLTEXT(title, content) WITH PARSER ngram</code>，查询用 <code>MATCH ... AGAINST</code>。<br>
+      <b>为什么必须 ngram：</b>MySQL 默认的全文解析器按空格分词，是为英文设计的；中文一句话没有空格，会被整体当成一个词，导致检索全部失效。ngram 按<b>两字一组</b>切词——「主动降噪耳机」切成 主动/动降/降噪/噪耳/耳机，索引建在这些二元组上，搜「降噪」才命中。它的代价是<b>纯字面切词、没有语义，而且单字搜不到（token 是 2 字），这是设计使然不是 bug</b>——语义那部分交给向量检索，这也是 RAG 用关键词 + 向量双通道的原因。<br>
+      <b>关于 ES：当前还没有做成熟的搜索方案，ES 是明确规划中的升级方向。</b>触发条件很具体：当检索需求超出 MySQL 全文索引的能力时——需要做<b>相关度排序调权、复杂查询、多字段权重</b>这些事。检索层我已经做了抽象，届时替换实现即可，业务代码不用动。"
+    </div>
+    <div class="callout warn">
+      <span class="ct">这题的「别说错」清单</span>
+      <b>① 绝不说「因为数据量才几百条，上 ES 是过度设计 / 装航空母舰」。</b>这是规模借口，两条硬伤：面试官接着问「那 50 万条呢」你没有答案；而且等于主动承认项目没见过规模。正确姿势是<b>「触发条件 + 已铺好的退路」</b>——前者显得没想过，后者显得想清楚了选择不做。<br>
+      <b>② 不要照念迁移文件里的注释。</b><code>V2__content_and_rag.sql</code> 里写着「V2 不上 ES，数据量 500 篇足够」，这句话<b>不能作为对外口径</b>。<br>
+      <b>③ 不要把 ngram 吹成「智能分词」</b>——它没有词典、没有语义，就是定长字符切分。主动说出边界反而加分。<br>
+      <b>④ 不要把商品搜索也套这套话术。</b>商品搜索现在就是 <code>LIKE</code> 模糊匹配，<b>「还没做成熟搜索方案」，不要包装成选型</b>；也不要说「商品用 MySQL 全文索引搜」——全文索引用在<b>笔记</b>上。
+    </div>
+  </div>
+  <div class="callout brand">
+    <span class="ct">本页速查：四个数字 / 四句话</span>
+    <b>四个数字：</b>热度 = 点赞×3 + 收藏×5 + 浏览×1 · 计数落库 60 秒一次 · 热门榜全量重建 30 分钟一次 · 重建候选上限 1000 篇。<br>
+    <b>四句话：</b>① 游标必须与排序键配套，热度排序的游标是 <code>(hot_score, id)</code> 二元组；② N+1 慢在往返次数，解药是一次 <code>IN</code> + 内存分组；③ 中文全文索引必须 <code>WITH PARSER ngram</code>，单字搜不到是设计使然；④ 点赞幂等靠唯一索引物理拒绝，不靠应用代码先查后插。
+  </div>
+  <div class="callout ok">
+    <span class="ct">接下来去哪</span>
+    <b>本页出现的横切主题，全部在下一页讲透：</b>计数增量桶与写放大治理、Lua 原子限流与固定窗口缺陷、MQ 可靠性闭环（confirm/returns/死信/补偿）、幂等四种手段的完整对照、降级体系与 fail-open/fail-close 取舍 → <a href="05-高并发与可靠性.html">05 高并发与可靠性</a>。<br>
+    想看 AI 怎么用这些笔记当语料（Hybrid 检索 + RRF 融合 + 双工具 Agent 分流）→ <a href="06-AI模块.html">06 AI 模块</a>（刻意做短，只需了解层）。
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+</main>
+<script src="_assets/app.js"></script>
+</body>
+</html>

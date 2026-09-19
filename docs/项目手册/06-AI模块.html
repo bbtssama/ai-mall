@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 AI 模块 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="06">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+
+<main class="main">
+
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>三 · 扩展与了解层</b></div>
+    <h1>06 · AI 模块</h1>
+    <p class="lede">这页只回答三件事：AI 模块<b>由哪几块组成</b>、<b>边界在哪</b>（什么走 RAG、什么走 SQL）、被追问时<b>怎么守</b>。不教你做大模型，也不要求你懂原理。</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 15 分钟</span>
+      <span class="badge badge-know">面试权重 ★</span>
+      <span class="badge badge-gray">跨 backend + ai-service 两个服务</span>
+    </div>
+  </header>
+
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START
+       ==================================================================== -->
+
+  <!-- ================= 6.0 ================= -->
+  <h2><span class="h2n">6.0</span>先读这一条：这页为什么要做短</h2>
+
+  <div class="callout brand"><span class="ct">本页定位：AI 是「了解层」，不是你的主战场</span>
+    <p>在你简历里，AI 只占 <b>1 条 bullet</b>：「基于 Spring AI 接入大模型，通过 <b>Function Calling</b> 让模型按需调用商品查询工具（避免编造价格库存）；<b>Hybrid RAG</b> 检索商品说明书与用户种草笔记，向量 + BM25 双通道 RRF 融合，回答附来源引用」。</p>
+    <p><b>所以这页不是把你教成 AI 工程师</b>，而是办三件事：① 知道 AI 模块由哪几块组成、每块干什么；② 守住两句话——<b>Function Calling 工具调用</b>（Agent 查商品）+ <b>RAG 检索增强</b>；③ 被深挖时能体面地把话题引回主战场。</p>
+    <p><b>时间分配：AI 15 分钟封顶。</b>剩下的时间投给 <a href="03-订单与交易.html">03 订单与交易</a> 与 <a href="05-高并发与可靠性.html">05 高并发与可靠性</a>——那里才是面试官打分的地方。问 AI 的深度通常只到「这东西是不是你自己做的、边界清不清楚」；<b>细节答不上来不致命，把 AI 说成项目主打才致命</b>。</p>
+    <p><b>口径红线（背下来）：AI 是了解层，重心在传统后端（事务 / 并发 / 缓存 / 消息）。</b>完整口径表见 <a href="08-面试速查与自查.html">08 页</a>。</p>
+  </div>
+
+  <!-- ================= 6.1 ================= -->
+  <h2><span class="h2n">6.1</span>AI 模块全景（一张图）</h2>
+
+  <p>先看这张图，把"AI 模块"五个字拆成具体的方框。<b>它只有两条链路：文本问答、识图问答</b>，其余都是围绕这两条链路的周边。</p>
+
+  <div class="arch">
+    <div class="arch-row"><div class="arch-box plain" style="flex:1 1 100%"><div class="ab-t">浏览器 · frontend/src/views/Chat.vue</div><div class="ab-d">会话列表 + 消息气泡 · 图片先 canvas 压缩成 JPEG 0.8（最长边 1280）再转 base64 · 回答走 SSE 逐字渲染</div></div></div>
+    <div class="arch-label">↓ POST /api/v1/chat/stream（Sa-Token 登录态 + 每用户 10 次/分钟限流）</div>
+    <div class="arch-row"><div class="arch-box green" style="flex:1 1 100%"><div class="ab-t">mall-app · ChatRestController / ChatServiceImpl（8080）</div><div class="ab-d"><b>业务职责，不随模式变：</b>参数校验（文字与图片二选一）· 会话创建与复用 · 历史消息组装 · 归属校验防越权 · 回答落库 · 会话自动命名 · 真正的模型调用按配置分流（下一行）</div></div></div>
+    <div class="arch-label">↓ 开关 aimall.ai.mode（默认 local）—— 同一套业务代码，两种执行方式</div>
+    <div class="arch-row">
+      <div class="arch-box blue" style="flex:1 1 0"><div class="ab-t">local 模式（默认）</div><div class="ab-d">进程内 chatClient / visionChatClient 直连大模型 · <b>零依赖也能启动</b>：没有 ai-service 时行为和 V3 完全一致</div></div>
+      <div class="arch-box violet" style="flex:1 1 0"><div class="ab-t">remote 模式</div><div class="ab-d">RemoteAiService → AiServiceClient（@HttpExchange 声明式）→ HTTP 直连 ai-service · <b>带 HMAC 签名 + 熔断</b>，失败返回降级文案"AI 助手正在休息中"</div></div>
+    </div>
+    <div class="arch-label">↓ 只走 /internal/v1/**（网关 4 条路由里没有 ai-service，且 /internal/** 被网关直接拒掉）</div>
+    <div class="arch-row"><div class="arch-box violet" style="flex:1 1 100%"><div class="ab-t">ai-service（8081）· AiInternalController</div><div class="ab-d">AiChatService：两条 ChatClient 链路 + 双工具（searchProduct / searchDocs）· HybridRagService：BM25 关键词通道 + 向量通道 + RRF 融合 · InternalAuthFilter 校验 HMAC</div></div></div>
+    <div class="arch-label">↓ 语料归谁：这是拆分里最该记住的一条</div>
+    <div class="arch-row">
+      <div class="arch-box amber" style="flex:1 1 0"><div class="ab-t">归 ai-service</div><div class="ab-d"><b>RAG 语料</b>：t_knowledge_doc / t_knowledge_chunk · 两份来源：商品<b>官方说明书</b>（MANUAL）+ 真实用户<b>种草笔记</b>（NOTE）</div></div>
+      <div class="arch-box green" style="flex:1 1 0"><div class="ab-t">归 mall-app</div><div class="ab-d">商品 / 订单 / 用户 / 笔记 / 支付 · ai-service <b>不持有商品数据，只持有"怎么问"的能力</b>：查商品必须回调 mall-app 的内部接口</div></div>
+    </div>
+  </div>
+
+  <div class="callout warn"><span class="ct">看这张图要抓的两个点</span>
+    <b>1. 用户永远不直接接触 AI 服务。</b>外部入口只有 /api/** → 网关 → mall-app；ai-service 的路径是 /internal/v1/**，网关明确拒掉。这样 <b>API Key 只存在于 ai-service，泄露半径最小</b>，会话与鉴权也留在业务侧。<br>
+    <b>2. 拆分的实质是"数据归谁"。</b>语料表物理上还在同一个 MySQL，但 mall-app 从"直接写表"变成了"调 ai-service 的接口请求索引"——<b>归属权与访问权分离</b>。拆 AI 的五条理由（耗时差异 / 故障隔离 / 独立扩容 / 密钥隔离 / 模型可替换）见 <a href="07-工程基建与服务化.html">07 页</a>。
+  </div>
+
+  <details class="lvl talk"><summary>这张图怎么用来开场答</summary><div class="lvl-body">
+    <div class="callout talk"><span class="ct">30 秒版本</span>
+      "AI 这块我在项目里定位是了解层。<b>入口在 mall-app</b>——会话、鉴权、限流、落库都是普通业务逻辑；<b>模型调用在 ai-service</b>，因为它慢、按 token 计费、还要隔离 API Key。两边用 HTTP + HMAC 签名调，中间有熔断，AI 挂了只影响 AI 助手，下单支付不受影响。AI 服务里就两件事：Spring AI 的工具调用，和 Hybrid RAG 检索。"
+    </div>
+    <div class="callout warn"><span class="ct">别说错</span>
+      不要说"我们做了微服务架构"。正确口径是：<b>只拆了 ai-service，主体保持单体</b>（<a href="07-工程基建与服务化.html">07 页</a>）。
+    </div>
+  </div></details>
+
+  <!-- ================= 6.2 ================= -->
+  <h2><span class="h2n">6.2</span>Spring AI 装配：两条 ChatClient 链路</h2>
+
+  <div class="card">
+    <h3 class="card-title">chatClient（文本）与 visionChatClient（视觉） <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应代码：backend/src/main/java/com/aimall/config/AiConfig.java</p>
+    <p><strong>一句话：</strong>Spring AI 把"调大模型"包装成 Spring 风格的 Bean——<code>ChatClient</code>。项目装配了<b>两个</b>：一个服务纯文字问答，一个服务带图识图，调用时按 <code>req.hasImage()</code> 分流。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>
+      像同一个收银台开了两个窗口：一个只收现金（文字），一个能刷脸（图片）。<b>后面坐的是同一位柜员</b>——两个窗口用的是<b>同一个模型</b>，只是窗口前贴的流程说明（system prompt、温度、消息构造方式）不同。
+    </div>
+    <div class="redline"><b>诚实标注：</b>两条链路用的是<b>同一个模型</b> <code>deepseek-v4-flash-vision-exp</code>。视觉链路的 <code>.options().model(VISION_MODEL)</code> 是<b>无效覆盖</b>（常量值与 yml 默认值相同），真实的差异只有<b>温度</b>——视觉 0.5、文本 0.7。</div>
+
+    <details class="lvl mech"><summary>机制与代码</summary><div class="lvl-body">
+      <div class="codeblock"><div class="cb-head"><span class="fn">backend/.../config/AiConfig.java</span><span class="loc">:42-63</span></div>
+      <pre><code>@Bean
+public ChatClient chatClient(ChatClient.Builder builder,
+                             ProductSearchTool searchTool,
+                             KnowledgeSearchTool knowledgeTool) {
+    return builder
+            .defaultTools(searchTool)     // 结构化：价格/库存/分类 → SQL
+            .defaultTools(knowledgeTool)  // 非结构化：说明书/笔记 → Hybrid RAG
+            .build();
+}
+
+@Bean
+public ChatClient visionChatClient(ChatClient.Builder builder,
+                                   ProductSearchTool searchTool,
+                                   KnowledgeSearchTool knowledgeTool) {
+    return builder.defaultTools(searchTool).defaultTools(knowledgeTool).build();
+}</code></pre></div>
+      <p><b>模型名与密钥都不是硬编码：</b>模型写在 <code>application.yml:91</code>（<code>model: deepseek-v4-flash-vision-exp</code>，温度 0.7），API Key 一律走环境变量 <code>${DEEPSEEK_API_KEY:}</code>（<code>application.yml:87</code>，<b>冒号后为空 = 没有默认值</b>）。本地开发把密钥写进被 gitignore 的 <code>application-local.yml</code>，生产用环境变量或命令行覆盖；换厂商只改 <code>base-url</code> + <code>model</code> 两行。</p>
+      <p><b>为什么文本和视觉要分成两个 ChatClient？</b>因为两条链路的 system prompt、温度、消息构造方式（视觉要构造多模态 <code>Media</code>）都不同。早期版本只有一个客户端，工具对视觉调用同样生效，导致识图偶发答非所问；拆成两个 Bean 后"一模型一配置"，互不污染。源码里那句注释写得很直白：<code>VISION_MODEL</code> 这个按次覆盖<b>当前是无效的</b>，两条链路实际同模型。</p>
+      <p>注：<b>当前代码里两个客户端都挂了双工具</b>（注释说明视觉模型同样支持 function calling）。这与早期"视觉链路不挂工具"的版本不同——演进过程记在 <a href="08-面试速查与自查.html">08 页</a>的技术债清单。</p>
+    </div></details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary><div class="lvl-body">
+      <div class="callout talk"><span class="ct">30 秒版本</span>
+        "我用 Spring AI 的 <code>ChatClient</code> 装配了两个 Bean：文本链路和视觉链路。视觉模型本身支持工具调用，所以两条都挂了同样的工具。<b>而且我很清楚它们其实是同一个模型</b>——视觉那条的 <code>.options().model()</code> 目前是无效覆盖，真正生效的差异只有温度 0.5，识图要稳。"
+      </div>
+      <div class="callout warn"><span class="ct">别说错</span>
+        不要说"我做了视觉专用模型"，也不要说"两个模型"——<b>两个 ChatClient 不等于两个模型</b>。<b>主动说出"这个覆盖当前无效"比假装用了两个模型值钱得多</b>，这证明你真读懂了自己的代码。
+      </div>
+    </div></details>
+  </div>
+
+  <!-- ================= 6.3 ================= -->
+  <h2><span class="h2n">6.3</span>Function Calling：AI 会自己查商品 <span class="badge badge-star">必守的一句话</span></h2>
+
+  <div class="card">
+    <h3 class="card-title">把 Java 方法注册成"AI 能调用的工具" <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应代码：backend/.../ai/tool/ProductSearchTool.java · ai-service/.../tool/ProductSearchTool.java</p>
+    <p><strong>一句话：</strong>大模型不知道你店里卖什么，所以不给它数据、而是给它<b>一只可以查库的手</b>——把一个普通 Java 方法注册成工具，模型判断需要时<b>自己决定调用它、自己填参数</b>，拿到真实查询结果后再组织回答。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>
+      像给新员工一张<b>可以拨的内线电话清单</b>（工具清单 + 每个电话的用途说明），而不是让他背下全公司通讯录。他遇到"这个多少钱"就自己拨仓库的电话（<code>searchProduct</code>），遇到"这耳机戴着疼吗"就拨知识库的电话（<code>searchDocs</code>）。<b>怎么拨由他决定，你只负责把电话接到真实数据上。</b>
+    </div>
+
+    <details class="lvl mech"><summary>机制与代码</summary><div class="lvl-body">
+      <p>工具定义的全部秘密就是这段注解——<code>description</code> 会被 Spring AI 转成 JSON Schema 随请求发给模型，<b>模型看不到你的 Java 代码，只靠这段文字决定调不调、怎么传参</b>：</p>
+      <div class="codeblock"><div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/ai/tool/ProductSearchTool.java</span><span class="loc">:68-76</span></div>
+      <pre><code>@Tool(description = "搜索本店在售商品：可按关键词、分类过滤，返回商品列表(名称/副标题/起售价)与总数。"
+        + "当用户问商品、价格、或要找某类商品时调用，别自己编造商品。")
+public String searchProduct(
+        // 四个参数全部 required=false（可空）。血泪教训：默认必填时，模型在用户
+        // 没提分类的情况下硬填 categoryId=0 交差 → 查询为空 → AI 回答"没有找到"。
+        @ToolParam(required = false, description = "关键词，如'耳机'") String keyword,
+        @ToolParam(required = false, description = "分类id，可不传") Long categoryId,
+        @ToolParam(required = false, description = "页码，默认1") Integer page,
+        @ToolParam(required = false, description = "每页条数，默认10") Integer pageSize) {</code></pre></div>
+      <p><b>幕后是两轮 HTTP，这是必考流程：</b>第 1 轮请求带上 <code>tools=[本方法的 JSON Schema]</code> → 模型不直接回答，而是回一句"我要调 <code>searchProduct({"keyword":"降噪"})</code>"（这叫 <code>tool_call</code>）→ <b>框架在你的 JVM 里执行这个方法、真实查库</b> → 第 2 轮把结果作为 <code>role=tool</code> 的消息发回 → 模型才生成最终回答。<b>"模型执行了工具"是错觉：模型只点菜，执行的是框架调用的你的方法。</b></p>
+      <p><b>关键论点（这句最值钱）：工具方法复用业务 Service</b>——方法体里调的是 <code>productService.pageOnSale(query)</code>（同文件 <code>:89</code>），<b>不是另写一条 SQL</b>。所以 AI 检索到的数据和用户在搜索页看到的数据<b>永远是同一份</b>（同样的在售过滤、同样的排序）：<b>"AI 能力复用业务 Service，而不是绕过它"</b>。查不到时工具返回空列表，system prompt 又要求"商品库里没有就坦诚说明"，所以 <b>AI 不编造，查不到就说查不到</b>。</p>
+      <p>两个真实踩坑：<b>① description 只写"搜索商品"四个字时，模型该调不调、开始自己编商品</b>——描述必须写清"返回什么 + 什么时候该调 + 别自己编造"；<b>② 参数默认必填时模型硬填 <code>categoryId=0</code> 交差</b>——所以全部设为可空，方法体内再逐个兜底。结论：工具入参要按<b>不可信的外部输入</b>校验（模型可能传 null / 0 / 负数）。</p>
+    </div></details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary><div class="lvl-body">
+      <div class="callout talk"><span class="ct">30 秒版本</span>
+        "电商里最怕 AI 编价格——用户按它说的价格下单就是资损。我的做法是不给模型数据、给它一个查商品的工具：<code>@Tool</code> 注解一个方法，模型自己判断要不要调、自己填参数，框架在 JVM 里执行真实查库，再把结果回灌给它。所以<b>价格库存永远来自 MySQL，AI 不编造，查不到就如实说查不到</b>。而且这个工具复用的是商品模块的 <code>ProductService.pageOnSale</code>，<b>AI 看到的数据和前端搜索页是同一份</b>。"
+      </div>
+      <div class="callout warn"><span class="ct">别说错</span>
+        <b>不要说"模型自己去数据库查了"</b>——模型只输出一个"想调哪个方法、传什么参数"的 JSON，<b>执行的是框架调用的你的方法</b>。主谓关系说反，等于承认自己没搞懂。<br>
+        也别说"我在 prompt 里写了不要编造所以不会幻觉"——<b>提示词不是保证，真数据才是</b>。工程解法是"给工具"，不是"求它别编"。
+      </div>
+    </div></details>
+  </div>
+
+  <!-- ================= 6.4 ================= -->
+  <h2><span class="h2n">6.4</span>多模态识图链路</h2>
+
+  <div class="card">
+    <h3 class="card-title">发一张图，AI 认出是什么商品 <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应代码：frontend/src/views/Chat.vue · ChatServiceImpl.java:398-415</p>
+    <p><strong>一句话：</strong>用户发图 → 前端先压缩 → 转 base64 → 后端组装成"文字 + 图片"的多模态消息 → 走视觉链路。整条链路只比文本链路多一个"图片附件"。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>
+      像寄快递前先抽真空打包：原图是"几 MB 的整箱货"，运费（token）高还容易超限；压成 1280 长边的 JPEG 之后，模型认商品够用，成本与体积都降下来。
+    </div>
+
+    <details class="lvl mech"><summary>机制与代码</summary><div class="lvl-body">
+      <ol class="steps">
+        <li><b>前端 canvas 压缩</b><code>Chat.vue</code> 把图片画进 canvas，最长边压到 1280、按 JPEG 质量 0.8 导出 dataURL（<b>白底填充</b>是防透明背景变黑）。真实截图动辄几 MB，不压会让请求体过大，也会撞上存储字段上限。</li>
+        <li><b>后端拆 base64 并嗅探真实格式</b>兼容 <code>data:image/png;base64,xxx</code> 与裸 base64 两种输入；<b>MIME 按文件头字节判断，不采信前端声明</b>——项目踩过"前端压成 JPEG 却声明 png"的坑。</li>
+        <li><b>组装多模态消息并调视觉链路</b></li>
+      </ol>
+      <div class="codeblock"><div class="cb-head"><span class="fn">backend/.../service/impl/ChatServiceImpl.java</span><span class="loc">:408-415</span></div>
+      <pre><code>Media media = new Media(MimeTypeUtils.parseMimeType(mimeType),
+        new ByteArrayResource(bytes) {
+            @Override public String getFilename() { return filename; }  // 部分网关要求附件带文件名
+        });
+return UserMessage.builder().text(text).media(List.of(media)).build();</code></pre></div>
+      <p>要压缩的根本原因就两条：<b>token 成本</b>（图片按尺寸计 token，原图贵得多）与<b>传输体积</b>（请求体与数据库存储）。所以历史消息不重复带图——<code>toAiHistory()</code> 只还原文字，图片仅供前端回显；代价是用户追问"图里这件还有别的颜色吗"时，模型已经看不到那张图了。</p>
+    </div></details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary><div class="lvl-body">
+      <div class="callout talk"><span class="ct">30 秒版本</span>
+        "识图比文本就多一个图片附件：前端 canvas 压缩、转 base64，后端解码后用 <code>UserMessage.builder().text().media()</code> 组装多模态消息，走视觉那条 ChatClient。<b>压缩是必须的</b>——图片按尺寸计 token，原图既贵又容易撞请求体和存储上限；<b>格式按文件头字节嗅探</b>，因为前端声明的 MIME 和真实格式不一定一致。"
+      </div>
+      <div class="callout warn"><span class="ct">别说错</span>
+        不要说历史消息里也带着图片。图片只存 base64 供前端回显（V1 的简化方案，多图会撑爆库），<b>不重复喂给模型</b>——这是有意的成本控制，也是一个明确的技术债。
+      </div>
+    </div></details>
+  </div>
+
+  <!-- ================= 6.5 ================= -->
+  <h2><span class="h2n">6.5</span>Hybrid RAG：双通道 + RRF 融合 <span class="badge badge-star">必守的一句话</span></h2>
+
+  <div class="card">
+    <h3 class="card-title">先立边界（本节最重要） <span class="badge badge-red">说反即原理性错误</span></h3>
+    <p class="card-sub">对应代码：ai-service/.../rag/HybridRagService.java · docs/版本详解/V2内容社区与RAG详解.md 第 5 章</p>
+    <p><strong>一句话：</strong>RAG = 先查资料、再回答（检索 → 增强 → 生成），治的是大模型的"知识截止"和"幻觉"。<b>但它只管文档，不管数据。</b></p>
+
+    <div class="vs">
+      <div class="good"><h5>正确边界</h5>
+        <b>价格、库存走 SQL</b>（<code>searchProduct</code>）：实时结构化数据，必须精确。<br>
+        <b>说明书与 UGC 笔记走 RAG</b>（<code>searchDocs</code>）：非结构化文本，问的是体验和参数说明。
+      </div>
+      <div class="bad"><h5>说反了就是原理性错误</h5>
+        用 RAG 答价格：语料是<b>快照</b>会过期，检索又是<b>模糊命中</b>——拿概率检索去答必须精确的实时数据，是设计错误。<br>
+        用 SQL 答"戴久了耳朵疼吗"：答案根本不在结构化字段里。
+      </div>
+    </div>
+    <div class="callout analogy"><span class="ct">打个比方</span>
+      价格库存像<b>收银台的实时报价屏</b>（必须查系统，一秒前的数字都不能算）；说明书与用户评价像<b>货架上的宣传册和意见簿</b>（非结构化，翻一翻、找最相关的几页就够）。
+    </div>
+
+    <details class="lvl mech"><summary>机制与代码</summary><div class="lvl-body">
+      <p><b>① 语料是什么。</b>两份来源：<b>官方说明书</b>（答参数：防水等级、续航、材质）与<b>真实用户种草笔记</b>（答体验：戴久了疼不疼、值不值）。这不是凑数——<b>体验类问题只有 UGC 语料能答</b>：说明书只会写"IPX5 防水"这类参数，不会写"戴久了耳朵疼"，而内容社区恰好产出了这个数据。<b>社区给 AI 提供语料，AI 给社区带来曝光。</b>笔记下架时会同步移除索引，不能让检索召回已下架的内容。</p>
+      <p><b>② 双通道：为什么要两路。</b>关键词通道（MySQL <code>FULLTEXT</code> + ngram 分词，建在 <b>RAG 语料切片</b>上——注意全文索引用在笔记/语料，商品搜索仍是 LIKE 模糊匹配）擅长精确词——"蓝牙5.3""IPX7"这类型号规格；向量通道擅长语义模糊——"戴久了舒服吗"能匹配到"长时间佩戴体验"。<b>但两者各有死穴</b>：换个说法关键词就搜不到（搜"续航"搜不到"电池耐用"），而向量对专有名词不敏感（"蓝牙5.3"和"5.0"在语义空间里极其接近）。<b>电商两类问题都高频，所以两路都要。</b>这就是"语义鸿沟"。</p>
+      <div class="codeblock"><div class="cb-head"><span class="fn">ai-service/.../rag/HybridRagService.java</span><span class="loc">:63-77</span></div>
+      <pre><code>// ① 关键词通道（MySQL ngram 全文）
+List&lt;ChunkRow&gt; byKeyword = safe(() -&gt; knowledgeMapper.selectByKeyword(query.trim(), candidateK));
+// ② 向量通道（内存余弦）
+List&lt;ChunkRow&gt; byVector = searchByVector(query);
+// ③ RRF 融合
+accumulate(scores, uniq, byKeyword);
+accumulate(scores, uniq, byVector);
+
+return scores.entrySet().stream()
+        .sorted((a, b) -&gt; Float.compare(b.getValue(), a.getValue()))
+        .limit(topK)          // 每路候选 20，融合后截断 Top-5
+        ...</code></pre></div>
+      <p><b>③ RRF 融合。</b>一行公式：<code>score(d) = Σ 1 / (k + rank_i(d))</code>，本项目 <code>k = 60</code>（原论文推荐值）。<b>为什么用 RRF 而不是加权求和：</b>两路的<b>分数量纲完全不同</b>——BM25 的分可以上百，余弦在 [0,1]，直接加权等于<b>拿厘米和斤相加</b>。RRF 只看名次、不看分数，<b>天然免疫量纲问题，也不需要调权重</b>；而且一个片段两路都命中时得分自动叠加（双确认），<b>用更少的假设拿到更稳的效果</b>。</p>
+      <div class="codeblock"><div class="cb-head"><span class="fn">ai-service/.../rag/HybridRagService.java</span><span class="loc">:127-134</span></div>
+      <pre><code>/** RRF：按排名累加 1/(k+rank)，双路命中自动叠加（双确认） */
+private void accumulate(Map&lt;Long, Float&gt; scores, Map&lt;Long, ChunkRow&gt; uniq, List&lt;ChunkRow&gt; ranked) {
+    for (int rank = 1; rank &lt;= ranked.size(); rank++) {
+        ChunkRow c = ranked.get(rank - 1);
+        uniq.putIfAbsent(c.id(), c);
+        scores.merge(c.id(), 1f / (rrfK + rank), Float::sum);
+    }
+}</code></pre></div>
+      <p><b>④ embedding 可插拔。</b>接口是 <code>EmbeddingClient</code>，两种实现：默认 <code>local</code> 哈希（2-gram 切分 + 哈希分桶，<b>256 维，零外部依赖</b>），可切成 <code>spring-ai</code> 接真实 embedding 模型——改一行配置 <code>aimall.rag.embedding</code>，业务代码零改动。<b>为什么默认用本地哈希：</b>项目硬约束是"任何环境都能启动"，而 DeepSeek 官方不提供 embedding 接口——硬依赖某个 embedding 服务的话，没配它的机器 RAG 整条链路就跑不起来。所以默认实现<b>可降级、零外部依赖</b>，<b>诚实定位是"字面非语义"</b>：它能匹配"降噪耳机"和"耳机降噪"这种字面重叠，但匹配不了"续航久"和"电池耐用"。<b>语义召回的质量由关键词通道托底</b>，接真实 embedding 后整体效果才有显著提升。</p>
+    </div></details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary><div class="lvl-body">
+      <div class="callout talk"><span class="ct">必考题预答：几百份文档为什么不直接塞进长上下文？</span>
+        <b>四条理由，缺一条都是"没想清楚"：</b><br>
+        <b>① 语料动态更新</b>——笔记每天在发、说明书随时改，"每次全量塞"今天的 128K 明天就不够；RAG 是按需取用，语料增长不影响单次请求大小。<br>
+        <b>② C 端首字延迟</b>——长上下文的 Prefill 耗时随长度线性涨，塞 500 篇（约 25 万字）时打字机的第一字要等好几秒，体验直接崩。<br>
+        <b>③ 权限隔离</b>——RAG 在检索层就能按来源过滤、下架内容直接剔除；全塞进 prompt 就没有权限边界了，模型"看见"了所有内容。<br>
+        <b>④ 成本</b>——token 按量计费，全量灌入 × 每次对话，费用随调用量线性失控。<br>
+        <b>收口一句：</b>"长上下文只适合一次性长文档分析——文档固定、单次交互、无权限分层。"
+      </div>
+      <div class="callout talk"><span class="ct">30 秒版本（RAG 本体）</span>
+        "我做的 RAG 边界很清楚：<b>价格库存走 SQL，说明书和用户笔记走 RAG</b>。检索是双通道——MySQL 全文索引管精确型号词，向量管语义模糊的问法，因为电商这两类问题都高频。两路结果用 RRF 融合，<b>只看排名不看分数</b>，因为 BM25 分可以上百、余弦在 0 到 1，量纲不可比。embedding 默认用本地哈希的降级实现、零依赖；我如实说它只匹配字面、不匹配语义，接真实模型改一行配置就行。"
+      </div>
+      <div class="callout warn"><span class="ct">别说错</span>
+        <b>绝对不要说"用 RAG 查价格"</b>——这是本项目第一条 AI 口径红线。<br>
+        也不要吹"我做了向量数据库"——<b>项目没有向量库</b>，向量以 JSON 存在 MySQL 列里、检索时全量加载到内存算余弦。当前切片规模下这是正确取舍，十万级才需要上 ANN 索引，主动讲出来是加分。<br>
+        不要提 Rerank——<b>项目没做</b>（当前是双路召回 → RRF → Top-5）。
+      </div>
+    </div></details>
+  </div>
+
+  <!-- ================= 6.6 ================= -->
+  <h2><span class="h2n">6.6</span>双工具 Agent 分流：为什么不写 if-else <span class="badge badge-star">必守的一句话</span></h2>
+
+  <div class="card">
+    <h3 class="card-title">把两个工具都注册给模型，由模型自己选 <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应代码：ai-service/.../tool/ProductSearchTool.java · KnowledgeSearchTool.java · rag/HybridRagService.java</p>
+    <p><strong>一句话：</strong>模型手上同时有两份"工具说明书"，用户问价格它选 <code>searchProduct</code>，问体验它选 <code>searchDocs</code>——<b>代码里零意图判断，分流发生在模型侧</b>。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>
+      像给助理一页纸写明"报销找财务、合同找法务"，然后让他自己判断你要办的是哪件事。<b>而不是你站在门口拦人：嘴上说"钱"字的往左、说"合同"的往右</b>——后者听起来可控，实际上"这个多少钱""预算够不够""值不值"全被堵在门外。
+    </div>
+
+    <details class="lvl mech"><summary>机制与代码</summary><div class="lvl-body">
+      <p>分流全靠 <code>description</code> 的<b>正向 + 负向引导</b>——既说清什么时候该调，也说清什么时候<b>不该</b>调：</p>
+      <div class="codeblock"><div class="cb-head"><span class="fn">ai-service/.../tool/ProductSearchTool.java</span><span class="loc">:41-43</span></div>
+      <pre><code>@Tool(description = "搜索本店在售商品：可按关键词、分类过滤，返回商品列表(名称/副标题/起售价)与总数。"
+        + "当用户问商品、价格、或要找某类商品时调用；"
+        + "使用体验、佩戴感受、功能细节等说明性问题不要用本工具（用 searchDocs）。")</code></pre></div>
+      <div class="codeblock"><div class="cb-head"><span class="fn">ai-service/.../tool/KnowledgeSearchTool.java</span><span class="loc">:33-37</span></div>
+      <pre><code>@Tool(description = "检索商品知识库（官方说明书+真实用户种草笔记）：返回与问题相关的知识片段及其来源。"
+        + "当用户询问商品的使用体验、佩戴感受、功能细节、防水续航等说明性/体验性问题时调用；"
+        + "价格、库存、是否有货等实时信息不要用本工具（用 searchProduct）。")
+public String searchDocs(@ToolParam(description = "用户的自然语言问题") String question) {</code></pre></div>
+      <p><b>为什么不写 if-else：</b>规则路由是 <code>if (问题里有"多少钱") 走 SQL else 走 RAG</code>。问题是<b>自然语言意图无法枚举</b>——"这玩意儿贵吗""预算内有没有替代款""值不值"都是价格意图，"戴着闷不闷""跑步会不会掉"都是体验意图，<b>规则永远写不全，必然漏</b>。而判断意图恰好是模型最擅长的事，<b>把它硬编码成人肉规则，等于用你最弱的部分替换它最强的部分</b>。</p>
+      <p><b>还有一层"总-分"双保险：</b>system prompt 定总纲（"涉及价格库存先调 <code>searchProduct</code>，涉及体验先调 <code>searchDocs</code>"，见 <code>ChatServiceImpl.textSystemPrompt()</code>），两个工具的 <code>description</code> 定分工。<b>边界之外也要诚实</b>：用户问"3 号订单到哪了"，两个工具都不该调——当前没有订单工具，模型应如实说查不了。<b>工具边界也是 RAG 边界的一部分。</b></p>
+    </div></details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary><div class="lvl-body">
+      <div class="callout talk"><span class="ct">30 秒版本</span>
+        "我的 AI 有'两只手'：查商品的 <code>searchProduct</code> 走 SQL，查知识库的 <code>searchDocs</code> 走 RAG。<b>两个工具都注册给模型，由模型自己选</b>——我不在代码里判断意图。原因很直接：用户问价格有几十种说法，规则枚举不完，而理解意图正好是模型的长处。为了让它不选错，我用两层引导：system prompt 定总纲，工具描述里写清'什么时候该调、什么时候不要用我'。<b>问订单这类没有工具的场景，它会如实说查不了，而不是硬编。</b>"
+      </div>
+      <div class="callout warn"><span class="ct">别说错</span>
+        不要说"我用规则判断问题类型然后路由"——那<b>恰好是项目刻意没做的</b>，说成这样反而显得没理解。正确说法是：<b>由模型基于工具描述自主决策（Agentic 路由），代码零 if-else</b>。
+      </div>
+    </div></details>
+  </div>
+
+  <!-- ================= 6.7 ================= -->
+  <h2><span class="h2n">6.7</span>AI 审核与文案生成</h2>
+
+  <div class="card">
+    <h3 class="card-title">审核走 MQ 异步 · 文案只出草稿 <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应代码：backend/.../content/service/impl/AuditServiceImpl.java · NoteGenerateService.java</p>
+    <p><strong>为什么这么设计：</strong>用户发布笔记时，AI 审核要<b>秒级</b>才出结果——同步等的话用户点"发布"要转圈好几秒。<b>业务上不能忍，所以走 MQ 异步</b>：接口立刻返回"审核中"，审核在消费端跑，完成后回写笔记状态。这是"用户体验倒逼架构"的典型例子。</p>
+    <div class="callout warn"><span class="ct">跨页说明</span>
+      审核异步的<b>可靠性细节</b>（幂等防线 / 消息只带 id / 死信队列 / MQ 挂了走线程池降级）在 <a href="05-高并发与可靠性.html">05 高并发与可靠性</a>；笔记与审核的业务流程在 <a href="04-内容社区.html">04 内容社区</a>。本节只讲<b>业务上为什么这么设计</b>。
+    </div>
+
+    <details class="lvl mech"><summary>机制与代码</summary><div class="lvl-body">
+      <p><b>① AI 审核。</b>UGC 内容必须过审才能公开，审核作为独立 AI 任务走 MQ 异步，结果落审核流水表。同一套提示词工程在不同任务上用<b>不同温度</b>：审核要"稳"（判得一致），文案创作要"活"（有灵气）。</p>
+      <p><b>② AI 文案：只出草稿，绝不自动发布。</b>这是<b>产品红线</b>，不是技术限制。生成时会把 RAG 检索到的真实用户反馈作为素材拼进 prompt，所以草稿里带的是真实体验细节，而不是凭空编的"绝绝子"：</p>
+      <div class="codeblock"><div class="cb-head"><span class="fn">backend/.../content/service/impl/NoteGenerateService.java</span><span class="loc">:101-116</span></div>
+      <pre><code>        .options(OpenAiChatOptions.builder()
+                .temperature(0.8).build())   // 创作任务给高温度（对比审核的 0.1）
+        .call().content();
+...
+return Map.of(
+        "draft", parseDraft(raw),
+        "editable", true);   // 提醒前端：这是草稿，需用户编辑确认</code></pre></div>
+      <p>接口返回 <code>editable: true</code>；用户编辑后走<b>正常的发布 + 审核流程</b>。<b>未经审核的 AI 内容直接公开是 UGC 平台事故</b>——AI 幻觉生成的虚假体验等于虚假宣传。同一条价值观贯穿整个 AI 模块：<b>AI 的产出永远经过人的确认和流程的把关。</b></p>
+    </div></details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary><div class="lvl-body">
+      <div class="callout talk"><span class="ct">30 秒版本</span>
+        "AI 在这块有两个用途。<b>审核</b>走 MQ 异步——发布接口不能等 AI，秒回'审核中'，结果回写；可靠性那套（幂等、死信、降级）在高并发那部分。<b>文案生成只出草稿</b>，接口明确返回 editable，用户编辑后再走正常发布审核。<b>我不让它自动发布</b>：AI 可能编造体验，未经审核直接公开就是虚假宣传，这个责任主体不能是 AI。"
+      </div>
+      <div class="callout warn"><span class="ct">别说错</span>
+        不要说"AI 生成的笔记会自动发出去"。<b>"只出草稿"体现的是分寸感</b>，是这条 bullet 的加分点，别自己抹掉。
+      </div>
+    </div></details>
+  </div>
+
+  <!-- ================= 6.8 ================= -->
+  <h2><span class="h2n">6.8</span>语音 TTS（一段带过）</h2>
+
+  <div class="card">
+    <h3 class="card-title">派蒙音色 TTS：可选增强，不是主路径 <span class="badge badge-gray">一段带过</span></h3>
+    <p class="card-sub">对应代码：backend/src/main/java/com/aimall/voice/ · tts/VitsLifecycle.java</p>
+    <p><strong>一句话：</strong>派蒙 TTS 是<b>可选增强</b>——主路径是内嵌 VITS 子进程（后端启动时若检测到 Python 与模型文件就自动拉起本机 VITS 服务，产出派蒙音色，WAV→ffmpeg→mp3），<b>任何一步失败都不阻断启动</b>，故障自动降级到 Edge-TTS 兜底（非派蒙音色，仅避免功能硬失败）。</p>
+    <div class="redline"><b>注意：</b>派蒙 6k VITS 模型与 MoeGoe 库属<b>受限第三方资源，只在本地、禁止入库</b>（见 <code>.gitignore</code>：<code>voice-tts/paimon6k_390k.pth</code>、<code>voice-tts/MoeGoe/</code>）；仓库里只保留 <code>vits_server.py</code> 与 <code>requirements.txt</code>。面试时<b>如实说这是本地演示用的受限资产，不要说自己训练了音色模型</b>。</div>
+  </div>
+
+  <!-- ================= 6.9 ================= -->
+  <h2><span class="h2n">6.9</span>防守话术：AI 被深挖怎么办 <span class="badge badge-star">本页的落点</span></h2>
+
+  <p>面试官问 AI，通常不是想考你模型原理——<b>他是在验证"这东西你到底做到哪一步、边界清不清楚"</b>。所以策略不是"答得深"，而是<b>答得准、守得住、能收束</b>。</p>
+
+  <div class="callout talk"><span class="ct">标准答法：只守两句话，细节一律引开</span>
+    <b>第一句 · Function Calling 工具调用：</b>"AI 要查商品，靠的是工具调用——我把商品查询方法注册成工具，模型自己决定调不调、自己填参数，框架执行真实查库再回灌结果。所以<b>价格库存永远来自数据库，它不编造，查不到就说查不到</b>。"<br>
+    <b>第二句 · RAG 检索增强：</b>"非结构化的内容走 RAG——商品说明书和用户种草笔记作为语料，关键词 + 向量双通道检索再用 RRF 融合，回答会注明来源。<b>边界很清楚：价格库存走 SQL，说明书和笔记走 RAG。</b>"<br>
+    <b>然后主动收束：</b>"这块我定位是了解层，能讲清组成和边界；项目里我投入最多的是<b>交易链路和可靠性</b>那部分，比如下单防超卖和 MQ 的幂等设计——要不要我从那儿讲？"
+  </div>
+
+  <div class="callout warn"><span class="ct">不要说的四件事</span>
+    <b>① 不要说"我很懂大模型"。</b>这是初级 Java 岗，你越强调懂 AI，面试官越会往原理深处挖——而你的时间投在别处，深挖必翻车。<br>
+    <b>② 不要主动提项目里没有的东西：MCP、Rerank、向量数据库（Milvus / pgvector）、Agent 自主规划。</b>这些都没实现。主动提 = 给自己挖坑；被问到时答"当前没做，下一步可以考虑"才是加分。<br>
+    <b>③ 不要把 AI 说成项目主打。</b>正确顺序永远是先讲交易、并发、缓存、消息，<b>AI 是"业务场景之一"</b>。把它说成核心，等于把最薄的部分当成最厚的卖。<br>
+    <b>④ 不要说"RAG 什么都能答""模型不会出错"。</b>正确说法是"RAG 只答非结构化内容，价格库存走 SQL"；模型异常是常态，所有调用都要兜底。
+  </div>
+
+  <div class="callout danger"><span class="ct">诚实边界：主动交代，化被动为主动</span>
+    <b>1. 流式是"伪流式"。</b><code>RemoteAiService.stream()</code> 内部直接 <code>return Flux.just(chat(message, null));</code>（<code>RemoteAiService.java:72-77</code>）——<b>先把完整回答拿到，再一次性包成 Flux</b>；跨服务真实流式透传（WebClient 直连 ai-service 的 SSE 端点）是明确的下一步。用户侧打字机效果不受影响（本地链路是真的 <code>.stream()</code>），但被问到跨服务流式时要如实说。<br>
+    <b>2. 向量检索是"全量加载 + 内存算余弦"</b>，没上 ANN 索引；<b>embedding 默认是字面匹配的降级实现</b>，不是真语义。<br>
+    <b>3. 引用只落在回答正文里</b>，前端没做可点击的结构化引用卡片。<br>
+    提前把这三条说出来，比被追问时支支吾吾强得多——<b>面试官要的是"你知道自己的系统边界在哪"</b>。
+  </div>
+
+  <div class="callout ok"><span class="ct">本页读完你应该能回答</span>
+    ① AI 模块由哪几块组成（6.1 全景图）；② 两句话分别是什么（6.3 Function Calling / 6.5 Hybrid RAG）；③ RAG 的边界（6.5 的 <code>.vs</code> 对比）；④ 被深挖时怎么引开（6.9）。<b>其余内容属于"知道有这回事"，不必背。</b>下一页去 <a href="07-工程基建与服务化.html">07 工程基建与服务化</a>；AI 口径的完整红线表在 <a href="08-面试速查与自查.html">08 面试速查</a>。
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+
+</main>
+
+<script src="_assets/app.js"></script>
+</body>
+</html>

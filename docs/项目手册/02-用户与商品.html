@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02 用户与商品 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="02">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+
+<main class="main">
+
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>一 · 结构与业务链路</b></div>
+    <h1>02 · 用户与商品</h1>
+    <p class="lede">这页讲项目里最"基础"的两个域：怎么证明"你是谁"，以及商品怎么建模。它们不花哨、没有高并发，但面试官恰恰用它判断你的基本功——鉴权能不能讲清无状态、SKU 能不能讲清为什么拆表、购物车能不能讲清为什么不放 Redis。</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 20 分钟</span>
+      <span class="badge badge-star">面试权重 ★★</span>
+      <span class="badge badge-gray">涉及 6 张表 / 38 个类</span>
+    </div>
+  </header>
+
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START
+       ==================================================================== -->
+
+  <h2><span class="h2n">2.1</span>用户域全景：两张表，一条链路</h2>
+
+  <p>用户域在 <code>com.aimall.user</code> 下，一共 16 个类，但真正承载数据的只有两张表。它们的分工非常干净：<b><code>t_user</code> 管"你是谁"，<code>t_user_address</code> 管"货寄到哪"</b>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th style="width:170px">表 / 类</th><th>存什么 / 干什么</th><th style="width:150px">关键约束</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>t_user</code></td><td>账号本体：登录名、密码哈希、昵称、头像、角色、状态</td><td><code>uk_username</code>（用户名唯一）</td></tr>
+        <tr><td><code>t_user_address</code></td><td>收货地址簿：收货人、电话、省市区、详细地址、是否默认</td><td><code>idx_user</code>（按用户查）</td></tr>
+        <tr><td><code>AuthRestController</code></td><td>注册 / 登录 / 登出 / 当前用户，映射 <code>/api/v1/auth</code></td><td>登录、注册在白名单</td></tr>
+        <tr><td><code>AddressRestController</code></td><td>地址增删改查 + 设默认，映射 <code>/api/v1/addresses</code></td><td>全部需登录</td></tr>
+        <tr><td><code>UserServiceImpl</code> / <code>AddressServiceImpl</code></td><td>业务逻辑层：密码加密、Token 签发、默认位维护、归属校验</td><td>越权校验在此层</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>整个用户域的业务链路就一条，记住这条线，后面所有章节都是它的展开：</p>
+
+  <div class="flow">
+    <div class="flow-node"><span class="n">注册</span><span class="d">POST /auth/register<br>BCrypt 加密后入库</span></div>
+    <div class="flow-arrow"></div>
+    <div class="flow-node"><span class="n">登录</span><span class="d">POST /auth/login<br>比对哈希 → StpUtil.login(id)</span></div>
+    <div class="flow-arrow"></div>
+    <div class="flow-node"><span class="n">拿 Token</span><span class="d">LoginVO.token<br>前端存入 localStorage</span></div>
+    <div class="flow-arrow"></div>
+    <div class="flow-node"><span class="n">带 Token 请求</span><span class="d">Authorization 头<br>SaInterceptor 校验 → 放行</span></div>
+    <div class="flow-arrow"></div>
+    <div class="flow-node"><span class="n">业务取身份</span><span class="d">StpUtil.getLoginIdAsLong()<br>业务层不解析 Token</span></div>
+  </div>
+
+  <div class="callout brand">
+    <span class="ct">这条链路的一个设计意图</span>
+    <b>业务代码从不碰 Token。</b>业务层要"当前用户 id"时统一调 <code>StpUtil.getLoginIdAsLong()</code>——"我是谁"由认证层给出，业务层拿到的是干净的 <code>Long</code>。这叫<b>关注点分离</b>：Token 长什么样、存在哪、什么时候过期，都跟商品、订单、购物车代码无关。
+  </div>
+
+  <h2><span class="h2n">2.2</span>注册与登录：Sa-Token + BCrypt</h2>
+
+  <div class="card">
+    <h3 class="card-title">无状态 Token 登录 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：UserServiceImpl.java / PasswordConfig.java / application.yml</p>
+
+    <p><strong>一句话：</strong>登录成功后服务端签发一个 Token 给前端，之后每次请求都带它自证身份，服务端<b>不保存 HttpSession</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      传统 Session 像<b>酒店前台寄存行李</b>——房卡只是个编号，行李必须存在前台（服务器内存），换一家分店就取不到；无状态 Token 像<b>带防伪章的通行证</b>——凭证本身写着你是谁、盖了章，任何一家分店都能独立验章放行，不需要共享行李间。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：为什么是 Token 而不是 Session</summary>
+      <div class="lvl-body">
+        <div class="vs">
+          <div class="bad">
+            <h5>Session（服务器内存）</h5>
+            <p>会话数据存在单机内存里。多实例部署时，A 机登录、请求被负载均衡打到 B 机就读不到会话——必须做<b>会话粘滞</b>（sticky session）或<b>会话共享</b>（Session 复制 / 存 Redis）。水平扩展天然别扭。</p>
+          </div>
+          <div class="good">
+            <h5>无状态 Token（本项目）</h5>
+            <p>身份信息随请求头走，服务端不存会话，<b>集群多实例天然无需粘滞</b>。校验是一次签名 / 映射比对，代价是每次请求多一次校验开销。</p>
+          </div>
+        </div>
+
+        <p>配置就在 <code>application.yml</code> 里，四个键能背出来就是真配过：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/resources/application.yml</span><span class="loc">:215-222</span></div>
+          <pre><code>sa-token:
+  token-name: Authorization   # 前端请求头名；Sa-Token 自动兼容 "Bearer " 前缀
+  timeout: 604800             # token 有效期 7 天（秒）
+  is-concurrent: true         # 允许多端登录
+  token-style: uuid</code></pre>
+        </div>
+
+        <p>登录逻辑把"查用户 → 比密码 → 查状态 → 签发 Token"四步压在一个方法里，注意密码校验方向：不是拿明文去比明文，而是 <code>matches(明文, 哈希)</code>。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/user/service/impl/UserServiceImpl.java</span><span class="loc">:47-56</span></div>
+          <pre><code>User user = userMapper.selectByUsername(req.getUsername());
+// 统一提示，避免暴露"用户名是否存在"
+if (user == null || !passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
+    throw new BusinessException(ResultCode.PASSWORD_ERROR);
+}
+if (user.getStatus() != null && user.getStatus() == 0) {
+    throw new BusinessException(ResultCode.USER_DISABLED);
+}
+StpUtil.login(user.getId());
+return new LoginVO(StpUtil.getTokenValue(), toVO(user));</code></pre>
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "登录用 Sa-Token 做无状态认证：校验通过后 <code>StpUtil.login(userId)</code> 签发 Token，前端放 <code>Authorization</code> 头，拦截器统一校验。也正因为无状态、服务端不存 HttpSession，集群部署不用做会话粘滞。"<br>
+          <b>追问 JWT 时：</b>"Sa-Token 的 Token 在服务端有映射，所以支持主动踢人、续期、看在线列表；纯 JWT 是自包含的，签发后作废不了，只能等过期或另建黑名单。我要'能踢人'这个能力，所以选 Sa-Token。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          不能说"我们完全无状态、服务端什么都不存"。Sa-Token 的 Token <b>在服务端是有映射的</b>（默认内存，生产可切 Redis）——这正是它能"主动踢人"的原因。正确表述是：<b>无状态指的是不依赖 HttpSession、集群免粘滞</b>，不是"服务端什么都不记"。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">密码存储：BCrypt 而不是 MD5 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：PasswordConfig.java / t_user.password_hash</p>
+
+    <p><strong>一句话：</strong>数据库里存的<b>从来不是明文密码</b>，而是 BCrypt 哈希串；登录时用 <code>matches()</code> 反查。</p>
+
+    <p>先在真实建表语句里核实一次——字段注释写得明明白白：</p>
+
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">backend/src/main/resources/db/migration/V1__init.sql</span><span class="loc">:19-30</span></div>
+      <pre><code>CREATE TABLE IF NOT EXISTS t_user (
+    id            BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    username      VARCHAR(50)  NOT NULL COMMENT '登录名',
+    password_hash VARCHAR(100) NOT NULL COMMENT 'BCrypt 密码哈希',
+    ...
+    UNIQUE KEY uk_username (username)
+) ENGINE = InnoDB COMMENT ='用户表';</code></pre>
+    </div>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      MD5 像<b>把青菜榨成汁</b>——同一种菜榨出来永远是同一杯，只要有本"菜汁对照表"（彩虹表）就能反查；BCrypt 像<b>每杯都随机加一撮盐再榨</b>，同样的密码每次结果都不同，彩虹表彻底失效，且想暴力破解还得为每一次尝试付出昂贵算力。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：BCrypt 强在哪</summary>
+      <div class="lvl-body">
+        <div class="vs">
+          <div class="bad">
+            <h5>MD5 / SHA-1（不可用于存密码）</h5>
+            <p>① <b>无盐</b>：相同密码哈希相同，彩虹表一击即中；② <b>太快</b>：GPU 每秒可算数十亿次，暴力破解成本极低。它是"摘要算法"，设计目标是快，而快恰恰是存密码的缺点。</p>
+          </div>
+          <div class="good">
+            <h5>BCrypt（本项目）</h5>
+            <p>① <b>自带随机盐</b>：盐和哈希拼在同一个串里存，无需另建盐字段，同一密码每次结果都不同；② <b>cost 可调</b>：默认强度下每次哈希约百毫秒，故意"算得慢"，让暴力破解在时间上不可行。密码学上属于<b>自适应单向函数</b>。</p>
+          </div>
+        </div>
+
+        <p>配置只有几行——项目刻意只引入 <code>spring-security-crypto</code> 这一个模块，<b>不引入整套 Spring Security</b>：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/config/PasswordConfig.java</span><span class="loc">:12-18</span></div>
+          <pre><code>@Configuration
+public class PasswordConfig {
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}</code></pre>
+        </div>
+
+        <p>注册时加密、登录时比对，两处成对出现：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/user/service/impl/UserServiceImpl.java</span><span class="loc">:33-41</span></div>
+          <pre><code>User user = new User();
+user.setUsername(req.getUsername());
+user.setPasswordHash(passwordEncoder.encode(req.getPassword()));
+user.setNickname(StringUtils.hasText(req.getNickname())
+        ? req.getNickname().trim()
+        : "种草用户" + ThreadLocalRandom.current().nextInt(1000, 9999));
+user.setRole(0);
+user.setStatus(1);
+userMapper.insert(user);</code></pre>
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "密码不存明文，存的是 BCrypt 哈希。BCrypt 两个好处：一是自带随机盐，每个用户盐不同，彩虹表失效；二是 cost 可调，故意算得慢，暴力破解成本极高。登录时用 <code>matches(明文, 哈希)</code> 比对，比对失败和用户不存在返回<b>同一个提示</b>，避免暴露用户名是否存在。"<br>
+          <b>追问为什么不用 Spring Security：</b>"我的鉴权需求只有'登录 / 未登录'一级，Spring Security 是过滤器链加授权模型的全家桶，杀鸡用牛刀。我只引了 <code>spring-security-crypto</code> 这一个模块拿 BCrypt，认证交给 Sa-Token。如果以后要做多角色 RBAC，我会重新评估。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          ① 别说"密码用 MD5 加密"——存密码叫<b>哈希 / 摘要</b>，且 MD5 已明确不可用于此；② 别说"加了固定盐"——BCrypt 的盐是<b>每个密码随机生成</b>并写进同一个哈希串的，不需要自己维护盐字段；③ 别说"用了 JWT"，本项目是 Sa-Token，两者在"能否主动作废"上不同。
+        </div>
+      </div>
+    </details>
+  </div>
+  <h2><span class="h2n">2.3</span>鉴权链路：拦截器 + 白名单</h2>
+
+  <div class="card">
+    <h3 class="card-title">SaInterceptor：默认全拦，显式放行 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：SaTokenConfig.java</p>
+
+    <p><strong>一句话：</strong><code>/api/**</code> 默认<b>全部需要登录</b>，只有白名单里的路径例外。这道闸门装在 Spring MVC 的拦截器层，登录校验、放行都在这里一次性决定。</p>
+
+    <p><strong>为什么需要它：</strong>如果每个接口自己写"判断有没有登录"，漏掉一个就是裸奔。正确的姿态是 <b>fail-closed（默认拒绝 + 显式放行）</b>，而不是 fail-open（默认放行 + 逐个加保护）。代码全文很短，但每一条放行都有理由：</p>
+
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/config/SaTokenConfig.java</span><span class="loc">:16-33</span></div>
+      <pre><code>registry.addInterceptor(new SaInterceptor())
+        .addPathPatterns("/api/**")
+        .excludePathPatterns(
+                "/api/v1/auth/login",
+                "/api/v1/auth/register",
+                // V3：支付回调——第三方（支付宝服务器）不可能持有我们用户的 token。
+                // 回调接口的"身份"由【验签】保证，而不是 token：
+                //   业务接口靠"你是谁"（认证），回调接口靠"消息是谁发的、有没有被改"（完整性）。
+                // 若这里不放行，回调会被 401 拦掉，订单永远无法变为已支付。
+                "/api/v1/payments/callback/**",
+                "/internal/**",
+                "/error"
+        );</code></pre>
+    </div>
+
+    <div class="callout warn">
+      <span class="ct">支付回调必须免登录——这是本节最该记的一条</span>
+      支付回调是<b>第三方服务器（支付宝）主动打进来的请求</b>，它<b>不可能持有我们用户的 Token</b>。如果这里不放行，回调会被 401 拦掉，订单永远无法变成已支付。<br>
+      那放行安全吗？安全。因为回调的"身份"由<b>验签</b>保证——<b>Token 管的是"你是谁"（认证），验签管的是"消息是不是对方发的、有没有被改"（完整性），这是两件事</b>。同一逻辑也适用于 <code>/internal/**</code>：调用方是 ai-service，身份由<b>内部 HMAC 签名 + 时间窗</b>保证。放行 ≠ 裸奔，这些端点内部仍在校验签名。详见 <a href="03-订单与交易.html">03 订单与交易</a> 的支付验签。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：拦截器在请求链路的哪一环</summary>
+      <div class="lvl-body">
+        <p>请求进入 Spring Boot 后的顺序是固定的，理解这个顺序才知道为什么"登录校验用拦截器"、为什么"traceId 用 Filter"：</p>
+        <p><b>请求 → Filter（Servlet 容器级，早于 DispatcherServlet）→ DispatcherServlet → Interceptor（Spring MVC 级）→ AOP 切面（方法调用级）→ Controller</b></p>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th style="width:110px">组件</th><th>规范</th><th>能拿到什么</th><th>本项目用它做</th></tr></thead>
+            <tbody>
+              <tr><td>Filter</td><td>Servlet 容器</td><td>request/response，<b>不知道是哪个 Controller</b></td><td>traceId 注入</td></tr>
+              <tr><td>Interceptor</td><td>Spring MVC</td><td>知道 HandlerMethod</td><td><b>登录校验 + 白名单</b></td></tr>
+              <tr><td>AOP</td><td>Spring AOP</td><td>知道方法、参数、返回值</td><td>事务、日志</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>两个关键取舍：<b>① 登录校验为什么不用 AOP？</b>因为 AOP 在方法调用期，请求已经进到 Controller 了；拦截器能在 MVC 入口统一拒绝，失败更早、语义更准。<b>② 为什么不放 Filter？</b>Filter 拿不到 HandlerMethod，无法做"按注解 / 按路径"的细粒度控制，而 MVC 拦截器天然知道路由。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "鉴权用 Sa-Token 拦截器做，<code>/api/**</code> 默认全部要登录，只放行三类：登录注册、支付回调、<code>/internal/**</code> 内部接口。姿态是 fail-closed——默认拒绝、显式放行，避免漏掉某个接口裸奔。"<br>
+          <b>被问"支付回调放行安全吗"：</b>"安全。回调是支付宝服务器发的，它没有我们的用户 Token，身份由验签保证。Token 保证认证、验签保证完整性，是两码事。"<br>
+          <b>被问三者区别：</b>"Filter → Interceptor → AOP 依次在容器级、MVC 级、方法级；登录校验必须在 MVC 入口做，所以用 Interceptor。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          ① 别说"放行的接口就没有任何保护"——<code>/internal/**</code> 仍校验 HMAC 签名，支付回调仍验签；② 别把 <code>/internal/**</code> 说成"内部所以安全"，它安全是因为<b>签名校验</b>，而不是因为路径叫 internal；③ 别说拦截器能拿到原始字节流或做全局编码，那是 Filter 的活。
+        </div>
+      </div>
+    </details>
+  </div>
+  <h2><span class="h2n">2.4</span>收货地址簿：默认位与越权校验</h2>
+
+  <div class="card">
+    <h3 class="card-title">t_user_address：一个用户多地址，一个有且仅有一个默认 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：AddressServiceImpl.java / AddressMapper.xml</p>
+
+    <p><strong>一句话：</strong>一张从表存用户的多个收货地址，靠 <code>is_default</code> 标记默认地址；所有读写都<b>强制带上当前用户 id</b>，从 SQL 层就查不到别人的数据。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      地址簿像<b>手机里的联系人分组</b>——你只能看到自己分组下的联系人，分组 id 是系统按登录身份自动带上的，你手改 URL 也翻不到别人的。默认地址则是分组里贴的那颗星：同一时刻只能有一颗。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：字段设计 + 默认位维护</summary>
+      <div class="lvl-body">
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th style="width:120px">字段</th><th style="width:150px">类型</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td><code>user_id</code></td><td>BIGINT NOT NULL</td><td>归属用户，<code>idx_user</code> 索引</td></tr>
+              <tr><td><code>receiver</code> / <code>phone</code></td><td>VARCHAR(50) / (20)</td><td>收货人、联系电话，必填</td></tr>
+              <tr><td><code>province</code> / <code>city</code></td><td>VARCHAR(50) DEFAULT NULL</td><td>省、市，<b>可空</b>（详情里直接写全也行）</td></tr>
+              <tr><td><code>detail</code></td><td>VARCHAR(200) NOT NULL</td><td>详细地址，必填</td></tr>
+              <tr><td><code>is_default</code></td><td>TINYINT DEFAULT 0</td><td>是否默认：1 是 0 否</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="card-sub">建表语句见 V1__init.sql:32-45。注意：表上没有"每用户唯一一个默认"的数据库约束，默认位靠<b>应用层成对维护</b>。</p>
+
+        <p>默认位的规则有三条，全部在 <code>AddressServiceImpl</code> 里：</p>
+        <ol class="steps">
+          <li><b>首条自动成为默认</b>新增时 <code>wantDefault = req.isDefault() || countByUserId(userId) == 0</code>——用户没勾"默认"，但这是他的第一条地址，也自动设为默认。</li>
+          <li><b>设默认前先清零</b>想让 B 成为默认，先 <code>unsetDefault(userId)</code> 把该用户所有地址的默认位清 0，再 <code>updateDefault(B)</code>——保证"有且仅有一个默认"。</li>
+          <li><b>删除默认后自动补位</b>删掉的若是默认地址，就把剩余地址里排最前的一条自动设为默认，避免用户下次下单时没有默认地址。</li>
+        </ol>
+
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/user/service/impl/AddressServiceImpl.java</span><span class="loc">:92-99</span></div>
+          <pre><code>@Override
+@Transactional(rollbackFor = Exception.class)
+public void setDefault(Long id) {
+    Long userId = currentUserId();
+    if (addressMapper.selectByIdAndUserId(id, userId) == null) {
+        throw new BusinessException(ResultCode.NOT_FOUND, "地址不存在");
+    }
+    addressMapper.unsetDefault(userId);
+    addressMapper.updateDefault(id, userId);
+}</code></pre>
+        </div>
+
+        <p><strong>越权校验（本节的面试重点）：</strong>项目的做法是<b>从 SQL 层就带 <code>AND user_id = ?</code></b>，别人的地址根本<u>查不出来</u>，而不是"先查出来再比对"。更新语句就是证据：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/resources/mapper/AddressMapper.xml</span><span class="loc">:36-44</span></div>
+          <pre><code>&lt;update id="update"&gt;
+    UPDATE t_user_address
+    SET receiver = #{receiver},
+        phone    = #{phone},
+        province = #{province},
+        city     = #{city},
+        detail   = #{detail}
+    WHERE id = #{id} AND user_id = #{userId}
+&lt;/update&gt;</code></pre>
+        </div>
+        <p>删除、设默认、更新前都先调 <code>ensureOwned(id)</code>（AddressServiceImpl.java:101-105），查不到就抛 <code>NOT_FOUND</code>。注意错误码是 <b>404 而不是 403</b>——403 等于告诉攻击者"这地址存在，只是不属于你"，他就能顺藤摸瓜枚举 id；404 是"没这东西"，<b>不暴露资源存在性</b>（最小信息披露原则）。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "地址是标准的水平越权高发区。我的做法是所有查询和更新 SQL 都带 <code>AND user_id = ?</code>，用户 id 从 <code>StpUtil.getLoginIdAsLong()</code> 统一取，绝不接受前端传的 userId。别人的地址在 SQL 层就查不到，返回 404 而不是 403，避免暴露资源是否存在。默认地址靠应用层成对维护：设默认前先清零全量，删默认后自动补位。"<br>
+          <b>追问"为什么不用数据库约束保证只有一个默认"：</b>"MySQL 上做'部分唯一索引'比较别扭，我在应用层用 <code>unsetDefault</code> + <code>updateDefault</code> 在一个事务里成对维护，逻辑更直观也更好讲。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          ① 别说"返回 403 没权限"——本项目口径是 <b>404</b>，防的是 id 枚举与探测；② 别说"越权校验写在 Controller 里"——它必须在 <b>Service 层</b>，这样定时任务、MQ、内部接口等任何入口复用同一份校验，放 Controller 会被绕过；③ 别说"用户 id 从前端请求参数里取"——那是把越权漏洞主动送出去。
+        </div>
+      </div>
+    </details>
+  </div>
+  <h2><span class="h2n">2.5</span>商品建模：SPU / SKU / 图片三层</h2>
+
+  <div class="card">
+    <h3 class="card-title">为什么商品不塞进一张表 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：t_product / t_product_sku / t_product_image（V1__init.sql:50-87）</p>
+
+    <p><strong>一句话：</strong>商品被拆成三层——<b>SPU 描述"这是个什么商品"、SKU 描述"具体哪个规格、多少钱、剩几件"、图片表描述"有哪些图"</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      SPU 像<b>餐厅菜单上的一道菜</b>（"宫保鸡丁"），SKU 像<b>这道菜的规格选项</b>（小份 28 元 / 大份 38 元，各自还有独立备料量）。菜单不会为"小份宫保鸡丁""大份宫保鸡丁"各写一页——它们共享同一段介绍、同一张图，只在价格和存量上分叉。
+    </div>
+
+    <p>三层关系一眼看清：</p>
+
+    <div class="flow vertical">
+      <div class="flow-node"><span class="n">t_product（SPU）</span><span class="d">商品名 / 副标题 / 分类 / 主图 / detail 详情 / status 上下架</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">t_product_sku（SKU）</span><span class="d">sku_name 规格名 / price 价格 / stock 库存 / sales 销量 / image 规格图<br>一个商品 N 条，各自独立价格与库存</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">t_product_image（图集）</span><span class="d">sku_id IS NULL → 商品级图集；sku_id 非空 → 该规格专属图；sort 排序</span></div>
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：为什么必须拆表</summary>
+      <div class="lvl-body">
+        <p><strong>核心论证一：规格会组合爆炸。</strong>一个商品若有 3 种颜色 × 3 种容量，就是 9 个"可独立售卖的单位"。若塞进一张表，要么把 9 个组合摊成 9 行（商品信息重复 9 遍，改一次标题要改 9 行），要么用 JSON 把规格塞进一个字段（价格、库存变成了应用层解析的字符串，SQL 无法聚合、无法用索引、无法 <code>WHERE stock&gt;=?</code> 判断）。</p>
+        <p><strong>核心论证二：价格和库存必须挂在 SKU 上。</strong>下单扣的是"曜石黑 32G 的库存"，不是"AirSound Pro 的库存"——买黑色并不会减少白色的存量。<b>任何需要按规格单独读写、且要参与事务与并发控制的字段，必须是独立的列，而不是可解析的文本。</b>所以 <code>price / stock / sales</code> 天然属于 SKU 表。</p>
+        <p><strong>图集为什么要单独一张表：</strong>一个商品可能有 6 张详情图，一个规格又可能有自己的一组图。塞进商品表的 <code>main_img</code> 只有一个格子，装不下；用逗号拼接则丢失排序、无法按规格分组。于是 <code>t_product_image</code> 用 <code>sku_id IS NULL</code> 区分"这是商品级默认图集"，非空则属于某个规格。</p>
+
+        <p><strong>SKU 表里哪些字段真的在用，哪些是预留——这一条务必记牢：</strong></p>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th style="width:120px">字段</th><th style="width:130px">状态</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td><code>price</code></td><td><span class="badge badge-master">真参与业务</span></td><td>下单金额以此为准；列表的"起售价"= <code>MIN(price)</code></td></tr>
+              <tr><td><code>stock</code></td><td><span class="badge badge-master">真参与业务</span></td><td>扣库存的靶子：<code>WHERE stock &gt;= ?</code></td></tr>
+              <tr><td><code>sales</code></td><td><span class="badge badge-master">真参与业务</span></td><td>与扣库存同一条 SQL 里 <code>sales = sales + ?</code> 累加</td></tr>
+              <tr><td><code>image</code></td><td><span class="badge badge-familiar">在用</span></td><td>选中规格时切换主图，为空则回退商品图集</td></tr>
+              <tr><td><code>version</code></td><td><span class="badge badge-red">纯预留</span></td><td><b>从未参与乐观锁比对</b>，见下方红线</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="redline">
+          <b>口径红线：</b><code>t_product_sku.version</code> 是<b>纯预留字段，从未参与比对</b>。扣库存靠的是"<b>行锁 + <code>WHERE stock&gt;=?</code> 条件更新（CAS 思想）</b>"，<b>绝不可以说成"乐观锁"</b>。建表注释与 Mapper 注释都把这一点写死了。
+        </div>
+
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/resources/db/migration/V1__init.sql</span><span class="loc">:63-75</span></div>
+          <pre><code>CREATE TABLE IF NOT EXISTS t_product_sku (
+    id         BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+    product_id BIGINT        NOT NULL COMMENT '所属商品 id',
+    sku_name   VARCHAR(100)  NOT NULL COMMENT '规格名，如 曜石黑 32G',
+    price      DECIMAL(10,2) NOT NULL COMMENT '售价',
+    stock      INT           NOT NULL DEFAULT 0 COMMENT '库存',
+    sales      INT           NOT NULL DEFAULT 0 COMMENT '销量',
+    image      VARCHAR(255)  DEFAULT NULL COMMENT '规格图 URL',
+    version    INT           NOT NULL DEFAULT 0 COMMENT '★预留字段，当前【未用作乐观锁】。防超卖靠 UPDATE ... WHERE stock>=? 的行锁 CAS',
+    PRIMARY KEY (id),
+    KEY idx_product (product_id)
+) ENGINE = InnoDB COMMENT ='商品 SKU 表';</code></pre>
+        </div>
+
+        <p>真正扣库存的那条 SQL 长这样，注意它<b>完全不提 version</b>：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/resources/mapper/ProductSkuMapper.xml</span><span class="loc">:35-40</span></div>
+          <pre><code>&lt;update id="deductStock"&gt;
+    UPDATE t_product_sku
+    SET stock = stock - #{quantity},
+        sales = sales + #{quantity}
+    WHERE id = #{id} AND stock &gt;= #{quantity}
+&lt;/update&gt;</code></pre>
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "商品按 SPU / SKU 两层建模：SPU 是商品本身，SKU 是规格，价格、库存、销量都挂在 SKU 上。为什么必须拆？一是规格组合会爆炸，3 色 × 3 容量就是 9 个独立售卖单位；二是价格库存必须能按规格单独读写，还要参与事务和并发判断，所以必须是独立的列而不是一段 JSON。图集单独一张表，用 <code>sku_id IS NULL</code> 区分商品级图和规格图。"<br>
+          <b>被追问扣库存时：</b>"扣的是 SKU 的库存，靠'行锁 + <code>WHERE stock&gt;=?</code> 条件更新'，本质是 CAS 思想；<code>sales</code> 在同一条 SQL 里累加。细节在 03 页。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          ① <b>不要说"用乐观锁扣库存"</b>——一句话暴露没读懂代码，<code>version</code> 是预留字段；② 不要说"把规格存成 JSON 字段也能查"——JSON 里的价格库存无法走索引聚合，也无法参与条件更新；③ 不要把 <code>t_product.detail</code> 说成"商品参数"，它是<b>图文详情文本</b>，也是 V1 里 AI 问答的预置知识来源。
+        </div>
+      </div>
+    </details>
+  </div>
+  <h2><span class="h2n">2.6</span>商品列表与详情</h2>
+
+  <div class="card">
+    <h3 class="card-title">列表的"起售价聚合" <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：ProductMapper.xml / ProductServiceImpl.java</p>
+
+    <p><strong>一句话：</strong>列表页展示的是 SPU，但价格要显示"这个商品最低多少起"——所以列表 SQL 用 <code>LEFT JOIN</code> 到 SKU 表，取 <code>MIN(price)</code> 作为起售价。</p>
+
+    <details class="lvl mech">
+      <summary>机制与代码：LEFT JOIN + MIN + GROUP BY</summary>
+      <div class="lvl-body">
+        <p>两个细节值得记住：<b>一是必须 LEFT JOIN</b>，否则一个还没配 SKU 的商品会从列表里消失；<b>二是 count 不 Join</b>，统计总数只需数 SPU，多一次 join 是白费。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/resources/mapper/ProductMapper.xml</span><span class="loc">:21-30</span></div>
+          <pre><code>&lt;select id="selectOnSalePage" resultType="com.aimall.goods.bean.Product"&gt;
+    SELECT p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at,
+           MIN(s.price) AS min_price
+    FROM t_product p
+    LEFT JOIN t_product_sku s ON s.product_id = p.id
+    &lt;include refid="onsaleWhere"/&gt;
+    GROUP BY p.id, p.spu_name, p.sub_title, p.category_id, p.main_img, p.status, p.created_at
+    ORDER BY p.id DESC
+    LIMIT #{offset}, #{size}
+&lt;/select&gt;</code></pre>
+        </div>
+        <p>聚合出来的 <code>min_price</code> 在实体里是<b>非表列</b>字段（Product.java:38-39 明确标注"SQL 聚合得出"）。详情页则是另一条路：先查 SPU，再查 SKU 列表和两套图集，最后组装 VO（ProductServiceImpl.java:42-61）。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "列表查的是 SPU，但价格要显示起售价，所以列表 SQL 用 <code>LEFT JOIN</code> 到 SKU 表取 <code>MIN(price)</code>，加 <code>GROUP BY</code> 聚合。用 LEFT JOIN 是为了让还没配 SKU 的商品不出现在列表里丢行。分页是手写的 <code>LIMIT offset, size</code>，没有用分页插件。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          别把 <code>min_price</code> 说成数据库里的真实列——它是 SQL 聚合出来的<b>虚拟字段</b>，这也是为什么 <code>Product</code> 实体里要单独声明一个 <code>minPrice</code> 并注释"非表列"。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">商品搜索：诚实地说"还没做成熟方案" <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应代码：ProductMapper.xml:7-18（onsaleWhere）</p>
+
+    <p><strong>一句话：</strong>当前商品搜索就是 <code>LIKE CONCAT('%', #{keyword}, '%')</code> 对商品名和副标题做模糊匹配，<b>没有 ES、没有全文索引</b>。</p>
+
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">backend/src/main/resources/mapper/ProductMapper.xml</span><span class="loc">:13-16</span></div>
+      <pre><code>&lt;if test="keyword != null and keyword != ''"&gt;
+    AND (p.spu_name LIKE CONCAT('%', #{keyword}, '%')
+         OR p.sub_title LIKE CONCAT('%', #{keyword}, '%'))
+&lt;/if&gt;</code></pre>
+    </div>
+
+    <div class="redline">
+      <b>口径红线：</b>商品搜索<b>当前是 <code>LIKE</code> 模糊匹配，还没做成熟搜索方案</b>。绝不可以说"用 MySQL 全文索引搜商品"——本项目的全文检索（ngram）用在<b>笔记</b>上，不在商品上。详见 <a href="04-内容社区.html">04 内容社区</a>。
+    </div>
+
+    <div class="callout warn">
+      <span class="ct">为什么"没做"不等于"过度设计"或"规模借口"</span>
+      <b>这不是"在给自己找借口"。</b>正确的话术是：<b>数据量是"触发条件的标尺"，不是"选型的技术理由"</b>。<br>
+      意思是：ES 该不该上，取决于"当商品量、并发搜索量、对相关性排序的要求达到某个量级时，<code>LIKE</code> 会因为<b>无法走索引</b>（前置通配符）而全表扫描、拖慢整个库"——<b>是数据量触发了它</b>，而不是"因为现在数据少所以我懒得做"。<br>
+      同时也要说清代价：上 ES 意味着引入一套独立中间件、数据同步链路、一致性维护，对当前项目是净负担。将来真到量级，迁移路径很清晰：<b>MySQL → 先加密索引 → 再上 ES + Canal 同步</b>。
+    </div>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "商品搜索目前是比较朴素的 <code>LIKE</code> 模糊匹配，还没做成熟的搜索方案，这点我诚实说。它会随数据量增长而失效，因为前置通配符用不上索引、会全表扫描。将来要上，路径是先加密索引，量级再大就 <code>ES + Canal</code> 同步——但我不会现在为了简历好看就堆一套 ES，那样引入的同步和一致性成本远大于收益。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          ① 别说"我用 MySQL 全文索引搜商品"，那是笔者的（也是笔记的）能力，不是商品的；② 别说"因为数据少所以不用 ES"——这是<b>规模借口</b>，正确的说法是数据量决定<b>何时</b>触发迁移，而不是拿来当<b>技术选型</b>的理由；③ 别把 <code>LIKE</code> 说成"支持模糊搜索所以够用"，前置 <code>%</code> 的 LIKE 是走不了 B+ 树索引的。
+        </div>
+      </div>
+    </details>
+  </div>
+  <h2><span class="h2n">2.7</span>购物车：京东式设计</h2>
+
+  <div class="card">
+    <h3 class="card-title">MySQL 持久化 + 原子 UPSERT 合并 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：CartServiceImpl.java / CartMapper.xml / t_cart（V1__init.sql:89-101）</p>
+
+    <p><strong>一句话：</strong>购物车是一张普通的 MySQL 表，用 <code>(user_id, sku_id)</code> 唯一键保证"同一用户同一规格只有一行"，重复加购靠 <code>ON DUPLICATE KEY UPDATE</code> 在数据库内原子累加数量。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      购物车像<b>超市的购物篮</b>：你不能把同一瓶牛奶放进篮子两次还占两格——要买两瓶就在那一格里写"2"。唯一键就是"一格一商品"的规则，UPSERT 就是把第二瓶牛奶并进已有那一格的动作，且这个"并进去"的动作是在货架管理员（数据库）手里原子完成的，两个人同时伸手也不会漏加。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：唯一键、累加、封顶</summary>
+      <div class="lvl-body">
+        <p><strong>唯一键是什么：</strong>核实后的答案是 <code>UNIQUE KEY uk_user_sku (user_id, sku_id)</code>——<b>不是主键，也不是 <code>(user_id, product_id)</code></b>。粒度是 SKU：同一商品的不同颜色是两行，同一规格重复加购才合并。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/resources/db/migration/V1__init.sql</span><span class="loc">:92-101</span></div>
+          <pre><code>CREATE TABLE IF NOT EXISTS t_cart (
+    id         BIGINT   NOT NULL AUTO_INCREMENT COMMENT '主键',
+    user_id    BIGINT   NOT NULL COMMENT '用户 id',
+    sku_id     BIGINT   NOT NULL COMMENT 'SKU id',
+    quantity   INT      NOT NULL DEFAULT 1 COMMENT '数量',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_user_sku (user_id, sku_id)
+) ENGINE = InnoDB COMMENT ='购物车表(京东模式，MySQL 持久化)';</code></pre>
+        </div>
+
+        <p><strong>重复加购是"累加数量"还是"新增一行"：</strong>是<b>累加数量</b>，而且是一句 SQL 里原子完成的，没有"先查再改"的竞态窗口：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/src/main/resources/mapper/CartMapper.xml</span><span class="loc">:52-56</span></div>
+          <pre><code>&lt;insert id="upsert" useGeneratedKeys="true" keyProperty="cart.id"&gt;
+    INSERT INTO t_cart (user_id, sku_id, quantity)
+    VALUES (#{cart.userId}, #{cart.skuId}, #{cart.quantity})
+    ON DUPLICATE KEY UPDATE quantity = LEAST(quantity + #{cart.quantity}, #{stockCap})
+&lt;/insert&gt;</code></pre>
+        </div>
+        <p><b>为什么用 UPSERT 而不是"先 select 再 insert/update"：</b>后者在并发下会丢更新（两个线程都读到 quantity=1，都写回 2，实际加了 2 次却成了 2 而不是 3）。UPSERT 把判断与累加收进<b>数据库的一条原子语句</b>，从根上消除竞态。<code>LEAST(..., #{stockCap})</code> 是"库存封顶"——加购数不会超过可售库存（京东式：购物车里点"+"到上限就点不动，但<b>不拒绝这次加购</b>）。</p>
+
+        <p>业务层的边界处理（CartServiceImpl.java）：</p>
+        <ul>
+          <li><b>加购前先卡两道</b>：商品已下架、SKU 已售罄（<code>stock &lt;= 0</code>）直接拒绝——<b>不可购买的东西不进购物车</b>。</li>
+          <li><b>改数量封顶</b>：<code>update</code> 时先查出该条 join 出的实时库存 <code>maxBuyable</code>，目标数量超过它就压到上限；请求本身还有 <code>@Min(1) @Max(99)</code> 的 Bean Validation 兜底。</li>
+          <li><b>删除 / 清空</b>：<code>DELETE ... WHERE id=? AND user_id=?</code>，影响行数为 0 就抛"条目不存在"——归属校验同样做在 SQL 里。</li>
+          <li><b>列表带实时状态</b>：<code>selectItemsByUserId</code> 用 <code>JOIN</code> 把 SKU 价格、库存、商品上下架状态一次查出，<code>CartItemVO</code> 提供 <code>isOffShelf()</code> / <code>isOutOfStock()</code>，前端据此把失效商品置灰分组、<b>只可删除不可结算</b>。</li>
+        </ul>
+
+        <p><strong>诚实边界：</strong>购物车<b>始终留在 MySQL，没有迁 Redis</b>。这是刻意的取舍——京东式购物车要"多端同步 + 持久化 + 失效商品分组"，这正是 MySQL 的强项；Redis Hash 虽快，但持久化与分组查询反而是短板。项目里 <code>Cart.java</code> 的类注释还留着"V3 拟迁 Redis Hash"的旧规划，那<b>没有落地</b>，别照着它讲。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "购物车用 MySQL 持久化，唯一键是 <code>(user_id, sku_id)</code>，所以同一用户同一规格永远只有一行。重复加购不是插新行，而是 <code>ON DUPLICATE KEY UPDATE quantity = LEAST(quantity + ?, stock)</code>——<b>一条原子语句完成累加，没有先查后改的丢更新问题</b>，同时按实时库存封顶。为什么不放 Redis？因为京东式购物车要持久化、多端同步、失效商品分组，那是 MySQL 的强项；Redis 快但不是为这个场景设计的。"<br>
+          <b>追问失效商品：</b>"购物车列表是 JOIN 商品和 SKU 查的，会带出实时上下架状态和库存，前端把下架或超库存的条目置灰分组，只允许删除不允许结算。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          ① 唯一键是 <code>(user_id, sku_id)</code>，<b>不是 product_id</b>，别把"同一商品的多个颜色"说成一行；② 别说"购物车放 Redis 会更快所以应该迁"，本项目明确不迁，且理由充分；③ 别说加购超库存会被"拒绝"——是<b>封顶</b>（加购成功但数量压到可售上限），拒绝只发生在售罄和已下架时；④ 别照搬 <code>Cart.java</code> 里"V3 拟迁 Redis"的旧注释。
+        </div>
+      </div>
+    </details>
+  </div>
+  <h2><span class="h2n">2.8</span>商品详情缓存（一句话带过）</h2>
+
+  <div class="card">
+    <p><strong>这里挂了缓存三兄弟。</strong>商品详情是典型的"读多写少"，所以在 <code>ProductCacheService</code> 里做了完整防护：空值缓存防穿透、互斥锁重建防击穿、TTL 随机抖动防雪崩；接线位置刻意放在 Controller 层（<code>ProductRestController</code>），避开与 <code>ProductService</code> 的构造器循环依赖。机制逐层拆解、逐行代码、以及为什么不用 <code>@Cacheable</code>，本页不展开——<b>详见 <a href="05-高并发与可靠性.html">05 高并发与可靠性</a></b>。这里只记住一句话：<b>"商品详情是缓存三兄弟在本项目里唯一也是最典型的落地场景。"</b></p>
+  </div>
+
+  <h2><span class="h2n">2.9</span>面试话术</h2>
+
+  <div class="callout talk">
+    <span class="ct">30 秒版本 · "用户鉴权怎么做的"</span>
+    "认证我用 Sa-Token。注册时密码用 BCrypt 加密存哈希，不是明文；登录校验通过后 <code>StpUtil.login(userId)</code> 签发 Token，前端放 <code>Authorization</code> 头，后端的 Sa-Token 拦截器对 <code>/api/**</code> 默认全部拦截，只放行登录注册、支付回调、内部接口三类——这是 fail-closed 的姿态，避免漏接口。<br>
+    业务代码不解析 Token，要当前用户就调 <code>StpUtil.getLoginIdAsLong()</code>。选无状态 Token 是因为集群部署不用做会话粘滞；选 Sa-Token 而不是 JWT，是因为它服务端有映射，<b>可以主动踢人</b>。所有涉及用户数据的操作，归属校验都带 <code>AND user_id = ?</code>，越权返回 404 而不是 403。"
+  </div>
+
+  <div class="callout warn">
+    <span class="ct">商品搜索别吹</span>
+    被问到商品搜索时，<b>这一条最容易翻车</b>：<br>
+    不要说"我们支持全文检索" —— 商品搜索当前就是 <code>LIKE CONCAT('%', keyword, '%')</code>，<b>没有 ES、没有全文索引</b>，前置通配符连索引都走不上。全文检索（ngram）用在了<b>笔记</b>上，不是商品。<br>
+    也不要说"因为数据少所以不用 ES" —— 这是<b>规模借口</b>。正确的口径是：<b>数据量是触发条件的标尺，不是选型的理由</b>。诚实说"还没做成熟搜索方案"，然后给出清晰的迁移路径（加密索引 → ES + Canal 同步），把"没做"讲成"知道什么时候该做"，反而是加分项。
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+
+</main>
+
+<script src="_assets/app.js"></script>
+</body>
+</html>

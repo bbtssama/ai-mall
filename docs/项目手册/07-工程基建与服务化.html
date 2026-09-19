@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07 工程基建与服务化 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="07">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+
+<main class="main">
+
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>三 · 扩展与了解层</b></div>
+    <h1>07 · 工程基建与服务化</h1>
+    <p class="lede">这页横跨两个版本，分两半。前半是<b>工程素养</b>（V1.5）：数据库版本化、日志串成一根线、文件能换地方存、异步不炸、测试守住钱——让项目从"能跑"变成"能上线"。后半是<b>服务化</b>（V4）：项目只把 AI 拆成了一个独立服务，主体仍是单体。看完你要能讲清每件事"不做会怎样"，以及"为什么只拆这一个"。</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 25 分钟</span>
+      <span class="badge badge-star">面试权重 ★★</span>
+      <span class="badge badge-gray">4 个迁移 / 6 个测试类 / 网关 4 条路由</span>
+    </div>
+  </header>
+
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START  以下为本页正文，由子代理撰写
+       ==================================================================== -->
+
+  <h2><span class="h2n">上半</span>工程基建（V1.5）：从"能跑"到"能上线"</h2>
+
+  <div class="callout brand"><span class="ct">先记住这一层的定位</span>V1.5 <b>不产出任何新功能</b>，产出的是<b>可信度</b>。它的每一块都在回答："这个项目交给别人、或者出线上事故时，会发生什么？"面试官问这一层，不是想看你会用什么组件，而是想看你是不是只会写 CRUD。</div>
+
+  <!-- ================= 7.1 ================= -->
+  <h2><span class="h2n">7.1</span>Flyway：数据库版本管理</h2>
+
+  <div class="card">
+    <h3 class="card-title">Flyway 表结构版本管理 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：backend/src/main/resources/db/migration/（4 个文件）</p>
+
+    <p><strong>一句话：</strong>把"建表"从"一个手工执行的脚本"变成"一串有版本号、必须按顺序执行、执行记录可查的迁移文件"。没有它，"这个字段到底加没加"只能靠口头约定——多人协作必炸。</p>
+    <p>手工 <code>init.sql</code> 的三宗罪：<b>漂移</b>（各自手工执行，脚本和真实库越差越远）、<b>不可回溯</b>（字段为什么从 VARCHAR(50) 改成 (100)？谁改的？无人知道）、<b>新环境搭不起来</b>（脚本是"最终态快照"，而线上库是三个版本前建的，中间的 ALTER 没有记录）。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像游戏的<b>存档系统</b>：每过一关自动存一次档（执行迁移并记录版本号）。下次进入游戏时逐个比对"哪几关还没打"，只补打缺的那几关，而不是把整局从头再打一遍。</div>
+
+    <details class="lvl mech"><summary>机制与代码：版本表 + 校验和 + 顺序执行</summary>
+      <div class="lvl-body">
+        <p>启动时 Flyway 做四件事：<b>①</b> 查 <code>flyway_schema_history</code> 表（没有就建）；<b>②</b> 扫描 migration 目录，算出哪些版本还没执行；<b>③</b> 按版本号顺序执行，成功后插一行记录（版本号、描述、执行时间、checksum）；<b>④</b> 全部执行完才放行应用启动——<b>启动即校验，结构永远与代码同步</b>。</p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th style="width:250px">迁移文件</th><th>内容</th></tr></thead>
+            <tbody>
+              <tr><td><code>V1__init.sql</code></td><td>V1 的 10 张表初始结构（文件头写着"本文件是数据库结构的唯一权威来源"）</td></tr>
+              <tr><td><code>V2__content_and_rag.sql</code></td><td>内容社区 + 审核流水 + RAG 知识库（含 ngram 全文索引）</td></tr>
+              <tr><td><code>V3__pay_and_drop.sql</code></td><td>支付 + 限量发售</td></tr>
+              <tr><td><code>V4__payment_order_unique.sql</code></td><td>给 <code>t_payment.order_id</code> 加唯一索引（"一订单一活单"）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V1__init.sql</span><span class="loc">:7-13</span></div>
+          <pre><code>-- 迁移约定：
+--   1. 只做增量，不修改已执行的迁移文件（已执行文件的 checksum 会被校验）。
+--      要改表结构请新增 V2__xxx.sql、V3__xxx.sql……
+--   3. 不使用 DROP TABLE —— 迁移脚本必须是"向前"的，删表另写迁移。
+--   4. 存量库接入：application.yml 已配置 baseline-on-migrate=true，
+--      非空库会被自动"基线化"到版本 1（把 V1 视为已执行），不会重复建表。</code></pre>
+        </div>
+        <p>纪律四条：<b>只增不改</b>（改了已执行的文件，启动时 checksum 校验失败直接拒绝启动）；<b>改表 = 新迁移</b>；<b>命名</b> <code>V&lt;版本&gt;__&lt;描述&gt;.sql</code>；<b>失败处理</b>（迁移执行到一半会留 <code>success=0</code> 记录，修复 SQL 后删掉那行再启动，因为 DDL 多数不支持回滚）。</p>
+      </div>
+    </details>
+
+    <h4>关键决策：<code>baseline-on-migrate</code>——存量库怎么"追认"</h4>
+    <p>接入 Flyway 时项目库里<b>已经有表了</b>。这时直接跑会报错：<b>非空库且没有 baseline 记录，Flyway 不知道这个库处在什么版本，不敢乱动</b>。这是本项目最值得讲的一个接入决策——用一个开关，让<b>新库自动建表、老库自动基线化</b>，两条路都能走通。</p>
+    <div class="callout ok"><span class="ct">一句话讲透</span><code>baseline-on-migrate=true</code> 的意思是：遇到非空的存量库时不报错，先给它<b>打一个基线</b>（把某个版本"追认"为已执行），再从下一个版本接着走。本项目按 <code>V1__init.sql</code> 文件头的口径<b>基线化到版本 1</b>——把 V1 视为已执行，存量库不会重复建表；全新库则从零正常建表。<br>补充一种等价写法（V1.5 详解正文写的是这一种）：<code>baseline-version=0</code> + 依赖 V1 迁移本身幂等——因为所有建表都写了 <code>CREATE TABLE IF NOT EXISTS</code>，重放也无害。<b>两条路的共同点都是打开 <code>baseline-on-migrate</code></b>，这才是关键决策。</div>
+
+    <div class="callout danger"><span class="ct">历史教训：单一权威源</span>项目里曾经有一个 <code>sql/init.sql</code> 便利脚本，三个问题很典型：<b>只建 8/24 张表</b>（严重残缺）、<b>用 <code>DROP TABLE</code></b>（跑一次就把数据清空）、<b>注释口径和迁移文件相反</b>。这份脚本已于 <b>2026-09-19 删除</b>，现在全项目只有 <code>db/migration/</code> 一处建表来源。<b>这个故事的价值不在脚本本身，而在"单一权威源"</b>：同一件事有两个来源，就一定会有一次用错那个旧的。<br><span class="tag">读代码时的小发现</span> <code>V1__init.sql</code> 文件头还留着"sql/init.sql 保留仅作便利脚本"的旧措辞——文件已删，这句注释还没同步。真实项目里这种残留很常见。</div>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"我用 Flyway 把表结构纳入版本管理，核心三条：迁移文件<b>只增不改</b>，改了已执行的文件 checksum 校验会拒绝启动；要改结构就新增一个迁移；启动时按版本号顺序补齐没执行过的，全部成功才放行应用。<b>最关键的接入决策是 <code>baseline-on-migrate</code></b>——我的库接入时已经有表了，非空库没有基线 Flyway 会拒绝执行，打开这个开关后新库自动建表、老库自动基线化。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1.</b> 别说"Flyway 能回滚数据库"，DDL 多数不支持回滚。<b>2.</b> 那个 <code>sql/init.sql</code> <b>已经删了</b>，别再说"我们还有一份便利脚本"。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.2 ================= -->
+  <h2><span class="h2n">7.2</span>traceId 全链路：日志从"一团乱麻"到"一根线"</h2>
+
+  <div class="card">
+    <h3 class="card-title">traceId 三件套：Filter + MDC + TaskDecorator <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：common/trace/TraceIdFilter.java · TraceIdContext.java · MdcTaskDecorator.java · logback-spring.xml</p>
+
+    <p><strong>一句话：</strong>给每个请求生成一个 id，让这次请求打出的所有日志都带上它——出事故时 <code>grep</code> 这个 id 就能把一次请求的完整现场（入参、SQL、AI 调用、异常堆栈）一根线捞出来。没有它，几百并发下日志互相交织，你连"哪几条属于同一个请求"都分不清。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像在快递包裹上贴一个<b>唯一运单号</b>。中转站、分拨中心、派件网点每经一手都盖个章，但运单号不变——出问题顺着号就能把全程轨迹串起来。MDC 就是那个"贴号"的动作，而且贴在<b>线程</b>身上，不需要在每个方法签名里传参。</div>
+
+    <details class="lvl mech"><summary>机制与代码：三件套各自干什么</summary>
+      <div class="lvl-body">
+        <div class="flow">
+          <div class="flow-node"><span class="n">① TraceIdFilter</span><span class="d">入口：生成/沿用 traceId<br>存 MDC + 回写响应头 + finally 清理</span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">② TraceIdContext</span><span class="d">基于 SLF4J MDC 的工具类<br>底层是 ThreadLocal</span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">③ logback pattern</span><span class="d">%X{traceId} 把值打进每条日志<br>不写这一步前面全白干</span></div>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/trace/TraceIdFilter.java</span><span class="loc">:40-51</span></div>
+          <pre><code>String incoming = request.getHeader(HEADER_TRACE_ID);
+// 上游（网关/其他服务）传了就沿用，否则自己生成 —— 为 V4 微服务链路追踪预留
+String traceId = StringUtils.hasText(incoming) ? incoming : TraceIdContext.generate();
+
+TraceIdContext.set(traceId);
+response.setHeader(HEADER_TRACE_ID, traceId);
+try {
+    filterChain.doFilter(request, response);
+} finally {
+    // 必须清理：Tomcat 线程池复用，不清会串号
+    TraceIdContext.clear();
+}</code></pre>
+        </div>
+        <p>三个设计点：<b>用 Filter 不用 Interceptor</b>（Filter 在 Servlet 容器层，早于 DispatcherServlet，连被拦截器拦掉的 401 请求也有 traceId）；<b>响应头回传</b>（用户报障时贴出 <code>X-Trace-Id</code> 就能定位）；<b>finally 必须 clear</b>（Tomcat 线程池复用线程，不清理会把上一个请求的 traceId 带到下一个请求——串号比没有更糟，会误导排查方向）。</p>
+        <p>traceId 生成得很短：16 位十六进制（<code>TraceIdContext.java:34</code>），够唯一且不占日志篇幅。logback 用 <code>%X{traceId:-N/A}</code> 取出来（<code>logback-spring.xml:23,27</code>），"没有值时打 N/A"是为了不让日志列错位。</p>
+      </div>
+    </details>
+
+    <h4>本章最重：异步线程里 traceId 丢了</h4>
+    <p><b>事故现场</b>：笔记发布走线程池做 AI 审核，日志里 Web 线程那半边有 traceId，池线程那半边什么都没有——一次请求的日志被切成两半，等于白做。注意它是<b>静默的</b>：不报错，只是那一截日志没有标识。</p>
+    <p><b>根因：</b>MDC 底层是 <b>ThreadLocal</b>，天然<b>线程隔离</b>。请求线程 A 往自己的储物柜里放了 traceId，线程池的线程 B 打开的是<b>自己的</b>柜子——空的。这不是 bug，隔离正是 ThreadLocal 存在的意义。</p>
+    <p><b>解法：</b>线程池的"任务包装器" <code>TaskDecorator</code>——提交时拍照、执行时还原、执行完清理。</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">common/trace/MdcTaskDecorator.java</span><span class="loc">:41-59</span></div>
+      <pre><code>public Runnable decorate(Runnable runnable) {
+    // 在【提交方线程】拍下当前 MDC 快照
+    Map&lt;String, String&gt; snapshot = MDC.getCopyOfContextMap();
+
+    return () -&gt; {
+        try {
+            // 在【执行方线程】还原快照
+            if (snapshot != null) {
+                MDC.setContextMap(snapshot);
+            } else {
+                MDC.clear();
+            }
+            runnable.run();
+        } finally {
+            // 归还线程池前必须清理，避免串号
+            MDC.clear();
+        }
+    };
+}</code></pre>
+    </div>
+    <div class="callout warn"><span class="ct">为什么不用 InheritableThreadLocal</span>Logback 支持把 MDC 配成 InheritableThreadLocal，子线程<b>创建时</b>会继承父线程的值。但<b>线程池的线程是提前创建好、长期复用的</b>——创建它们时父线程里还没有 traceId，"继承了个寂寞"。所以线程池场景<b>必须用装饰器手动传递</b>。</div>
+    <div class="callout"><span class="ct">Actuator：给运维一双眼睛</span><code>/actuator/health</code> 聚合各组件（db、redis、diskSpace…）的探活结果给 UP/DOWN，配 <code>probes.enabled</code> 后额外提供 <b>liveness（存活）</b>与 <b>readiness（就绪）</b>探针。<b>liveness 失败 → 重启容器</b>（进程卡死，重启能救）；<b>readiness 失败 → 摘流量但别重启</b>（启动中或依赖暂时不可用，重启没用）。两者搞反的后果：用 liveness 去探依赖，数据库抖一下就会全站容器连环重启（雪崩）。</div>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"traceId 是一套三件套：入口用 <code>TraceIdFilter</code> 生成或沿用 traceId 存进 <code>MDC</code> 并回写响应头；logback 的 pattern 用 <code>%X{traceId}</code> 把它打进每条日志。<b>最容易被问的是异步丢 traceId</b>——MDC 底层是 ThreadLocal，切线程就丢，我用 <code>TaskDecorator</code> 在提交时快照、执行时还原、finally 清理。清理很关键，线程池会复用线程，不清理会串号。"</div>
+        <div class="callout warn"><span class="ct">别说错</span>当前是<b>单机 + HTTP 头透传</b>，不是真正的分布式追踪（那要有 span、父子关系、采样，需要 OpenTelemetry + Jaeger/SkyWalking）。另外 <code>@Scheduled</code> 走的是另一套 <code>TaskScheduler</code>，本项目<b>没给它挂 decorator</b>——别把"全链路"讲成一点不漏。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.3 ================= -->
+  <h2><span class="h2n">7.3</span>对象存储抽象：本地 / MinIO 双实现</h2>
+
+  <div class="card">
+    <h3 class="card-title">StorageService 抽象 + 上传安全三件套 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：common/storage/（7 个文件）</p>
+
+    <p><strong>一句话：</strong>业务代码只依赖 <code>StorageService</code> 接口，不关心文件落在本地磁盘还是 MinIO。<b>换存储只改一行配置，业务零改动。</b></p>
+    <p>为什么不能一直本地存？本地磁盘存图片有三宗罪：<b>多实例部署必炸</b>（上传打到实例 A，读请求打到实例 B，直接 404）；<b>容器化即丢失</b>（容器重启，没挂卷则文件全没）；<b>无法做 CDN 与权限控制</b>。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像给家里装<b>标准插座</b>，而不是把电器焊在电线上。插座规格（接口）不变，后面接市电还是接发电机（本地还是 MinIO），电器都不用改。</div>
+
+    <details class="lvl mech"><summary>机制与代码：一个工厂方法选实现 + MinIO 懒初始化</summary>
+      <div class="lvl-body">
+        <p><code>StorageConfig</code> 用一个工厂方法显式二选一：配置 <code>aimall.storage.type=minio</code> 就装配 <code>MinioStorageService</code>，<b>其他任何取值（包括没配）都走本地实现</b>——"未配置 = 本地"的兜底语义非常明确，保证零依赖能启动。</p>
+        <p><b>MinIO 的懒初始化</b>：构造函数里<b>不连</b> MinIO，等第一次真正上传时才建客户端（<code>MinioStorageService.java:86-103</code>，volatile + synchronized 双重检查锁）。意义是——<b>配了 minio 但没起 MinIO 容器，应用照样能启动</b>，只有"上传"这一个操作会失败。这是"可降级"哲学在存储层的落地。</p>
+        <p><b>预签名 URL</b>（<code>MinioStorageService.java:131-146</code>）：配了 <code>urlPrefix</code>（如 CDN 域名）就直接拼 URL；没配则生成<b>预签名 URL</b>（有效期 7 天）。桶可以完全私有，靠签名临时授权访问——比"把桶设成公开可读、任人拖库"安全得多。另外 <code>/files/**</code> 的静态映射<b>只映射 uploads 一个目录</b>，不暴露整块磁盘（<code>StorageConfig.java:40-56</code>）。</p>
+      </div>
+    </details>
+
+    <h4>上传安全三件套（红线）</h4>
+    <p>上传接口是<b>公网写入点</b>，攻击面最大。三件套缺一不可，全部在服务端做——<b>前端校验是体验，后端校验才是安全</b>。</p>
+    <div class="redline">
+      <b>1. MIME 白名单（不是黑名单）</b>：只放过 <code>image/jpeg</code> / <code>png</code> / <code>webp</code> / <code>gif</code>。黑名单永远列不全（漏一个 <code>.html</code> 就可能造成<b>存储型 XSS</b>——用户上传恶意页面，通过你的域名打开就能窃取同域 Cookie）；白名单"不在名单里 = 拒绝"，天然完备。<br>
+      <b>2. UUID 重命名（防路径穿越 + 防覆盖）</b>：完全忽略用户上传的原始文件名，用 <code>UUID + 日期目录</code> 生成对象键。用户传 <code>../../etc/cron.d/evil</code> 也没用，因为那个名字根本没参与拼路径。<br>
+      <b>3. 大小限制（防 DoS）</b>：默认 10MB。不限制的话，一个几十 GB 的文件就能把磁盘写满。
+    </div>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">common/storage/StorageService.java</span><span class="loc">:58-63</span></div>
+      <pre><code>default String newObjectKey(String directory, String originalFilename) {
+    String dir = (directory == null || directory.isBlank()) ? "common" : directory;
+    String datePath = LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
+    String name = UUID.randomUUID().toString().replace("-", "") + extensionOf(originalFilename);
+    return dir + "/" + datePath + "/" + name;
+}</code></pre>
+    </div>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">common/storage/FileRestController.java</span><span class="loc">:65-77</span></div>
+      <pre><code>private void validate(MultipartFile file) {
+    if (file == null || file.isEmpty()) {
+        throw new BusinessException(ResultCode.BAD_REQUEST, "文件不能为空");
+    }
+    if (file.getSize() &gt; properties.getMaxSizeBytes()) {
+        throw new BusinessException(ResultCode.BAD_REQUEST, "文件超过大小限制……");
+    }
+    String contentType = file.getContentType();
+    if (contentType == null || !properties.getAllowedContentTypes().contains(contentType)) {
+        throw new BusinessException(ResultCode.BAD_REQUEST, "不支持的文件类型：" + contentType);
+    }
+}</code></pre>
+    </div>
+    <p>一句话总纲：<b>上传的每个文件都是不可信输入。</b></p>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"文件存储我抽了一个 <code>StorageService</code> 接口，本地和 MinIO 两个实现，配置一行切换。默认走本地，因为要保证<b>零依赖能启动</b>——面试官 clone 下来不装 MinIO 也能跑。上传安全三件套缺一不可：<b>MIME 白名单</b>防存储型 XSS，<b>UUID 重命名</b>防路径穿越和覆盖，<b>大小限制</b>防磁盘打满。另外 MinIO 客户端是<b>懒初始化</b>的，配了但没起容器不影响应用启动。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1.</b> 别说"我们做了文件内容/魔法字节校验"——<code>FileRestController</code> 校验的是扩展名与 Content-Type，<b>改后缀、伪造 Content-Type 是有可能绕过的</b>，把"真实内容嗅探"讲成已做就是吹牛。<b>2.</b> 别把"本地存储"讲成"我们没用对象存储"——抽象层已就位，只是默认实现选本地。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.4 ================= -->
+  <h2><span class="h2n">7.4</span>线程池：从 Boot 默认的 OOM 陷阱到有界 + 反压</h2>
+
+  <div class="card">
+    <h3 class="card-title">有界队列 + CallerRuns 背压 + MDC 传递 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：config/AsyncConfig.java:39-53</p>
+
+    <p><strong>一句话：</strong>用 <code>@Async</code> 但不配线程池，用的就是 Spring Boot 默认的 <code>applicationTaskExecutor</code>——<b>它的队列容量是 <code>Integer.MAX_VALUE</code></b>。后果是一条静默的死亡链：</p>
+    <div class="flow vertical">
+      <div class="flow-node"><span class="n">提交速度 &gt; 执行速度</span><span class="d">任务开始排队</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">队列无限增长</span><span class="d">永远触发不到拒绝策略</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">堆内存耗尽 → OOM</span><span class="d">全站挂</span></div>
+    </div>
+    <p>最阴险的是它<b>不报错、不打日志</b>——直到 OOM 前一刻，系统看起来"一切正常"。所以生产代码必须显式配置有界池。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>无界队列像<b>一家不设候位上限的餐厅</b>：来多少客人都往里放，走廊站满、大堂站满，最后整栋楼塌了。有界队列是"门口最多排 200 人，满了就让新来的客人自己去后厨帮忙"——压力立刻传回去，门口自然就不挤了。</div>
+
+    <details class="lvl mech"><summary>机制与代码：逐参数精读</summary>
+      <div class="lvl-body">
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">config/AsyncConfig.java</span><span class="loc">:39-53</span></div>
+          <pre><code>@Bean(name = {"taskExecutor", "appExecutor"})
+public ThreadPoolTaskExecutor taskExecutor() {
+    ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+    executor.setCorePoolSize(4);
+    executor.setMaxPoolSize(16);
+    executor.setQueueCapacity(200);
+    executor.setThreadNamePrefix("aimall-async-");
+    // 关键：把 MDC（含 traceId）从提交线程传递到执行线程
+    executor.setTaskDecorator(new MdcTaskDecorator());
+    executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+    executor.setWaitForTasksToCompleteOnShutdown(true);
+    executor.setAwaitTerminationSeconds(10);
+    executor.initialize();
+    return executor;
+}</code></pre>
+        </div>
+        <p><b>4/16 的依据</b>：本应用是 <b>IO 密集型</b>（查库、调 AI、写文件），线程大部分时间在等 IO，所以线程数<b>可以大于 CPU 核数</b>——用线程切换的成本换吞吐。经验起点是核数 × 2 ~ × 4，压测再调。</p>
+        <p><b>队列 200</b>：给突发留缓冲但不无限，超出即触发拒绝策略。<b>宁可快速降速，也不要无限堆积。</b></p>
+        <p><b>CallerRunsPolicy</b>：队列满时<b>让提交任务的线程自己跑这个任务</b>。Web 线程被迫去跑任务，处理后续请求的速度自然变慢，提交速率于是自动下降——这叫<b>反压（backpressure）</b>：把压力传回上游让上游自然减速，而<b>不是丢任务</b>（对比 <code>AbortPolicy</code> 抛异常快速失败、<code>DiscardPolicy</code> 静默丢弃）。</p>
+        <p><b>bean 名为什么叫 <code>taskExecutor</code></b>：<code>@Async</code> 默认就按这个名字找执行器，所以业务代码写 <code>@Async</code> 不用带参数就能用上这个带 MDC 传递的池。<b>优雅停机</b>两个参数让应用关闭时先跑完手里的活（等 10 秒），避免"发版瞬间丢一批审核任务"。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"<code>@Async</code> 不配线程池时用的是 Boot 默认执行器，<b>队列是无界的</b>——永远触发不到拒绝策略，任务堆积直到 OOM，而且整个过程不报错。我显式配了有界池：核心 4、最大 16、<b>队列 200</b>，拒绝策略用 <b>CallerRuns</b>。它的含义是队列满了让提交任务的线程自己跑——这是一种<b>背压</b>，把压力传回上游让它自然减速，而不是把任务丢掉。池上还挂了 TaskDecorator 传 traceId，并配了优雅停机。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1.</b> 别把 CallerRuns 说成"降级"或"失败"——它是<b>主动减速</b>，任务照样被执行。<b>2.</b> 别把线程数说成"核数 + 1"——那是 CPU 密集型的公式，IO 密集型可以更大。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.5 ================= -->
+  <h2><span class="h2n">7.5</span>单元测试：守住钱和库存</h2>
+
+  <div class="card">
+    <h3 class="card-title">26 个用例 / 6 个测试类 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：backend/src/test/java/ 下 6 个测试类</p>
+
+    <p><strong>一句话：</strong>测试的优先级 = <b>出事故的代价</b>。第一批测试不测页面、不测样式，只测四类"错了就是资损 / 安全 / 排查灾难"的地方：<b>钱、门、文件、跨线程</b>。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像家里的<b>漏电保护器</b>——你不会给每个插座都装，但一定会装在总闸和最危险的那几个回路上。测试精力也是这么分配的：按事故代价，不按覆盖率数字。</div>
+
+    <details class="lvl mech"><summary>机制与代码：6 个测试类各守什么</summary>
+      <div class="lvl-body">
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th style="width:290px">测试类</th><th style="width:60px">用例</th><th>守的是什么事故</th></tr></thead>
+            <tbody>
+              <tr><td><code>OrderServiceImplTest</code></td><td>5</td><td>扣库存 CAS 返回 0 / 状态机取消 / <b>越权 404</b>（钱和库存）</td></tr>
+              <tr><td><code>PaymentServiceTest</code></td><td>5</td><td>验签失败 / 重复回调幂等 / 金额核对 / 并发竞态</td></tr>
+              <tr><td><code>LocalStorageServiceTest</code></td><td>5</td><td>上传安全（objectKey 不含原始文件名 / 不覆盖 / 删除幂等）</td></tr>
+              <tr><td><code>NoteGenerateServiceParseTest</code></td><td>6</td><td>AI 输出解析（模型返回不可信）</td></tr>
+              <tr><td><code>MdcTaskDecoratorTest</code></td><td>2</td><td><b>traceId 跨线程不丢、不串号</b></td></tr>
+              <tr><td><code>PageQueryTest</code></td><td>3</td><td>分页参数边界（offset 计算，第一页从 0 开始）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>测试方法名本身就是一句事故描述，失败时一眼知道是哪类事故没守住。例如 <code>OrderServiceImplTest.java:85</code>：<code>create_whenDeductStockReturnsZero_shouldThrowAndNeverInsertOrder</code>——扣库存返回 0 时必须抛异常，并且<b>绝不能</b>生成订单（<code>verify(orderMapper, never()).insert(any())</code>）。这条断言守的是"库存没扣成功却生成了订单"的资损场景。</p>
+      </div>
+    </details>
+
+    <h4>关键技巧：<code>mockStatic</code> 钉住 <code>StpUtil</code></h4>
+    <p>业务代码里到处是 <code>StpUtil.getLoginIdAsLong()</code>（Sa-Token 的<b>静态调用</b>），而单测里没有登录态。普通的 <code>@Mock</code> 注入<b>进不去静态调用</b>——这是最容易卡住的地方。解法是 <code>Mockito.mockStatic</code>：</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImplTest.java</span><span class="loc">:87-88</span></div>
+      <pre><code>try (MockedStatic&lt;StpUtil&gt; stp = Mockito.mockStatic(StpUtil.class)) {
+    stp.when(StpUtil::getLoginIdAsLong).thenReturn(USER_ID);</code></pre>
+    </div>
+    <p><b>为什么叫"钉"：</b><code>mockStatic</code> 只在 <code>try-with-resources</code> 作用域内生效，出域自动卸载。静态 mock 是<b>全局副作用</b>，必须严格限定作用域，否则会污染其它测试。有了它，Service 层测试<b>不需要启动 Spring 容器、不需要走登录流程</b>。</p>
+    <div class="callout ok"><span class="ct">纯内存原则</span><code>mvn test</code> 不需要 MySQL / Redis / RabbitMQ——Mapper 被 mock、<code>StpUtil</code> 被钉、文件用 <code>@TempDir</code>（JUnit 自动建临时目录、测完自动删），所以 CI 里能跑、毫秒级。<b>测试依赖外部环境 = 测试不可靠</b>：环境挂了测试也红，你就分不清是代码错还是环境错。</div>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"我一共有 26 个用例、6 个测试类。写哪些不是按覆盖率来的，是按<b>事故代价</b>：下单扣库存、支付幂等、越权、上传安全、跨线程 traceId——这些错了是资损或安全事故。技术上有一个点值得一提：Sa-Token 的 <code>StpUtil</code> 是静态方法，普通 mock 注入不进去，我用 <code>Mockito.mockStatic</code> 在 try-with-resources 里把它钉住，出作用域自动卸载。整套测试是纯内存的，不连数据库，所以 CI 里能跑。"</div>
+        <div class="callout warn"><span class="ct">别说错（这条是加分项）</span>当前是<b>纯单元测试</b>，Mapper 被 mock 了，所以 <b>MyBatis XML 里 SQL 的正确性是盲区</b>——列名拼错、WHERE 漏条件，单测全绿但线上必炸。主动说"我的测试覆盖不到 SQL，下一步是 Testcontainers 真起一个 MySQL 容器跑集成测试"，比只说"我写了 26 个测试"高级得多。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.6 ================= -->
+  <h2><span class="h2n">7.6</span>Docker Compose 与 CI</h2>
+
+  <div class="card">
+    <h3 class="card-title">一键起依赖 + 每次推送自动验证 <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应文件：docker-compose.yml · .github/workflows/ci.yml（40 行）</p>
+
+    <p><strong>一句话：</strong><code>docker-compose.yml</code> 把四种依赖（mysql / redis / rabbitmq / minio，见 README.md:44）写成一个文件，新人（或面试官）<code>docker compose up -d</code> 一条命令起全部环境——<b>"我机器上能跑"从借口变成可复现的脚本</b>。CI 则是"合并前必须绿"的门禁。</p>
+    <div class="redline">
+      <b>诚实标注：本机没有 Docker。</b>这份 <code>docker-compose.yml</code> 是<b>给有 Docker 的机器用的参考</b>；项目的实际运行环境是：MySQL / Nacos 在 <code>192.168.6.102</code>，其余服务跑在本机 Windows 服务上。<b>不要把它讲成"我们的部署方式就是 Docker Compose"。</b>
+    </div>
+
+    <details class="lvl mech"><summary>机制与代码：CI 做了什么</summary>
+      <div class="lvl-body">
+        <p><code>.github/workflows/ci.yml</code>：<code>push</code> / <code>pull_request</code> 到主分支时触发 → checkout → 装 JDK 17（<code>cache: maven</code> 缓存 <code>~/.m2</code>，省掉几分钟依赖下载）→ 在 <code>./backend</code> 下跑 <code>mvn -B clean verify</code> → 只在失败时上传 surefire 报告当证据。</p>
+        <p>三个设计点：<b>①</b> 为什么敢给个占位 key（<code>DEEPSEEK_API_KEY: dummy-key-for-ci</code>）——因为单测纯内存，不启动上下文、不连库、不调真实 AI，这是 7.5 那条纪律的直接回报；<b>②</b> 用 <code>verify</code> 而不是 <code>test</code>——走完整生命周期（编译 → 测试 → 打包 → 校验），比只跑测试更接近真实发布；<b>③</b> PR 上跑才是真正的门禁，坏代码进不了主干。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"CI 的价值一句话：把'我本地能跑'变成'任何人 clone 下来都能跑'，并在合并前拦住回归。我的 <code>ci.yml</code> 只有 40 行，push 和 PR 时自动 checkout、装 JDK、跑 <code>mvn clean verify</code>。因为单测是纯内存的，CI 里不需要 MySQL 也不需要真实密钥，给个占位 key 就能跑通。"</div>
+        <div class="callout warn"><span class="ct">别说错</span>当前 CI <b>只跑后端</b>——前端（npm build）和 ai-service / gateway 两个模块都还没纳入；生产还应有制品发布（打镜像）、依赖漏洞与安全扫描。主动说清"还缺什么"，比含糊过去可信。</div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">下半</span>服务化（V4）：只拆了一个 AI 服务</h2>
+
+  <div class="callout danger"><span class="ct">本页最重要的一条口径</span><b>不要说"我们做的是微服务架构"。</b>准确说法是：<b>项目只把 AI 能力拆成了一个独立服务（ai-service），主体业务保持单体。</b>面试官真正想听的不是"你用了什么组件"，而是"<b>你为什么只拆这一个</b>"。能讲出"不做什么"和"为什么不做"，比堆五个服务高级得多。</div>
+
+  <!-- ================= 7.7 ================= -->
+  <h2><span class="h2n">7.7</span>为什么只拆 AI 服务</h2>
+
+  <div class="card">
+    <h3 class="card-title">拆 AI 的五条理由 + 为什么不拆其余 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应文档：docs/版本详解/V4服务化详解.md 第 2 章</p>
+
+    <p><strong>一句话：</strong>V1~V3 时用户 / 商品 / 订单 / 内容 / AI 全在一个 Spring Boot 进程里——这本身<b>没有任何问题</b>（单体被妖魔化了）。但有一个结构性隐患：<b>AI 调用要 5~30 秒，占着 Tomcat 线程不放，AI 一慢，全站排队。</b></p>
+    <div class="callout analogy"><span class="ct">打个比方</span>一家餐厅，前厅点餐、后厨做菜、收银结账都在一个铺子里。做一道要 30 分钟的菜（AI），后厨占住了人手，前厅点餐也得排队。<b>注意：不是把餐厅拆成三家公司（那是过度拆分），而是只把"最慢的那件事"外包给中央厨房</b>——中央厨房着火了，前厅照常营业，只是暂时没有那道菜。</div>
+
+    <h4>五条理由（逐条背）</h4>
+    <ol class="steps">
+      <li><b>耗时差异</b>：AI 调用是秒级到几十秒，普通接口是毫秒级。放在一起，AI 请求会占满 Tomcat 线程池，下单接口跟着排队。</li>
+      <li><b>故障隔离</b>：模型超时、限流、供应商挂了，<b>只有"AI 助手"不可用</b>，下单 / 浏览 / 支付照常。</li>
+      <li><b>独立扩容</b>：AI 是成本密集型（按 token 计费），需要独立扩缩容与独立限流。</li>
+      <li><b>密钥隔离</b>：API Key 只存在于 ai-service，<b>泄露半径最小</b>——业务服务永远接触不到密钥。</li>
+      <li><b>模型可替换</b>：换模型、换供应商只改这一个服务，业务侧零感知。</li>
+    </ol>
+
+    <h4>反向论证：为什么不把订单、商品也拆了（面试加分杀器）</h4>
+    <p>每个候选服务都要过一遍"砍掉它会怎样"，<b>有一条站不住就不拆</b>：</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:170px">候选</th><th>不拆的话会怎样（拆的代价）</th><th style="width:90px">结论</th></tr></thead>
+        <tbody>
+          <tr><td><b>AI 服务</b></td><td>AI 慢会占满线程池导致全站排队；模型挂会导致全站挂；密钥与业务同进程泄露面大</td><td><span class="badge badge-master">拆</span></td></tr>
+          <tr><td>用户服务</td><td>用户表被所有业务 join，拆开后每次查用户都要多一次网络往返</td><td><span class="badge badge-know">不拆</span></td></tr>
+          <tr><td>商品 + 订单</td><td>下单要在<b>同一个事务</b>里锁库存、建订单、清购物车——拆开就要引入分布式事务</td><td><span class="badge badge-know">不拆</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>拆开订单会多出三样复杂度：<b>分布式事务</b>（本地 <code>@Transactional</code> 直接失效，要么 Seata、要么本地消息表）、<b>网络开销与故障面</b>（每次内部调用都是一次网络往返，多一倍可挂的点）、<b>排障复杂</b>（一个请求穿三个进程，没有链路追踪就是灾难）。</p>
+    <div class="callout brand"><span class="ct">一句话结论（背下来）</span><b>拆分是一种成本，只有当收益明确超过成本时才拆。</b></div>
+
+    <details class="lvl mech"><summary>机制与代码：拆分的实质是"数据归谁"</summary>
+      <div class="lvl-body">
+        <p>建一个新 Spring Boot 工程只是"动作"；<b>划清数据归属才是"设计"</b>。</p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th style="width:230px">数据</th><th style="width:130px">归属</th><th>另一方怎么访问</th></tr></thead>
+            <tbody>
+              <tr><td><code>t_knowledge_*</code>（RAG 语料）</td><td><b>ai-service</b></td><td>mall-app 通过 <code>/internal/v1/rag/index</code> <b>请求</b>索引</td></tr>
+              <tr><td>商品 / 订单 / 用户 / 笔记 / 支付</td><td><b>mall-app</b></td><td>ai-service 通过 <code>/internal/v1/products/search</code> <b>回调</b>查询</td></tr>
+              <tr><td>API Key</td><td><b>ai-service 独占</b></td><td>业务服务永不接触</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>注意"请求"这个词：语料表物理上还在同一个 MySQL，但 mall-app 从"直接写表"变成了"调 ai-service 的接口"——<b>归属权与访问权分离</b>，这叫<b>"逻辑边界先于物理边界"</b>。哪天语料真的搬到独立库，业务代码一行不用改，因为它本来就没碰过那张表。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"我按五条理由只拆了 AI 服务：<b>耗时差异、故障隔离、独立扩容、密钥隔离、模型可替换</b>。AI 调用是秒级、普通接口是毫秒级，放一起会占满线程池把下单拖垮；拆出去以后模型挂了也只有 AI 助手不可用。<b>用户 / 商品 / 订单我没有拆</b>——它们事务耦合紧密，下单要在同一个事务里锁库存、建订单、清购物车，拆开就要上分布式事务，当前业务量不划算。我的判断标准是：<b>拆分是一种成本，只有收益明确超过成本时才拆。</b>"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1. 不要说"微服务架构"</b>——只说"只拆了一个 AI 服务，主体保持单体"。<b>2.</b> 不要把拆分理由讲成"为了简历好看/为了学微服务"——<b>理由必须是业务和技术属性</b>，第一条永远是耗时差异。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.8 ================= -->
+  <h2><span class="h2n">7.8</span>服务间调用：声明式客户端 @HttpExchange</h2>
+
+  <div class="card">
+    <h3 class="card-title">像调本地方法一样调远程 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：ai/client/AiServiceClient.java · AiServiceClientConfig.java</p>
+
+    <p><strong>一句话：</strong>服务间调用<b>本质就是你写过的 HTTP 客户端</b>——mall-app 作为客户端 POST 一个请求给 ai-service，和前端 fetch 后端、和支付回调被第三方 POST，是同一件事。区别只在体验：以前你要拼 URL、设头、发请求、解响应（命令式），现在只写一个<b>接口</b>（声明式）。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>命令式像<b>每次寄快递都手写一遍面单</b>；声明式像<b>把地址簿存好</b>，寄的时候只说"寄给张三"——写面单的事有代理自动做。</div>
+
+    <details class="lvl mech"><summary>机制与代码：接口即客户端</summary>
+      <div class="lvl-body">
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">ai/client/AiServiceClient.java</span><span class="loc">:17-27</span></div>
+          <pre><code>@HttpExchange(url = "${aimall.ai-service.url}")
+public interface AiServiceClient {
+
+    /** 非流式问答 */
+    @PostExchange("/internal/v1/ai/chat")
+    Map&lt;String, Object&gt; chat(@RequestBody Map&lt;String, Object&gt; body);
+
+    /** 入索引请求（笔记审核通过 / 商品上架时调用） */
+    @PostExchange("/internal/v1/rag/index")
+    Map&lt;String, Object&gt; index(@RequestBody Map&lt;String, Object&gt; body);
+}</code></pre>
+        </div>
+        <p>它怎么做到的——<b>动态代理</b>：Spring 启动时扫描 <code>@HttpExchange</code> 接口，在内存里生成一个实现类（字节码级别），把"方法调用"翻译成"HTTP 请求"（查注解拿到方法和路径 → 序列化 body → 带签名头 → 发请求 → 反序列化响应）。装配在 <code>AiServiceClientConfig</code>：用 <code>RestClient</code> + <code>HttpServiceProxyFactory</code> 生成代理，并在 <code>defaultRequest</code> 里<b>给每个请求自动带上签名三件套</b>（见 7.9）。类上是 <code>@ConditionalOnProperty(... havingValue = "remote")</code>——<b>默认 local 模式下这些 bean 根本不存在</b>，不配置就零影响。</p>
+        <p><b>两条链路的超时表</b>（超时的本质是"我愿意为这一步等多久"，等待预算要按整条链路分配）：</p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th>链路</th><th>连接超时</th><th>读超时</th><th>为什么</th></tr></thead>
+            <tbody>
+              <tr><td>mall-app → ai-service<br><span class="tag">AiServiceClientConfig.java:62-68</span></td><td>2s</td><td><b>120s</b></td><td>AI 本来就慢，读给足；但连不上要快速失败，别拖住用户请求线程</td></tr>
+              <tr><td>ai-service → mall-app<br><span class="tag">AiClientConfig.java:60-66</span></td><td>2s</td><td><b>5s</b></td><td>查商品是毫秒级小事，AI 链路已经很慢，<b>回调必须快进快出</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
+    <h4>选型论证：为什么用 @HttpExchange 而不是 OpenFeign</h4>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:150px"></th><th>Spring 6 <code>@HttpExchange</code></th><th>OpenFeign</th></tr></thead>
+        <tbody>
+          <tr><td><b>依赖</b></td><td><b>零额外</b>（spring-web 自带）</td><td>spring-cloud-openfeign + BOM 版本对齐</td></tr>
+          <tr><td>编程模型</td><td>接口 + 注解 + 动态代理</td><td>接口 + 注解 + 动态代理（<b>几乎一样</b>）</td></tr>
+          <tr><td>生态整合</td><td>与 RestClient / WebClient 一体</td><td>与注册中心 / 负载均衡深度整合</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>选它的理由：本项目只做"基础服务化"（只拆一个服务），引入 Spring Cloud 全家桶的<b>版本对齐风险</b>不划算；而两者接口写法几乎一致，<b>将来真要 Feign 生态时迁移成本极低</b>——这是"按需演进"在依赖选型上的体现。注意 gateway 模块<b>用了</b> Spring Cloud（Gateway 本身就是 SC 家族），所以这不是"排斥 Spring Cloud"，而是"<b>每个依赖都要有当下成立的理由</b>"。另外，ai-service 查商品失败时工具层会 <code>try-catch</code> 把结果降级成"查不到"，让模型如实说、<b>绝不编造商品</b>——<b>每个跨服务点都要想"对面挂了我怎么办"。</b></p>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"服务间调用我用 Spring 6 的声明式 HTTP 客户端 <code>@HttpExchange</code>：定义一个接口、标上注解，调用点就像调本地方法，代理在背后完成序列化和 HTTP。选它而不是 OpenFeign 的原因是<b>零额外依赖</b>——Spring 6 自带，不用引 Spring Cloud 全家桶和 BOM 版本对齐；两者写法几乎一样，将来迁移成本很低。<b>超时我分两条链路配</b>：调 AI 读超时给 120 秒，AI 回调查商品只给 5 秒，因为不能让慢回调吃掉 AI 的等待预算。"</div>
+        <div class="callout warn"><span class="ct">别说错</span>不要吹"跨服务流式已经打通"。<code>RemoteAiService.stream()</code> 当前是<b>伪流式</b>（<code>Flux.just(chat(...))</code>——先拿到完整结果再包成 Flux），真流式透传需要把 SSE 帧跨进程转发（WebClient 的 <code>bodyToFlux</code> 或 RSocket），<b>那是已知的下一步</b>。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.9 ================= -->
+  <h2><span class="h2n">7.9</span>服务间鉴权：HMAC 签名 + 防重放</h2>
+
+  <div class="card">
+    <h3 class="card-title">三个头 + 一个时间窗 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：backend/ai/security/InternalSignature.java · ai-service/ai/security/InternalAuthFilter.java · config/InternalAuthFilter.java</p>
+
+    <p><strong>一句话：</strong>服务之间也要"证明你是谁、报文没被改过"。先立一个事实——<b>"内网就安全"是错觉</b>：docker 端口误映射（<code>-p 8081:8081</code> 写进 compose 又部署到公网机器）、办公网或容器网被横向渗透后，裸奔的内部接口就是<b>免费的后门</b>（能直接烧光你的 AI 额度）。<b>"内网"是一个会变的假设，鉴权不该建立在假设上。</b></p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像公司内部的<b>访客登记</b>。你不会因为"这是自家办公楼"就允许任何人进机房——门禁卡（身份）和签名（确认真是本人、且没被代签）是两件事。</div>
+
+    <details class="lvl mech"><summary>机制与代码：协议与双侧对称</summary>
+      <div class="lvl-body">
+        <p><b>协议：三个头 + 一个时间窗（5 分钟）。</b>客户端每次请求自动带上：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">ai/security/InternalSignature.java</span><span class="loc">:20-22, 28-29</span></div>
+          <pre><code>public static final String HEADER_CLIENT = "X-Internal-Client";   // 我是谁
+public static final String HEADER_TS     = "X-Internal-Ts";       // 当前毫秒时间戳
+public static final String HEADER_SIGN   = "X-Internal-Sign";     // 签名
+
+public static String sign(String client, String ts, String secret) {
+    String plain = "client=" + client + "&ts=" + ts;
+    // HmacSHA256(plain, secret) → 转十六进制字符串
+}</code></pre>
+        </div>
+        <p>服务端 <code>InternalAuthFilter</code> 校验三步（<b>顺序不能反</b>）：<b>①</b> 三个头齐全；<b>②</b> 时间戳新鲜度：<code>|now - ts| &gt; 5 分钟</code> 就拒绝（<b>防重放</b>——攻击者截获一次合法请求原样重发，签名虽然"对"，但时间戳过期就拒）；<b>③</b> 用同一算法 + 同一密钥重算签名，<b>constant-time 比较</b>（<code>MessageDigest.isEqual</code>，防时序攻击）。</p>
+        <p><b>双侧实现的对称性（最容易错的地方）：</b>客户端侧 <code>InternalSignature.sign()</code> 与服务端侧 <code>InternalAuthFilter.sign()</code> <b>拼接串必须一字不差</b>，secret 也必须同值。<b>改一侧不改另一侧 = 全部 401</b>——这就是"协议"的含义：约定先于实现，双侧同步演进。ai-service 侧为了只保护 <code>/internal/*</code>，用 <code>FilterRegistrationBean</code> 显式注册（<code>WebConfig.java:26-33</code>），而不是 <code>@Component</code> 自动扫描（后者会注册到 <code>/*</code>，还会与同名 bean 冲突导致启动失败）。</p>
+      </div>
+    </details>
+
+    <div class="callout brand"><span class="ct">与 V3 支付验签对照着记（同一个 HMAC 思想，两处不同用途）</span>这是 HMAC 在本项目的<b>第三次复用</b>：
+      <div class="tbl-wrap small" style="margin:10px 0 0">
+        <table>
+          <thead><tr><th>场景</th><th>密钥</th><th>防什么</th><th>额外机制</th></tr></thead>
+          <tbody>
+            <tr><td>V3 支付回调</td><td>与第三方约定的 secret</td><td>伪造回调 / 篡改金额</td><td>金额核对 + 状态机 CAS</td></tr>
+            <tr><td><b>V4 内部调用</b></td><td>服务间共享 secret</td><td>伪造内部请求</td><td><b>时间戳防重放</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin:10px 0 0"><b>为什么内部调用必须加防重放、而支付回调不用</b>：支付回调有幂等保护，天然免疫重放（重复回调 = 已处理）；而内部 AI 接口没有幂等语义——截获一次合法请求重发一万次 = 烧光额度。<b>同一个威胁，不同的免疫机制。</b>支付验签的完整链路详见 <a href="03-订单与交易.html">03 页 · 支付闭环</a>。</p>
+    </div>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"服务间调用我做了 HMAC 签名鉴权，因为'内网就安全'是错觉——端口误映射或被横向渗透后，内部接口就是免费后门。协议是三个头：<code>X-Internal-Client</code> 身份、<code>X-Internal-Ts</code> 时间戳、<code>X-Internal-Sign</code> 签名；服务端校验时间戳在 <b>5 分钟窗口</b>内防重放，然后用同一个密钥重算签名做 constant-time 比较。这里最容易错的是<b>双侧对称</b>——客户端和服务端的拼接串、密钥必须完全一致，改一边不改另一边就全部 401。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1.</b> 别说"内部调用不需要鉴权，反正外部进不来"——网关拒绝的是<b>外部</b>访问 <code>/internal/**</code>，服务之间仍靠签名校验，两层各管一段。<b>2.</b> 别说时间窗是"5 秒"——太快会因两侧时钟漂移误杀正常请求，5 分钟是"容忍漂移"与"限制重放窗口"之间的折中。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.10 ================= -->
+  <h2><span class="h2n">7.10</span>网关：4 条路由 + TraceIdGlobalFilter</h2>
+
+  <div class="card">
+    <h3 class="card-title">一个门牌、一个保安、一个前台 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：gateway/src/main/resources/application.yml:24-52 · filter/TraceIdGlobalFilter.java</p>
+
+    <p><strong>一句话：</strong>网关（9000）是<b>外部唯一入口</b>。没有它，前端要记每个服务的地址，用户理论上也能直接打内部端点；有了它——<b>一个门牌</b>（前端只认识 9000）、<b>一个保安</b>（<code>/internal/**</code> 在门口就拒绝）、<b>一个前台</b>（跨域 / traceId / 访问日志统一处理）。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像小区大门。快递、访客、外卖都从这一个门进（统一入口），门口保安会拦下贴着"内部通道"牌子的人（安全边界），门厅还有块牌子记录每个访客进出时间（访问日志）。</div>
+
+    <details class="lvl mech"><summary>机制与代码：全部 4 条路由</summary>
+      <div class="lvl-body">
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th style="width:150px">路由 id</th><th style="width:180px">断言（Path）</th><th>目标 / 动作</th></tr></thead>
+            <tbody>
+              <tr><td><code>mall_api</code></td><td><code>/api/**</code></td><td><code>lb://mall-app</code>（业务接口）</td></tr>
+              <tr><td><code>mall_files</code></td><td><code>/files/**</code></td><td><code>lb://mall-app</code>（上传的图片等静态资源）</td></tr>
+              <tr><td><code>mall_actuator</code></td><td><code>/actuator/**</code></td><td><code>lb://mall-app</code>（运维探针）</td></tr>
+              <tr><td><b><code>deny_internal</code></b></td><td><code>/internal/**</code></td><td><code>no://op</code> + <b><code>SetStatus=404</code></b>（安全边界，不转发）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b><code>deny_internal</code> 的作用：</b>把 <code>/internal/**</code> 全部拒掉并返回 404。没有这条，外部只要知道 8081 端口就能直接打 ai-service 的内部端点。<b>为什么是 404 不是 403</b>：403 等于告诉探测者"端点存在但你没权限"（引导继续挖），404 是"没这东西"——这叫<b>最小信息披露</b>，和越权一律返回 404 是同一个思路。</p>
+        <p><b>注意是 4 条不是 3 条</b>（<code>mall_actuator</code> 容易漏），也<b>注意这张表里没有 ai-service 的路由</b>——内部调用走 HMAC 直连，不经网关，这正是"外部只能从 9000 进来"的边界设计。</p>
+        <p><b>三个概念各司其职</b>：<b>断言</b>（Predicate）判断请求归哪条路由；<b>过滤器</b>（Filter）在转发前后做加工（改头 / 改状态 / 记日志）；<b>路由</b>（Route）= 断言 + 目标 + 过滤器的组合。</p>
+      </div>
+    </details>
+
+    <h4><code>TraceIdGlobalFilter</code>：V1.5 伏笔的兑现</h4>
+    <p>V1.5 的 <code>TraceIdFilter</code> 里写着"上游传了就沿用，否则自己生成——<b>为 V4 微服务链路追踪预留</b>"。现在上游真的存在了：网关是链路第一跳，负责生成 traceId 并透传给下游。<code>@Order(-1)</code> 让它最先执行，后续过滤器和路由都能拿到。</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">gateway/filter/TraceIdGlobalFilter.java</span><span class="loc">:46-54</span></div>
+      <pre><code>String incoming = request.getHeaders().getFirst(TRACE_HEADER);
+String traceId = (incoming != null &amp;&amp; !incoming.isBlank())
+        ? incoming
+        : "gw-" + UUID.randomUUID().toString().substring(0, 8);
+
+ServerHttpRequest mutated = request.mutate()
+        .header(TRACE_HEADER, traceId)
+        .build();
+exchange.getResponse().getHeaders().set(TRACE_HEADER, traceId);</code></pre>
+    </div>
+    <p>于是 <b>浏览器 → gateway(生成 <code>gw-ab12cd34</code>) → mall-app(沿用) → ai-service(透传)</b>，<code>grep gw-ab12cd34</code> 能跨三个进程捞出同一次请求的全部日志——这是排障的救命稻草，也是"设计时想清楚、演进时零成本"的实例。</p>
+    <div class="callout warn"><span class="ct">网关没做什么（诚实边界，一定要主动说）</span><b>没做鉴权</b>：用户 token 校验仍在 mall-app（Sa-Token）。生产可以把鉴权上移到网关（Spring Security + JWT），当前属于"知道位置即可"。<b>没做限流</b>：限流在业务侧（Redis），网关层限流（RequestRateLimiter + Redis）是规模化选项。</div>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"网关是外部唯一入口，一共 4 条路由：<code>mall_api</code>、<code>mall_files</code>、<code>mall_actuator</code>，还有一条最关键的 <b><code>deny_internal</code></b>——把 <code>/internal/**</code> 全部拒绝并返回 404，用 404 不用 403 是为了不向探测者确认端点存在。网关里<b>没有 ai-service 的路由</b>，服务间调用走 HMAC 直连。另外网关实现了 <code>TraceIdGlobalFilter</code>，是 V1.5 埋的伏笔——网关生成链路 ID 透传给下游，三个进程的日志能用同一个 ID 串起来。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1.</b> 别说"网关做了统一鉴权和限流"——这两件都<b>没做</b>，在应用层。<b>2.</b> 别把 404 说成"接口不存在"的技术错误——它是<b>主动设计</b>的安全响应。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.11 ================= -->
+  <h2><span class="h2n">7.11</span>Nacos 注册发现</h2>
+
+  <div class="card">
+    <h3 class="card-title">从"写死 IP"到"按名字找" <span class="badge badge-know">了解</span></h3>
+    <p class="card-sub">对应配置：三个服务的 nacos.discovery（如 gateway/application.yml:56-70）</p>
+
+    <p><strong>一句话：</strong>网关想转发到 mall-app，地址哪来？写死 <code>http://localhost:8080</code> 单机没问题，但当 mall-app 部署 3 个实例时，<b>谁记得住、谁感知实例上下线</b>？注册中心就是一本<b>会自动更新的服务电话簿</b>：服务启动时登记自己的地址，定期发心跳；调用方按<b>服务名</b>查实例列表。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像手机通讯录。你只记"张三"这个名字，不记他的手机号；他换号了通讯录自动更新。写死 IP 等于把号码写在便签上——换一台机器就得改所有便签。</div>
+
+    <details class="lvl mech"><summary>机制与代码：lb:// 拆开讲 + 三层实现</summary>
+      <div class="lvl-body">
+        <p><code>lb://mall-app</code> 不是 URL，是一条<b>指令</b>：<b>①</b> 向 <code>DiscoveryClient</code> 要 mall-app 的实例列表；<b>②</b> 负载均衡器（轮询）挑一个；<b>③</b> 用真实地址（<code>http://192.168.6.1:8080</code>）发请求。<b>服务名是逻辑地址，实例是物理地址</b>——注册发现就是把"逻辑到物理"的翻译自动化。</p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th style="width:190px">层</th><th>配置 / 说明</th></tr></thead>
+            <tbody>
+              <tr><td><b>Nacos 主</b></td><td><code>enabled: true</code> + <code>fail-fast: false</code>——Nacos 不在时打 WARN 照常启动，客户端自动重连补注册</td></tr>
+              <tr><td><b>静态实例兜底</b></td><td><code>spring.cloud.discovery.client.simple.instances</code> 里写死 mall-app / ai-service 地址——<b>Nacos 挂了 <code>lb://</code> 仍有解析目标</b></td></tr>
+              <tr><td><b>单体模式</b></td><td><code>aimall.ai.mode=local</code>（默认）不需要 ai-service，也不依赖注册中心</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>两个实现（Nacos 与 Simple）实现的是<b>同一个接口</b> <code>DiscoveryClient.getInstances(serviceName)</code>——切换只改 starter 和 server-addr，<code>lb://</code> 与全部业务代码零变动。这与项目里 storage / embedding / pay 的可插拔是同一套设计哲学的又一次出现。</p>
+      </div>
+    </details>
+
+    <div class="callout danger"><span class="ct">真实踩坑：多网卡机器的注册 IP（本机实测）</span>启动后 Nacos 控制台看到 mall-app 注册的地址是 <b><code>192.168.49.1</code>——VMware 虚拟网卡</b>！其他机器照这个地址访问必然失败。<b>根因</b>：Nacos 客户端"自动选 IP"的策略是取第一块非回环网卡，而装了 VMware / VirtualBox 的 Windows 上虚拟网卡往往排在最前。<b>修复</b>：三个服务的 yml 全部显式指定注册 IP（<code>gateway/application.yml:60</code> 的 <code>nacos.discovery.ip</code>）。<br><br><b>教训（比知识点值钱）："自动检测"在复杂环境下是隐形炸弹</b>——注册 IP、时区、编码，凡是环境相关的东西，生产都值得显式声明。</div>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"注册发现我用的是 Spring Cloud 标准的 <code>DiscoveryClient</code> 抽象：Nacos 作主，服务启动即注册；同时配了静态实例兜底——<b>Nacos 挂了 <code>lb://</code> 还能解析，转发不断</b>。路由里的 <code>lb://mall-app</code> 是一条指令：查实例列表、负载均衡挑一个、用真实地址转发，逻辑地址和物理地址解耦。我踩过一个真实的坑：<b>多网卡机器上 Nacos 自动选了 VMware 虚拟网卡 <code>192.168.49.1</code>，跨机器不可达</b>，后来三个服务都显式指定了注册 IP。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><code>lb://</code> <b>不是协议也不是 URL</b>，别解释成"负载均衡协议"。另外 Nacos 在这里<b>主要用注册发现</b>，配置中心能力只是顺带提到、并未深入使用——别拔高。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.12 ================= -->
+  <h2><span class="h2n">7.12</span>熔断：Resilience4j</h2>
+
+  <div class="card">
+    <h3 class="card-title">给故障装一根保险丝 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：ai/service/impl/RemoteAiService.java:47-70</p>
+
+    <p><strong>一句话：</strong>没有熔断器，ai-service 挂了（读超时 120 秒才失败）会让 mall-app 的每个请求都在"等死"，Tomcat 线程被占满，商品、订单接口也没有线程可用——<b>全站瘫痪，这叫级联故障 / 服务雪崩</b>。熔断器跳闸后，请求不再发往 ai-service，<b>毫秒级</b>直接走降级，线程立刻释放。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>家里的<b>保险丝</b>。电器短路时它熔断——<b>牺牲一个保险丝，保住整栋房子</b>。没有它，短路电流持续通过，电线发热，全屋烧毁。</div>
+
+    <h4>三态机（面试必背，能画出来）</h4>
+    <div class="flow">
+      <div class="flow-node"><span class="n">CLOSED 闭合</span><span class="d">正常放行<br>滑动窗口统计失败率</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">OPEN 跳闸</span><span class="d">失败率 ≥50%<br>快速失败，请求根本不发</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">HALF_OPEN 半开</span><span class="d">等 30s<br>放 3 个请求试探</span></div>
+    </div>
+    <p>试探全成功 → 回到 CLOSED（恢复）；任一失败 → 回到 OPEN（继续歇）。<b>关键理解</b>：熔断是<b>自动的</b>——跳闸与恢复都不需要人干预。<b>"快速失败"与"重试"是反义词</b>：重试是"再试试"（加重对端压力），熔断是"先不试"（保护双方）。</p>
+
+    <details class="lvl mech"><summary>机制与代码：一个注解 + 一个降级方法</summary>
+      <div class="lvl-body">
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">ai/service/impl/RemoteAiService.java</span><span class="loc">:47-70</span></div>
+          <pre><code>@Override
+@io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker(name = "aiService", fallbackMethod = "chatFallback")
+public String chat(String message, String imageBase64) {
+    // ... 正常调 ai-service ...
+}
+
+// 降级方法：签名必须与原方法一致 + 末尾多一个 Throwable
+@SuppressWarnings("unused")
+private String chatFallback(String message, String imageBase64, Throwable t) {
+    log.warn("AI 调用熔断/失败，走降级文案: {}", t.toString());
+    return "AI 助手正在休息中（服务暂时不可用），请稍后再试～";
+}</code></pre>
+        </div>
+        <p>三个细节：<b>①</b> fallback 返回<b>友好文案</b>而不是抛异常——用户看到"AI 在休息"，商城其它功能照常，这是故障隔离的最终呈现；<b>②</b> <code>name = "aiService"</code> 必须对应配置里的 <code>resilience4j.circuitbreaker.instances.aiService</code>，名字对不上就又是"配置不生效"；<b>③</b> <code>@CircuitBreaker</code> 靠 AOP 代理拦截，<b>同类内自调用（<code>this.chat()</code>）不走代理、注解会失效</b>（与 <code>@Transactional</code> 自调用同源）。</p>
+      </div>
+    </details>
+
+    <div class="callout danger"><span class="ct">配置的真实坑：必须挂在顶层 <code>resilience4j:</code></span><code>resilience4j</code> 是<b>顶层配置</b>。如果把它挂到 <code>spring:</code> 下面——<b>不报错、应用照常启动、熔断器照常工作，但全部用默认参数</b>（滑动窗口 100 而不是 10）。这就是<b>静默失效</b>：你演示"6 次失败就跳闸"时发现跳不动（默认要 100 次才统计），排查半天才发现是层级错了。<br><br><b>验证方法</b>：启动日志里 Resilience4j 会打印实例参数，或看 <code>/actuator/circuitbreakers</code> 端点。本项目配置的口径是：滑动窗口 10 / 失败率阈值 50 / 跳闸 30 秒后半开 / 至少 5 次才开始统计（防冷启动时"第一次失败 = 失败率 100%"的误判）。<br><br><b>这条元教训很值钱</b>：Spring 生态里非 <code>spring</code> 前缀的配置（<code>resilience4j</code> / <code>sa-token</code> / <code>management</code>）挂错层级都是静默失效——<b>改完 yml 一定要解析校验 + 看启动日志确认参数。</b></div>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"熔断三态：CLOSED 正常统计失败率，超阈值跳闸到 OPEN 快速失败——<b>请求根本不发出去</b>，等 30 秒进 HALF_OPEN 放 3 个试探请求，成功就恢复闭合。<b>熔断是快速失败，不是重试</b>。我给 AI 调用加熔断的业务理由是：AI 本来就慢，超时后每个请求还要等满 120 秒，线程被占住，这正是拆 ai-service 想解决的问题。降级方法返回一句友好文案，用户看到'AI 在休息'，下单浏览完全不受影响。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1.</b> 配置必须<b>顶层</b> <code>resilience4j:</code>，挂 <code>spring:</code> 下会静默失效——这个坑我真实踩过，讲出来很加分。<b>2.</b> 熔断<b>不等于限流</b>：限流是"别进来"（防自己被打爆），熔断是"别出去"（防下游拖垮自己），降级是"出不去就算了"（给兜底结果）。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.13 ================= -->
+  <h2><span class="h2n">7.13</span>双模式与降级矩阵</h2>
+
+  <div class="card">
+    <h3 class="card-title">local / remote 一配置切换 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：ai/service/impl/ChatServiceImpl.java:93-114, 169-173</p>
+
+    <p><strong>一句话：</strong><code>aimall.ai.mode</code> 有两个值——<b><code>local</code></b>（默认，单体直连 AI，行为等于 V3）、<b><code>remote</code></b>（走独立 ai-service）。<b>切换只改配置，代码零变动</b>；而"会话管理 / 鉴权 / 落库"这些业务职责<b>永远留在 mall-app</b>，换的只是执行方式，不变的是业务。</p>
+    <div class="callout analogy"><span class="ct">打个比方</span>像家里的<b>电源开关</b>：接市电还是接发电机，插座（业务接口）没变，电器（上层调用）也不用改。</div>
+
+    <details class="lvl mech"><summary>机制与代码：显式构造器按配置选实现</summary>
+      <div class="lvl-body">
+        <p>为什么不用 <code>@RequiredArgsConstructor</code>：Lombok 按类型注入，而 <code>local</code> / <code>remote</code> 是<b>同一个 <code>AiService</code> 接口的两个实现</b>，会冲突。必须用显式构造器 + <code>@Qualifier("remoteAiService")</code> 才能表达"按名二选一"。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">ai/service/impl/ChatServiceImpl.java</span><span class="loc">:99-113</span></div>
+          <pre><code>public ChatServiceImpl(ConversationMapper conversationMapper,
+                       MessageMapper messageMapper,
+                       ChatClient chatClient,
+                       ChatClient visionChatClient,
+                       @Qualifier("remoteAiService")
+                       ObjectProvider&lt;AiService&gt; remoteAiProvider,
+                       @Value("${aimall.ai.mode:local}") String aiMode) {
+    ...
+    this.aiModeFlag = aiMode == null ? "local" : aiMode.toLowerCase();
+    log.info("AI 执行模式 = {}", aiModeFlag);
+}</code></pre>
+        </div>
+        <p>三个要点：<b>① 构造时定格</b>（<code>aiModeFlag</code> 是 final，不每次请求读配置，模式启动时就定死，可预测）；<b>② 惰性注入 <code>ObjectProvider</code></b>——不能直接注入本地实现，因为 local 模式的实现又委托回 <code>ChatService</code>，会构成 <code>ChatServiceImpl ⇄ LocalAiService</code> <b>循环依赖</b>（Boot 3 默认禁止，启动直接失败），Provider 到 <code>remote</code> 分支 <code>getObject()</code> 时才解析 bean；<b>③ 评审背景</b>——这个抽象一开始写了<b>没有任何调用方</b>，配 remote 完全不生效，属于"写了不等于生效"，改成显式构造器接线后才算真正落地。</p>
+      </div>
+    </details>
+
+    <h4>降级矩阵（V4 全景，面试可整表背）</h4>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:250px">场景</th><th>表现</th><th>机制</th></tr></thead>
+        <tbody>
+          <tr><td>什么都不配</td><td>AI 走本地链路，行为等于 V3，<b>零依赖全功能</b></td><td>默认 local 模式</td></tr>
+          <tr><td>remote + ai-service 挂</td><td>前 5 次慢失败 → 跳闸 → <b>毫秒级</b>降级文案，商城照常</td><td>熔断三态机</td></tr>
+          <tr><td>remote + mall-app 挂<br>（ai-service 视角）</td><td><code>searchProduct</code> 工具返回"查不到"，模型如实说</td><td>工具层 try-catch</td></tr>
+          <tr><td>Nacos 挂</td><td>三服务照常启动（WARN），<code>lb://</code> 走静态兜底</td><td>fail-fast=false + Simple</td></tr>
+          <tr><td>网关挂</td><td>前端不可用；直连 8080 后端仍可工作</td><td>网关无状态可快速重启</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>这张表就是"故障隔离"从架构图到现实的全部兑现——<b>每一行都有对应机制，而不是口号</b>。它与 <a href="05-高并发与可靠性.html">05 页</a>的降级体系（Redis 挂走 DB、MQ 挂走线程池、限流不可用 fail-open）是同一套原则在不同层的体现。</p>
+
+    <details class="lvl talk"><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">30 秒版本</span>"我做了一个双模式：<code>aimall.ai.mode</code> 默认是 <code>local</code>，单体直连 AI，<b>面试官 clone 下来不起 ai-service、Nacos、网关也能体验全部功能</b>；配成 <code>remote</code> 才走独立服务。<code>ChatServiceImpl</code> 用显式构造器读配置选实现，因为两个实现是同一个接口，Lombok 按类型注入会冲突。这里有个真实的坑：这个抽象一开始写了<b>没人调用</b>，配置完全不生效，属于'写了不等于生效'——评审的第一动作应该是 grep 调用点。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1.</b> 降级矩阵要讲<b>机制</b>，只背现象（"AI 挂了会怎样"）是八股。<b>2.</b> 别看代码里只写了 if/else 就以为一定生效——正是"没接线"才需要专门修。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 7.14 ================= -->
+  <h2><span class="h2n">7.14</span>面试话术</h2>
+
+  <div class="card">
+    <h3 class="card-title">两句话术 + 一条"别说错" <span class="badge badge-star">面试用</span></h3>
+    <p class="card-sub">本节是准备材料，不涉及代码</p>
+
+    <details class="lvl talk" open><summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk"><span class="ct">「你的项目是单体还是微服务？」30 秒版</span>"<b>我的项目主体是单体，只把 AI 能力拆成了一个独立服务。</b>理由是 AI 调用和其他接口的属性完全不同——它是秒级的、会占满线程池、要用密钥、换模型时希望业务零感知。把这四件事隔开，模型挂了也只有'AI 助手'不可用，下单、浏览、支付照常。<b>但用户、商品、订单我没有拆</b>——它们在一个事务里工作，拆开就要上分布式事务，我判断当前业务量下<b>收益不超过成本</b>。所以准确说，这是一个'按需拆分'的架构，不是微服务架构。"</div>
+        <div class="callout talk"><span class="ct">「为什么不用 Feign？」30 秒版</span>"我用的是 Spring 6 原生的声明式客户端 <code>@HttpExchange</code>。<b>它和 OpenFeign 的编程模型几乎一样</b>——都是接口 + 注解 + 动态代理，但 <code>@HttpExchange</code> <b>零额外依赖</b>，spring-web 自带；引 OpenFeign 就要引 spring-cloud-openfeign 和整套 BOM，版本对齐反而成了负担。我只拆了一个服务，用不上 Feign 与注册中心/负载均衡的深度整合。而且两者写法接近，<b>将来真要迁 Feign，成本很低</b>。"</div>
+        <div class="callout warn"><span class="ct">别说错</span><b>1. 不要说"微服务架构"。</b>这句话一出口，面试官接着就会问"几个服务？怎么保证一致性？调用链怎么追踪？"——而你只有一个 AI 服务。正确说法是"<b>只拆了一个 AI 服务，主体保持单体</b>"。<b>2.</b> 也不要为了显得"技术全面"而主动吹 Nacos / Gateway 的深度使用——本页把它们定位为"了解层"，答得出原理与取舍即可，被深挖就诚实引开。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+
+</main>
+
+<script src="_assets/app.js"></script>
+</body>
+</html>

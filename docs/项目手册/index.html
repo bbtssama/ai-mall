@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>驾驶舱 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="index">
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<main class="main">
+
+  <section class="hero">
+    <h1>AI 种草商城 · 开发手册</h1>
+    <p>这份手册只解决一件事：让你在最短时间内把 <b>ai-mall</b> 这个项目从"知道名字"变成"能讲清楚、扛得住追问"。
+       它不讲泛泛的八股，只讲<b>这个项目里真实存在的代码、真实的取舍、真实的口径</b>。</p>
+    <div class="hero-badges">
+      <span class="hb">4 个版本域 · 191 个 Java 文件</span>
+      <span class="hb">24 张表 · 14 个 Controller</span>
+      <span class="hb">单体为主 · 只拆了 AI 服务</span>
+      <span class="hb">V1~V4 已落地 · V5 未开始</span>
+    </div>
+  </section>
+
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ================= 1. 这是什么 ================= -->
+  <h2><span class="h2n">1</span>先用 30 秒搞清楚：这是个什么项目</h2>
+
+  <div class="card">
+    <p><strong>一句话定位：</strong>一个"<b>内容社区为流量入口、电商交易为变现主干、AI 为智能引擎</b>"的商城。</p>
+    <p>它由三块拼成，缺一块都不成立：</p>
+    <div class="grid grid-3">
+      <div class="tech-card">
+        <h4>内容社区</h4>
+        <p>用户可以发"种草笔记"（图文 + 关联商品），刷 Feed 流，点赞收藏。<br>
+           <b>为什么要它：</b>没有内容，商城就只是个普通 CRUD——内容社区带来"用户生成内容"这个真实的高并发、非结构化场景。</p>
+        <div class="foot">笔记 / Feed 游标分页 / 点赞幂等 / 全文检索</div>
+      </div>
+      <div class="tech-card">
+        <h4>电商交易</h4>
+        <p>浏览商品 → 加购物车 → 下单 → 支付 → 收货。<br>
+           <b>为什么要它：</b>这是<b>资损场景</b>的集中地——超卖、重复支付、订单超时，每一个都能问出真东西。</p>
+        <div class="foot">防超卖 / 幂等 / 支付闭环 / 限量发售</div>
+      </div>
+      <div class="tech-card">
+        <h4>AI 导购</h4>
+        <p>AI 客服问答，能调工具查商品（Function Calling），也能基于说明书和笔记回答"用起来怎么样"。<br>
+           <b>为什么要它：</b>给上面两块提供"AI 时代"的业务合理性，也让技术叙事有落点。</p>
+        <div class="foot">Function Calling / RAG / 多模态识图</div>
+      </div>
+    </div>
+
+    <div class="callout brand">
+      <span class="ct">两条你必须先记住的"叙述纪律"</span>
+      <b>第一，AI 是了解层。</b>开口先讲秒杀、支付、补偿、缓存，AI 只说"业务场景之一"。这决定了你在这份手册上的时间分配——<b>06 页 AI 模块只需要 15 分钟</b>。<br>
+      <b>第二，每个技术决策都要能答"砍掉它会怎样"。</b>这个项目的设计原则是"业务驱动演进、绝不塞技术"。所以手册里每个点都会写明"为什么需要它"。
+    </div>
+  </div>
+
+  <!-- ================= 2. 三条学习路径 ================= -->
+  <h2><span class="h2n">2</span>三条学习路径（按你手上的时间选一条）</h2>
+
+  <p>不用从头到尾读。下面三条路径覆盖三种真实处境，<b>挑一条照着走就行</b>。</p>
+
+  <div class="grid grid-2" style="margin:16px 0">
+
+    <div class="path">
+      <div class="p-head">
+        <div class="pt">路径 A · 面试前一晚（约 30 分钟）</div>
+        <div class="pd">目标：建立全局印象，记住 10 句话</div>
+      </div>
+      <ol>
+        <li><b>本页</b>读完第 3 节架构图 + 第 7 节十大必问（10 分钟）</li>
+        <li><a href="01-全景与架构.html">01 全景与架构</a>：只读第 1、2 节，知道有哪些域（8 分钟）</li>
+        <li><a href="05-高并发与可靠性.html">05 高并发与可靠性</a>：<b>只看每张卡片的第一层</b>，不展开（8 分钟）</li>
+        <li><a href="08-面试速查与自查.html">08 面试速查</a>：背口径红线 + A 组必考题（5 分钟）</li>
+      </ol>
+    </div>
+
+    <div class="path">
+      <div class="p-head">
+        <div class="pt">路径 B · 面试前 2~3 天（约 3 小时）</div>
+        <div class="pd">目标：按业务链路完整过一遍，能主动讲</div>
+      </div>
+      <ol>
+        <li><a href="01-全景与架构.html">01 全景与架构</a> · 25 分钟 —— 骨架必须先立</li>
+        <li><a href="02-用户与商品.html">02 用户与商品</a> · 20 分钟 —— 最简单的域，热身</li>
+        <li><a href="03-订单与交易.html">03 订单与交易</a> · 45 分钟 —— <b>核心，重点投入</b></li>
+        <li><a href="04-内容社区.html">04 内容社区</a> · 30 分钟</li>
+        <li><a href="05-高并发与可靠性.html">05 高并发与可靠性</a> · 45 分钟 —— <b>王牌页</b></li>
+        <li><a href="07-工程基建与服务化.html">07 工程基建与服务化</a> · 20 分钟</li>
+        <li><a href="08-面试速查与自查.html">08 面试速查</a> · 15 分钟 —— 收口</li>
+      </ol>
+    </div>
+
+    <div class="path">
+      <div class="p-head">
+        <div class="pt">路径 C · 被追问时查证（随时）</div>
+        <div class="pd">目标：面试中被问到一个词，30 秒内定位答案</div>
+      </div>
+      <ol>
+        <li>知道<b>技术名词</b>（如"缓存击穿"）→ 去 <a href="05-高并发与可靠性.html">05 页</a>，页内 Ctrl+F</li>
+        <li>知道<b>业务动作</b>（如"支付回调"）→ 去 <a href="03-订单与交易.html">03 页</a></li>
+        <li>想知道<b>某个类/某张表</b>是干什么的 → 去 <a href="01-全景与架构.html">01 页</a>的域划分与目录结构</li>
+        <li>想知道<b>面试怎么讲 / 别说错什么</b> → 直接去 <a href="08-面试速查与自查.html">08 页</a></li>
+      </ol>
+    </div>
+
+    <div class="path">
+      <div class="p-head">
+        <div class="pt">路径 D · 只想知道"AI 那部分怎么回事"</div>
+        <div class="pd">可选 · 15 分钟</div>
+      </div>
+      <ol>
+        <li><a href="06-AI模块.html">06 AI 模块</a> —— 只需记住两句话：<b>Function Calling 工具调用</b> + <b>RAG 检索增强</b>，细节一律引开</li>
+        <li>回到 <a href="08-面试速查与自查.html">08 页</a>看"AI 部分怎么防守"</li>
+      </ol>
+    </div>
+
+  </div>
+
+  <!-- ================= 3. 全局架构图 ================= -->
+  <h2><span class="h2n">3</span>全局架构：一张图看完谁调用谁</h2>
+
+  <p>先看这张图。后面所有页面的内容，都是这张图上某个方框的展开。</p>
+
+  <div class="arch">
+
+    <div class="arch-row">
+      <div class="arch-box plain" style="flex:1 1 100%">
+        <div class="ab-t">浏览器 · Vue 3 + Vite（5173）</div>
+        <div class="ab-d">12 个页面组件（商品/购物车/订单/笔记/聊天/模拟收银台）· Pinia 状态 · axios 拦截器带 Token · SSE 流式渲染 AI 回复</div>
+      </div>
+    </div>
+
+    <div class="arch-label">↓ 所有请求统一走 <code>/api/**</code>（Vite 代理 → 网关 9000）</div>
+
+    <div class="arch-row">
+      <div class="arch-box blue" style="flex:1 1 100%">
+        <div class="ab-t">网关 · gateway（9000）</div>
+        <div class="ab-d">
+          4 条路由：<span class="tag">mall_api</span><span class="tag">mall_files</span><span class="tag">mall_actuator</span><span class="tag">deny_internal</span><br>
+          职责：路由转发 + <b>TraceIdGlobalFilter 注入链路 ID</b> + 把 <code>/internal/**</code> 全部拒掉（404）
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-label">↓ <code>lb://mall-app</code>（Nacos 服务发现）</div>
+
+    <div class="arch-row">
+      <div class="arch-box green" style="flex:2 1 0">
+        <div class="ab-t">mall-app · 主单体（8080）</div>
+        <div class="ab-d">
+          <b>6 个业务域：</b>user / goods / content / order / pay / voice<br>
+          <b>基础设施：</b>R / BusinessException 全局异常 / 分页 / traceId / Redis 门面 / 存储抽象 / 补偿任务
+        </div>
+      </div>
+      <div class="arch-box violet" style="flex:1 1 0">
+        <div class="ab-t">ai-service（8081）</div>
+        <div class="ab-d">
+          ChatClient 装配 · RAG 语料与检索 · <code>searchProduct</code> / <code>searchDocs</code> 两个工具<br>
+          <b>注意：网关没有它的路由</b>，内部走 HMAC 直连
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-label">↓ mall-app ⇄ ai-service 走 HTTP + <code>@HttpExchange</code> 声明式客户端 + <b>HMAC 签名鉴权</b>（带熔断降级）</div>
+
+    <div class="arch-row">
+      <div class="arch-box amber">
+        <div class="ab-t">MySQL 8</div>
+        <div class="ab-d">24 张表 · Flyway 管版本 · 行锁 CAS 扣库存</div>
+      </div>
+      <div class="arch-box amber">
+        <div class="ab-t">Redis</div>
+        <div class="ab-d">缓存三兄弟 / 计数增量桶 / 热榜 zset / 限流 Lua / 分布式锁</div>
+      </div>
+      <div class="arch-box amber">
+        <div class="ab-t">RabbitMQ</div>
+        <div class="ab-d">3 组交换机：审核异步 / 订单延迟取消 / 限量发售削峰</div>
+      </div>
+      <div class="arch-box plain">
+        <div class="ab-t">对象存储</div>
+        <div class="ab-d">本地磁盘（默认，零依赖）⇄ MinIO，配置一行切换</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="callout warn">
+    <span class="ct">看这张图要抓的 3 个"设计意图"</span>
+    <b>1. 为什么只有一个网关而没有一堆微服务？</b>因为主体是单体，网关在这里主要兑现"统一入口 + 链路 ID 注入 + 内部接口隔离"三件事，不是为了微服务而微服务。<br>
+    <b>2. 为什么 ai-service 不走网关？</b>它是<b>服务间调用</b>不是外部入口，走网关反而绕远；且它的接口路径是 <code>/internal/v1/**</code>，网关明确拒掉，避免被外部直接打到。<br>
+    <b>3. 为什么三件中间件都可"降级"？</b>Redis 挂了走 DB、MQ 挂了走线程池——这是项目"零依赖能启动"的硬约束，也是最好的面试素材。
+  </div>
+
+  <!-- ================= 4. 技术栈卡片墙 ================= -->
+  <h2><span class="h2n">4</span>技术栈全景：你"掌握"到什么程度，一目了然</h2>
+
+  <p>下面每张卡片标了三种掌握度。<b>徽章颜色决定了你在该项目上的复习深度和面试措辞</b>，别搞错：</p>
+
+  <div class="grid grid-3" style="margin:14px 0">
+    <div class="callout ok" style="margin:0"><span class="ct">掌握</span>能画图、能讲取舍、能被追问 2 层以上。简历用"掌握"。</div>
+    <div class="callout brand" style="margin:0"><span class="ct">熟悉</span>能讲清原理与流程，细节可推演。简历用"熟悉"。</div>
+    <div class="callout" style="margin:0"><span class="ct">了解</span>知道是什么、能讲边界，被深挖就诚实引开。简历用"了解"。</div>
+  </div>
+
+  <h3>基本盘（面试最常被拷问，也是你最该投入的）</h3>
+  <div class="grid grid-3">
+    <div class="tech-card">
+      <h4>MyBatis + MySQL <span class="badge badge-master">掌握</span></h4>
+      <p>XML 手写 SQL、手写分页、联合索引、事务与行锁。项目里所有 SQL 都是手写的，没有 JPA 魔法。</p>
+      <div class="foot">→ 02 / 03 / 04 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>事务与并发控制 <span class="badge badge-master">掌握</span></h4>
+      <p>"行锁 + <code>WHERE stock&gt;=?</code> 条件更新"是项目最有价值的一句话。</p>
+      <div class="foot">→ 03 页 · 05 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>Redis <span class="badge badge-master">掌握</span></h4>
+      <p>缓存三兄弟 / 计数增量桶 / zset 热榜 / Lua 限流 / 分布式锁，五类场景全部有真实落点。</p>
+      <div class="foot">→ 05 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>RabbitMQ <span class="badge badge-master">掌握</span></h4>
+      <p>三种业务形态：异步审核、延迟取消（TTL+DLX）、削峰建单。可靠性闭环齐全。</p>
+      <div class="foot">→ 05 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>Spring Boot / 分层 <span class="badge badge-familiar">熟悉</span></h4>
+      <p>构造器注入、统一返回、全局异常、按域分包。是项目的骨架而非亮点。</p>
+      <div class="foot">→ 01 / 07 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>幂等设计 <span class="badge badge-master">掌握</span></h4>
+      <p>四种手段、四个真实落点。资损场景的守门员，高密度考点。</p>
+      <div class="foot">→ 05 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>高并发防超卖 / 削峰 <span class="badge badge-master">掌握</span></h4>
+      <p>三层防护：Redis Lua 预减 → MQ 摊峰 → DB CAS 保正确。项目的王牌。</p>
+      <div class="foot">→ 03 页 · 05 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>接口安全 <span class="badge badge-familiar">熟悉</span></h4>
+      <p>Sa-Token 无状态 Token、BCrypt、HMAC 验签与防重放、上传白名单。</p>
+      <div class="foot">→ 02 / 03 / 07 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>工程化 <span class="badge badge-familiar">熟悉</span></h4>
+      <p>Flyway、traceId 全链路、对象存储抽象、单测、CI。证明你有工程素养。</p>
+      <div class="foot">→ 07 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>Redis 高可用 <span class="badge badge-familiar">熟悉</span></h4>
+      <p>主从 / 哨兵 / Cluster 16384 槽。这是你额外下过功夫的部分，<b>可以主动请战</b>。</p>
+      <div class="foot">→ 05 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>微服务（Nacos/Gateway） <span class="badge badge-know">了解</span></h4>
+      <p>只拆了 AI 服务。诚实定位：能讲通原理与拆分理由，细节引开。</p>
+      <div class="foot">→ 07 页</div>
+    </div>
+    <div class="tech-card">
+      <h4>Spring AI / RAG <span class="badge badge-know">了解</span></h4>
+      <p>只守两句话：工具调用 + 检索增强。细节引到 AI 教程。</p>
+      <div class="foot">→ 06 页</div>
+    </div>
+  </div>
+
+  <!-- ================= 5. 版本演进 ================= -->
+  <h2><span class="h2n">5</span>版本演进：这个项目是怎么长出来的</h2>
+
+  <p>面试时"介绍一下你的项目"最忌讳平铺。"按版本演进讲"能体现<b>你有迭代思维</b>，也让面试官知道每加一层都有理由。</p>
+
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-v">V1 · 单体电商闭环 <span class="badge badge-ok">已完成</span></div>
+      <div class="tl-d">注册登录 → 商品 → 购物车 → 下单（防超卖）→ 订单，外加 AI 问答（工具调用 + 识图 + SSE）。这是"能把功能跑通"的最小闭环。</div>
+      <div class="tl-k">Sa-Token · MyBatis 手写 SQL · 行锁 CAS 扣库存 · Spring AI</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V1.5 · 工程基建 <span class="badge badge-ok">已完成</span></div>
+      <div class="tl-d">从"能跑"到"能上线"：数据库版本化、日志能串起来、文件能存、异步不炸、有测试有 CI。这一层不产功能，产<b>可信度</b>。</div>
+      <div class="tl-k">Flyway · traceId 三件套 · 对象存储抽象 · 有界线程池 · 26 个单测 · CI</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V2 · 内容社区 + Hybrid RAG <span class="badge badge-ok">已完成</span></div>
+      <div class="tl-d">补上"内容"这块地基：发笔记、刷 Feed、点赞收藏；AI 审核走 MQ 异步；RAG 把说明书和笔记变成可检索语料。</div>
+      <div class="tl-k">游标分页（二元组）· ngram 全文检索 · 点赞唯一索引幂等 · RRF 融合</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V3 · 支付 + Redis + 高并发治理 <span class="badge badge-ok">已完成</span></div>
+      <div class="tl-d">项目的"含金量担当"：真收钱（支付闭环）、真扛量（限量发售削峰）、真治理（缓存/限流/延迟消息/补偿）。</div>
+      <div class="tl-k">Redis 预减 + MQ 异步下单 · TTL+DLX 延迟取消 · HMAC 验签 · 幂等三层 · 补偿任务</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V4 · 服务化（只拆 AI） <span class="badge badge-ok">已完成</span></div>
+      <div class="tl-d">按"耗时差异 + 故障隔离 + 独立扩容 + 密钥隔离 + 模型可替换"五条理由，<b>只把 AI 拆出去</b>，主体仍是单体。这个"克制"本身就是论点。</div>
+      <div class="tl-k">@HttpExchange · HMAC 内部鉴权 · Resilience4j 熔断 · Nacos · Gateway</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V5 · 可选加分 <span class="badge badge-gray">未开始</span></div>
+      <div class="tl-d">Agent 客服查订单、相似推荐 + ItemCF 离线对比、受限 NL2SQL 商家看板。<b>面试一律说"规划中"，不要含糊其辞</b>。</div>
+      <div class="tl-k">—— 无对应代码 ——</div>
+    </div>
+  </div>
+
+  <div class="callout talk">
+    <span class="ct">这段演进史怎么讲（30 秒）</span>
+    "这个项目我按业务需求演进着做技术：V1 先把单体闭环跑通，重点是下单防超卖；V1.5 补工程基建，因为一个能演示的项目和一个能上线的项目差别就在这儿；V2 加了内容社区，因为我想引入 UGC 这种非结构化数据和高并发互动；V3 是重点，做了支付闭环和限量发售削峰，把缓存、消息、幂等这些传统后端的硬东西都落到了实处；V4 我只拆了 AI 服务，因为它的调用特征跟主业务完全不同。<b>每一步我都能说出为什么这么做、为什么不做另一个方案。</b>"
+  </div>
+
+  <!-- ================= 6. 十问 ================= -->
+  <h2><span class="h2n">6</span>十大必问：面试官最可能问什么，去哪找答案</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th style="width:44px">#</th><th>面试官会问</th><th>你的一页答案</th><th style="width:90px">类型</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>介绍一下你这个项目</td><td><a href="01-全景与架构.html">01 全景与架构</a> · 第 1 节</td><td><span class="badge badge-red">必考</span></td></tr>
+        <tr><td>2</td><td>下单怎么防超卖？</td><td><a href="03-订单与交易.html">03 订单与交易</a> · 防超卖</td><td><span class="badge badge-red">必考</span></td></tr>
+        <tr><td>3</td><td>怎么防重复下单 / 重复支付？</td><td><a href="05-高并发与可靠性.html">05 高并发与可靠性</a> · 幂等设计</td><td><span class="badge badge-red">必考</span></td></tr>
+        <tr><td>4</td><td>缓存穿透/击穿/雪崩怎么处理？</td><td><a href="05-高并发与可靠性.html">05 高并发与可靠性</a> · 缓存三兄弟</td><td><span class="badge badge-red">必考</span></td></tr>
+        <tr><td>5</td><td>事务里能不能发 MQ？</td><td><a href="05-高并发与可靠性.html">05 高并发与可靠性</a> · MQ 可靠性</td><td><span class="badge badge-star">高频</span></td></tr>
+        <tr><td>6</td><td>秒杀/限量发售怎么设计？</td><td><a href="03-订单与交易.html">03 订单与交易</a> · 限量发售 ＋ <a href="05-高并发与可靠性.html">05 页</a></td><td><span class="badge badge-star">王牌</span></td></tr>
+        <tr><td>7</td><td>消息不丢不重怎么保证？</td><td><a href="05-高并发与可靠性.html">05 高并发与可靠性</a> · MQ 可靠性</td><td><span class="badge badge-star">高频</span></td></tr>
+        <tr><td>8</td><td>深分页怎么优化？</td><td><a href="04-内容社区.html">04 内容社区</a> · Feed 流</td><td><span class="badge badge-star">高频</span></td></tr>
+        <tr><td>9</td><td>你的项目有什么别人没有的？</td><td><a href="08-面试速查与自查.html">08 面试速查</a> · C 组王牌题</td><td><span class="badge badge-star">拉分</span></td></tr>
+        <tr><td>10</td><td>这项目还有什么可改进的？</td><td><a href="08-面试速查与自查.html">08 面试速查</a> · 技术债自查</td><td><span class="badge badge-gray">诚实题</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================= 7. 页面目录 ================= -->
+  <h2><span class="h2n">7</span>全部页面导航</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th style="width:60px">页码</th><th>页面</th><th>这页讲什么</th><th style="width:96px">面试权重</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>01</b></td><td><a href="01-全景与架构.html">全景与架构</a></td><td>项目定位 / 三问筛需求 / 演进史 / 目录结构 / 六大域划分 / 一次请求的完整旅程 / 数据库全景</td><td><span class="badge badge-star">★★★</span></td></tr>
+        <tr><td><b>02</b></td><td><a href="02-用户与商品.html">用户与商品</a></td><td>Sa-Token 无状态鉴权 / BCrypt / 收货地址 / 商品与 SKU 模型 / 购物车合并逻辑 / 商品详情缓存</td><td><span class="badge badge-gray">★★</span></td></tr>
+        <tr><td><b>03</b></td><td><a href="03-订单与交易.html">订单与交易</a></td><td>下单全流程 / 防超卖 / 幂等 token / 订单状态机 / 延迟取消 / 支付闭环与验签 / 限量发售削峰</td><td><span class="badge badge-star">★★★</span></td></tr>
+        <tr><td><b>04</b></td><td><a href="04-内容社区.html">内容社区</a></td><td>笔记模型 / Feed 游标分页（二元组） / 点赞收藏幂等 / ngram 全文检索 / 热门榜 zset / 审核异步</td><td><span class="badge badge-star">★★★</span></td></tr>
+        <tr><td><b>05</b></td><td><a href="05-高并发与可靠性.html">高并发与可靠性</a></td><td><b>横切主题集中地</b>：缓存三兄弟 / 幂等四种手段 / 削峰三层 / MQ 可靠性闭环 / 限流 / 降级体系 / 补偿任务 / 真实事故库</td><td><span class="badge badge-star">★★★</span></td></tr>
+        <tr><td><b>06</b></td><td><a href="06-AI模块.html">AI 模块</a></td><td>Spring AI 装配 / Function Calling 工具调用 / 多模态识图 / Hybrid RAG 与边界 / 双工具 Agent 分流 / TTS</td><td><span class="badge badge-know">★</span></td></tr>
+        <tr><td><b>07</b></td><td><a href="07-工程基建与服务化.html">工程基建与服务化</a></td><td>Flyway / traceId 全链路 / 对象存储抽象 / 有界线程池 / 单测 / Gateway / Nacos / HMAC / 熔断 / 降级矩阵</td><td><span class="badge badge-familiar">★★</span></td></tr>
+        <tr><td><b>08</b></td><td><a href="08-面试速查与自查.html">面试速查与自查</a></td><td>口径红线速查 / 40 道弹药库 / 技术债清单（"还有什么可改进"专用） / 诚实边界话术</td><td><span class="badge badge-star">★★★</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger">
+    <span class="ct">读之前先把这条记住</span>
+    <b>不要说"乐观锁"。</b>扣库存的正确说法是"<b>行锁 + <code>WHERE stock&gt;=?</code> 条件更新，本质是 CAS 思想</b>"。
+    项目里 <code>t_product_sku.version</code> 是<b>纯预留字段、从未参与比对</b>。这一个词说错，面试官立刻就知道你没真看懂自己的代码。
+    完整口径红线见 <a href="08-面试速查与自查.html">08 页</a>。
+  </div>
+
+  <nav class="page-nav"></nav>
+
+</main>
+
+<script src="_assets/app.js"></script>
+</body>
+</html>

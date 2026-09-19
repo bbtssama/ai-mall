@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 全景与架构 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="01">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+
+<main class="main">
+
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>一 · 结构与业务链路</b></div>
+    <h1>01 · 全景与架构</h1>
+    <p class="lede">这页回答三个问题：<b>这个项目是什么</b>、<b>由哪些块组成</b>、<b>一次请求怎么流动</b>。它是后面所有页面的地图——
+       看完全局再进 02~08，才不会"只见树木不见森林"。读完你应该能在白纸上画出这个项目的骨架。</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 25 分钟</span>
+      <span class="badge badge-star">面试权重 ★★★</span>
+      <span class="badge badge-gray">24 张表 / 191 个 Java 类 / 14 个 Controller</span>
+    </div>
+  </header>
+
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START
+       ==================================================================== -->
+
+  <div class="callout brand">
+    <span class="ct">这页怎么用</span>
+    先读 <b>1.1 / 1.5 / 1.6</b> 三节建立骨架（面试讲项目就靠这三块）；<b>1.2 / 1.9</b> 是话术层，面试前 10 分钟再过一遍；
+    <b>1.4 / 1.7 / 1.8</b> 当工具页查——被问到"某个类/某张表是干什么的"时回来 Ctrl+F。
+  </div>
+  <!-- ================= 1.1 ================= -->
+  <h2><span class="h2n">1.1</span>项目定位与核心闭环</h2>
+
+  <div class="card">
+    <h3 class="card-title">一句话定位 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应文档：README.md · 项目设计文档.md 第 1 章</p>
+
+    <p><strong>一句话：</strong>一个"<b>内容社区为流量入口、电商交易为变现主干、AI 为智能引擎</b>"的种草商城，三块互相供血，缺一块商业闭环就断。</p>
+
+    <div class="grid grid-3" style="margin:14px 0">
+      <div class="tech-card">
+        <h4>内容社区 <span class="badge badge-master">掌握</span></h4>
+        <p>发种草笔记（图文 + 关联商品）→ 刷 Feed 流 → 点赞收藏。<br>
+          <b>为什么需要它：</b>没有 UGC，商城就只是个普通 CRUD。内容带来两样别人简历上没有的东西——<b>非结构化长文本</b>（RAG 的语料）和<b>热点写</b>（点赞、浏览、热榜的真实高并发场景）。</p>
+        <div class="foot">→ 04 页</div>
+      </div>
+      <div class="tech-card">
+        <h4>电商交易 <span class="badge badge-master">掌握</span></h4>
+        <p>浏览商品 → 加购物车 → 下单 → 支付 → 收货。<br>
+          <b>为什么需要它：</b>这是<b>资损场景</b>的集中地。超卖一次、重复支付一次，都是真金白银。面试官所有"并发/事务/幂等"的追问，最终都会落到这条链上。</p>
+        <div class="foot">→ 02 / 03 页</div>
+      </div>
+      <div class="tech-card">
+        <h4>AI 导购 <span class="badge badge-know">了解</span></h4>
+        <p>AI 客服问答：能调工具查商品（Function Calling），也能基于说明书与笔记回答"用起来怎么样"。<br>
+          <b>为什么需要它：</b>给前两块提供业务合理性，也让技术叙事有落点。<b>但它是了解层，不是主角</b>——开口先讲交易与并发，AI 只说"业务场景之一"。</p>
+        <div class="foot">→ 06 页</div>
+      </div>
+    </div>
+
+    <p>三块为什么能互相支撑？——<b>它们是一条链上的上下游，不是三个并排的功能</b>：</p>
+
+    <div class="flow">
+      <div class="flow-node"><span class="n">发笔记</span><span class="d">UGC 产出</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">被种草</span><span class="d">Feed / 搜索</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">看商品</span><span class="d">笔记关联商品</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">下单</span><span class="d">防超卖 / 幂等</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">支付</span><span class="d">验签 / 回调</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">回社区晒单</span><span class="d">再产 UGC</span></div>
+    </div>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      这不是"三个独立的店拼在一个商场里"，而更像<b>一家餐厅的"招牌菜 → 排队 → 点单 → 复购"</b>：内容社区是门口飘出来的香味（获客），电商是后厨（变现），AI 是服务员（提升转化）。
+      香味不能直接变成钱，但<b>没有香味，后厨就没客人</b>——这就是"AI 只了解层、但内容社区是地基"的由来。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码</summary>
+      <div class="lvl-body">
+        <p>这个闭环不是 PPT 上的箭头，它在数据库与代码里有对应的落点：</p>
+        <ul>
+          <li><b>内容 → 商品：</b><code>t_note_product</code>（笔记关联商品，即"种草清单"）</li>
+          <li><b>商品 → 订单：</b><code>t_cart</code> → <code>t_order</code> + <code>t_order_item</code></li>
+          <li><b>订单 → 支付：</b><code>t_payment</code>（<code>uk_order_id</code> 兜住"一订单一活单"）</li>
+          <li><b>回到社区：</b>口碑沉淀成新的 <code>t_note</code>，同时成为 RAG 语料（<code>t_knowledge_chunk</code>）</li>
+        </ul>
+        <p>统一入口的返回体是 <code>R{code,msg,data}</code>，前端只认这一种结构，所以任何一层的失败都能被同一种方式处理：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/api/R.java</span><span class="loc">:11-17, 32-33</span></div>
+          <pre><code>public class R&lt;T&gt; {
+    public static final int CODE_SUCCESS = 200;
+    private int code;
+    private String msg;
+    private T data;
+    ...
+    public static &lt;T&gt; R&lt;T&gt; ok(T data) {
+        return new R&lt;&gt;(CODE_SUCCESS, "操作成功", data);
+    }</code></pre>
+        </div>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我做的是一个种草商城，定位是<b>内容社区做流量入口、电商交易做变现主干、AI 做智能引擎</b>。它不是三个功能拼在一起——
+          内容社区产出笔记，笔记关联商品形成种草，用户被种草后下单支付，订单完成后又回来晒单产新内容，是一条闭环。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          别把 AI 说成项目主打。正确顺序是：<b>先说内容 + 电商这条闭环，AI 一句带过</b>。
+          面试官听到"AI 商城"第一反应是"蹭热点"，你要用"内容社区是 V3 许多技术的地基"把他按回传统后端语境——笔记必须有内容域，点赞热榜才有东西可点。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 1.2 ================= -->
+  <h2><span class="h2n">1.2</span>设计方法论：三问筛伪需求</h2>
+
+  <div class="card">
+    <h3 class="card-title">三问宪法 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应文档：项目设计文档.md 第 2 章（原文称"本项目的设计宪法"）</p>
+
+    <p><strong>一句话：</strong>每引入一个技术栈之前，先过三关，任一关答不上来就<b>不做</b>。这是让"技术堆砌"变成"业务驱动演进"的唯一手段——也是面试里最能体现<b>思维层次</b>的点。</p>
+
+    <ol class="steps">
+      <li><b>砍掉它，系统会出什么真实业务问题？</b>
+        答不上来 = 硬塞。比如"砍掉 RabbitMQ"→ 笔记发布要等 AI 审核几秒，用户体验崩坏。<b>业务问题是技术选型的唯一入场券。</b></li>
+      <li><b>真实企业里它怎么用？我这是不是"玩具用法"？</b>
+        用法失真 = 一问就露馅。比如"购物车用 Redis Hash"在某些场景没错，但本项目的京东式购物车要"多端同步 + 持久化 + 失效分组"，那是 MySQL 的强项。</li>
+      <li><b>2026 年了，这方案还是主流吗？</b>
+        过时 = 主动暴露短板。比如 RAG 现在的主流是 <b>Hybrid（向量 + BM25）+ Rerank</b>，而不是朴素"分块 + 向量检索"。</li>
+    </ol>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      "三问"就像买工具前先问自己：<b>这活儿没它真干不了吗？别人是这么用的吗？这型号是不是已经淘汰了？</b>
+      三个都过再掏钱——比"五金店看到什么顺眼买什么"靠谱得多。项目里每多一个中间件，面试官就多一个可以捅你的洞。
+    </div>
+
+    <div class="redline">
+      <b>配套的口径纪律（最容易被追问的一条）：</b>"数据量是<b>触发条件的标尺</b>，不是<b>选型的理由</b>"。
+      <b>错误说法：</b>"商品才 100 个，所以 LIKE 够用"——被问"那 50 万商品呢"就崩，且等于自认是玩具。
+      <b>正确说法：</b>"商品搜索<b>目前是最简实现，成熟方案还没做</b>；它会在数据量上升、前缀通配导致全表扫时塌，触发条件是十万级或 P99&gt;200ms，目标方案是 ES"。
+      注意：<b>"量级"只允许出现在触发条件里，不允许出现在理由位里。</b>
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：三问落到实物上的样子</summary>
+      <div class="lvl-body">
+        <p>"砍掉它会怎样"不是空谈，它直接反映在代码注释里。比如购物车为什么不搬 Redis，Flyway V1 的建表注释就写死了理由：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V1__init.sql</span><span class="loc">:89-91</span></div>
+          <pre><code>-- ★ 购物车采用「京东模式」：MySQL 持久化 + 实时库存校验 + 失效分组 + 原子 UPSERT。
+--   之所以不用 Redis Hash：京东式购物车要"多端同步 + 持久化 + 失效商品分组"，这是 MySQL 的强项。
+--   V3 引入 Redis 后也【不迁移】购物车，而是用它缓存"购物车读"，各司其职。</code></pre>
+        </div>
+        <p>同样地，<code>t_product_sku.version</code> 字段也被注释钉死了口径——它是一个<b>被"三问"判过死刑的伪需求</b>（有 version 但没用它）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V1__init.sql</span><span class="loc">:71</span></div>
+          <pre><code>version INT NOT NULL DEFAULT 0 COMMENT '★预留字段，当前【未用作乐观锁】。
+    防超卖靠 UPDATE ... WHERE stock>=? 的行锁 CAS（见 OrderServiceImpl）'</code></pre>
+        </div>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我给项目定了一条设计原则：每加一个技术之前先过三关——<b>砍掉它会不会出真实业务问题、企业里是不是这么用、2026 年了这方案还主流吗</b>。
+          比如我没上 Elasticsearch，不是因为数据少，而是<b>商品的成熟搜索方案我还没做</b>，我知道它会在什么条件下塌、换它的触发条件和目标方案是什么。
+          <b>我更在意每个决策能不能说清'为什么做'和'为什么不做'。</b>"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          讲"三问"时<b>千万不要顺手举个例子说"因为数据量小"</b>——这是最容易翻车的地方，一句话就把自己降格成玩具项目。
+          两个安全例子：砍掉 MQ 审核就卡体验、砍掉 RAG 长文本塞不进 prompt。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 1.3 ================= -->
+  <h2><span class="h2n">1.3</span>演进史 V1 → V5</h2>
+
+  <p>详细版在 <a href="index.html">驾驶舱</a> 第 5 节，这里只记"每一版补了什么能力"——面试按版本讲，"有迭代思维"是加分项。</p>
+
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-v">V1 · 单体电商闭环 <span class="badge badge-master">已完成</span></div>
+      <div class="tl-d">把"能跑通"的最小闭环做出来：注册登录 → 商品 → 购物车 → 下单（防超卖）→ 订单，外加 AI 问答与派蒙语音。</div>
+      <div class="tl-k">补的能力：Sa-Token 无状态登录 · MyBatis 手写 SQL · 行锁 CAS 扣库存 · 10 张表</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V1.5 · 工程基建 <span class="badge badge-master">已完成</span></div>
+      <div class="tl-d">不产功能，产<b>可信度</b>——让项目从"能跑"变成"能维护、能上线"。是 V2 的地基（先有对象存储，笔记图片才有地方放）。</div>
+      <div class="tl-k">补的能力：Flyway · traceId 三件套 · 对象存储抽象 · 有界线程池 · 26 个单测 · CI</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V2 · 内容社区 + Hybrid RAG <span class="badge badge-master">已完成</span></div>
+      <div class="tl-d">补上"内容"这块地基：发笔记 / 刷 Feed / 点赞收藏，AI 审核走 MQ 异步，说明书与笔记变成可检索语料。</div>
+      <div class="tl-k">补的能力：游标分页（二元组）· ngram 全文检索 · 点赞唯一索引幂等 · RRF 融合 · +10 张表</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V3 · 支付 + Redis + 高并发治理 <span class="badge badge-master">已完成</span></div>
+      <div class="tl-d">项目的<b>含金量担当</b>：真收钱（支付闭环）、真扛量（限量发售削峰）、真治理（缓存/限流/延迟消息/补偿）。</div>
+      <div class="tl-k">补的能力：Redis 预减 + MQ 异步下单 · TTL+DLX 延迟取消 · 验签 · 限流 Lua · +4 张表</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V4 · 服务化（只拆 AI） <span class="badge badge-master">已完成</span></div>
+      <div class="tl-d">按"耗时差异 + 故障隔离 + 独立扩容 + 密钥隔离 + 模型可替换"五条理由，<b>只把 AI 拆出去</b>，主体仍是单体。</div>
+      <div class="tl-k">补的能力：@HttpExchange · HMAC 内部鉴权 · Resilience4j 熔断 · Nacos · Gateway 4 条路由</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-v">V5 · 可选加分 <span class="badge badge-gray">未开始</span></div>
+      <div class="tl-d">Agent 客服查订单、相似推荐 + ItemCF 离线对比、受限 NL2SQL 商家看板。<b>项目已停止演进，面试一律说"规划中"</b>，不要含糊其辞。</div>
+      <div class="tl-k">—— 无对应代码，无对应迁移脚本 ——</div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <span class="ct">诚实边界（说主动了反而加分）</span>
+    <b>V5 全部未实现</b>；<code>t_user_follow</code> 表建了但零代码使用（关注流从未实现）；<code>AlipaySandboxChannel</code> 类不存在（只在两处注释里被举例，实际走 <code>MockPayChannel</code>）；
+    <code>RemoteAiService.stream()</code> 是<b>伪流式</b>（<code>Flux.just(...)</code> 一次性返回）。这四条在 1.7、07 页、08 页会再出现，背下来。
+  </div>
+
+  <!-- ================= 1.4 ================= -->
+  <h2><span class="h2n">1.4</span>代码目录结构</h2>
+
+  <div class="card">
+    <h3 class="card-title">四块工程 + 按业务域分包 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">核实命令：find backend ai-service gateway -name "*.java" | wc -l → 191</p>
+
+    <p><strong>一句话：</strong>仓库由 <b>backend（主单体 176 类）、ai-service（唯一独立服务 13 类）、gateway（网关 2 类）、frontend（Vue3）</b> 四块组成；主单体内部<b>按业务域</b>分包，而不是按 controller/service/mapper 横切分层。</p>
+
+    <pre class="tree">ai-mall/
+├── <span class="h">backend/</span>                          <span class="c"># 主单体 · Spring Boot 3.4.5 · 176 个 Java 类</span>
+│   └── src/main/java/com/aimall/
+│       ├── <span class="s">user/</span>                     <span class="c"># 用户域：注册/登录/当前用户/地址簿</span>
+│       ├── <span class="s">goods/</span>                    <span class="c"># 商品域：商品列表/详情/SKU/图集/购物车/详情缓存</span>
+│       ├── <span class="s">content/</span>                  <span class="c"># 内容域：笔记/Feed/点赞收藏/审核MQ/计数增量桶/热榜任务</span>
+│       ├── <span class="s">order/</span>                    <span class="c"># 交易域：下单/订单列表/取消/延迟消息(TTL+DLX)</span>
+│       ├── <span class="s">pay/</span>                      <span class="c"># 支付域：渠道抽象/回调验签/幂等/限量发售</span>
+│       ├── <span class="s">ai/</span>                       <span class="c"># AI 域：会话管理/问答/工具调用/RAG 装配（了解层）</span>
+│       ├── <span class="s">voice/</span>                    <span class="c"># 语音附属：派蒙 TTS 引擎（可选，独立成模块）</span>
+│       ├── <span class="h">common/</span>                   <span class="c"># 基础设施：api(R) / exception / page / redis / storage / trace / job</span>
+│       └── config/                     <span class="c"># 装配层：Sa-Token / CORS / BCrypt / MQ / 线程池 / 调度</span>
+│   └── src/main/resources/
+│       ├── mapper/                     <span class="c"># 18 个手写 MyBatis XML（SQL 全在这里，可见可控）</span>
+│       └── <span class="h">db/migration/</span>              <span class="c"># ★ 表结构唯一权威：V1~V4 共 4 个 Flyway 脚本</span>
+├── <span class="h">ai-service/</span>                        <span class="c"># ★ 唯一拆出去的服务：13 个 Java 类</span>
+│   └── src/main/java/com/aimall/ai/
+│       ├── rag/                        <span class="c"># HybridRagService（BM25 + 向量 + RRF 融合）</span>
+│       ├── tool/                        <span class="c"># ProductSearchTool / KnowledgeSearchTool</span>
+│       ├── security/                   <span class="c"># InternalAuthFilter（HMAC 验签，内部接口的门禁）</span>
+│       └── controller/                 <span class="c"># AiInternalController（POST /internal/v1/ai/chat）</span>
+├── <span class="h">gateway/</span>                          <span class="c"># 网关：2 个 Java 类（启动类 + TraceIdGlobalFilter）</span>
+│   └── src/main/resources/application.yml   <span class="c"># 4 条路由 + Nacos 发现</span>
+└── frontend/                           <span class="c"># Vue3 + Vite + Element Plus + Pinia</span>
+    └── src/
+        ├── views/                      <span class="c"># 12 个页面组件（Home/ProductDetail/Cart/Orders/Notes/Chat/...）</span>
+        ├── api/                        <span class="c"># request.js（axios 拦截器带 Token）+ index.js（API 汇总）</span>
+        ├── stores/                     <span class="c"># Pinia：auth / cart</span>
+        └── voice/                      <span class="c"># Live2D 皮套 + TTS 播放队列（可选）</span></pre>
+
+    <p><strong>为什么按业务域分包，而不是按技术分层分包？</strong>（这是面试官很爱问的架构题）</p>
+
+    <div class="vs">
+      <div class="good">
+        <h5>按业务域分包（本项目）</h5>
+        user / goods / content / order / pay / ai —— 每个域自带 controller / service / mapper / bean / dto。
+        <b>好处：</b>① 改一个业务只动一个目录，边界清晰；② <b>为 V4 拆服务埋好了刀口</b>——真要拆，把整个 goods/ 目录搬走即可，不用在几十个横切包里挑文件；③ 新人看目录就知道系统有哪几块业务。
+      </div>
+      <div class="bad">
+        <h5>按技术分层分包</h5>
+        controller/ service/ mapper/ 三个大平层，所有业务的类都堆在里面。
+        <b>问题：</b>① 一个需求的改动散落在三个目录，改完容易漏；② 想拆服务时无从下手——"订单相关的类"要从三个大包里翻出来；③ 目录看不出业务全貌。
+      </div>
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码</summary>
+      <div class="lvl-body">
+        <p>分包原则写在启动类注释里，是被"三问"审过的设计决策，不是随手建的包：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">backend/…/AimallApplication.java</span><span class="loc">:6-17</span></div>
+          <pre><code>/**
+ * AI 种草商城 —— V1 MVP 单体应用
+ *
+ * &lt;p&gt;启动类。按业务域分包（user/content/goods/order/ai），为 V4 拆微服务预留边界。
+ * Mapper 采用逐接口 @Mapper 方式注册（风格与早期项目一致，无 @MapperScan）。&lt;/p&gt;
+ */
+@SpringBootApplication
+public class AimallApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(AimallApplication.class, args);
+    }
+}</code></pre>
+        </div>
+        <p>注意最后一句：<b>Mapper 是逐接口 <code>@Mapper</code> 注册的，没有用 <code>@MapperScan</code></b>。这是有意为之——启动类不扫描才能保持每个 Mapper 的归属域显式可见（真被问到就答"显式优于隐式，且便于按域迁移"）。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "项目虽然是单体，但我从 V1 起就<b>按业务域分包</b>，user/goods/content/order/pay/ai 每个域自带 controller、service、mapper。
+          这么做的直接好处是——V4 我只花了很小的代价就把 AI 拆成了独立服务，因为边界早就划好了。<b>我是先想清楚"将来可能拆哪块"，再决定今天怎么组织目录的。</b>"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          别把"按域分包"吹成"微服务架构"。正确口径是"<b>只拆了 ai-service，主体保持单体</b>"。
+          分包是为拆分<em>预留边界</em>，不等于已经拆了——说成微服务会被追问 Nacos 服务列表、Feign 接口、分布式事务，一问就穿帮。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 1.5 ================= -->
+  <h2><span class="h2n">1.5</span>六大业务域职责矩阵</h2>
+
+  <p>这张表是"结构一览无余"的核心：被问到任何业务，先在这里定位到域，再进对应页面看细节。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th style="width:88px">域</th><th>职责（一句话）</th><th>主要类 / 组件</th><th style="width:150px">涉及表</th><th style="width:104px">面试权重</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>user</b></td>
+          <td>注册登录（BCrypt + Sa-Token 无状态 Token）、当前用户、收货地址簿。</td>
+          <td><code>AuthRestController</code> · <code>AddressRestController</code> · <code>PasswordConfig</code></td>
+          <td><code>t_user</code><br><code>t_user_address</code></td>
+          <td><span class="badge badge-familiar">★★</span></td>
+        </tr>
+        <tr>
+          <td><b>goods</b></td>
+          <td>SPU/SKU 两级商品、图集聚合、京东式购物车、商品详情缓存三兄弟。</td>
+          <td><code>ProductRestController</code> · <code>CartRestController</code> · <code>ProductCacheService</code></td>
+          <td><code>t_product</code> · <code>t_product_sku</code><br><code>t_product_image</code> · <code>t_cart</code></td>
+          <td><span class="badge badge-familiar">★★</span></td>
+        </tr>
+        <tr>
+          <td><b>content</b></td>
+          <td>笔记发布 / Feed 游标分页 / 点赞收藏幂等 / MQ 异步审核 / 计数增量桶 / 热门榜重建。</td>
+          <td><code>NoteRestController</code> · <code>AiContentController</code> · <code>NoteCounterStore</code> · 热榜定时任务</td>
+          <td><code>t_note*</code> 5 张<br><code>t_audit_record</code> · <code>t_user_follow</code>(休眠)</td>
+          <td><span class="badge badge-star">★★★</span></td>
+        </tr>
+        <tr>
+          <td><b>order</b></td>
+          <td>下单（幂等 token + 行锁 CAS 扣库存）、订单状态机、取消回补、超时延迟取消。</td>
+          <td><code>OrderRestController</code> · <code>OrderServiceImpl</code> · <code>OrderDelayMessageSender</code></td>
+          <td><code>t_order</code> · <code>t_order_item</code></td>
+          <td><span class="badge badge-star">★★★</span></td>
+        </tr>
+        <tr>
+          <td><b>pay</b></td>
+          <td>支付渠道抽象 + 回调验签/幂等/金额核对 + 主动查单对账；限量发售 Redis 预减 + MQ 削峰建单。</td>
+          <td><code>PaymentController</code> · <code>DropController</code> · <code>PayChannel</code>/<code>MockPayChannel</code></td>
+          <td><code>t_payment</code> · <code>t_refund</code><br><code>t_drop_activity</code> · <code>t_drop_record</code></td>
+          <td><span class="badge badge-star">★★★</span></td>
+        </tr>
+        <tr>
+          <td><b>ai</b></td>
+          <td>会话持久化、Agent 工具调用（查商品/查文档）、多模态识图、SSE 对话、RAG 索引。</td>
+          <td><code>ChatRestController</code> · <code>RemoteAiService</code> · <code>AiInternalController</code>(ai-service) · <code>HybridRagService</code></td>
+          <td><code>t_conversation</code> · <code>t_message</code><br><code>t_knowledge_doc</code> · <code>t_knowledge_chunk</code></td>
+          <td><span class="badge badge-know">★</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <span class="ct">voice 是附属，一句话带过</span>
+    <code>com.aimall.voice</code> 是<b>可选</b>的派蒙 TTS 引擎（内嵌 VITS 子进程 :9944，缺资产自动降级 Edge-TTS），外加前端 <code>src/voice/</code> 的 Live2D 皮套。
+    它<b>不是业务域</b>，是"低耦合可插拔"的演示模块——面试<b>不要主动提</b>，被问到就说"一个独立可插拔的语音模块，不影响主链路"。
+  </div>
+
+  <!-- ================= 1.6 ================= -->
+  <h2><span class="h2n">1.6</span>一次请求的完整旅程</h2>
+
+  <div class="card">
+    <h3 class="card-title">以「下单」为例：从浏览器到 MySQL 再回来 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">链路来源：gateway/TraceIdGlobalFilter.java · config/SaTokenConfig.java · order/service/impl/OrderServiceImpl.java</p>
+
+    <p><strong>一句话：</strong>选"下单"（<code>POST /api/v1/orders</code>）是因为它<b>穿过了全部七层</b>，且每层都干了非它不可的事。看懂这条链，其他接口都是它的简化版。</p>
+
+    <div class="flow">
+      <div class="flow-node"><span class="n">浏览器</span><span class="d">axios 带 Token</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">Vite 代理</span><span class="d">/api → 9000</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">网关 9000</span><span class="d">注入 traceId + 路由</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">Filter</span><span class="d">TraceIdFilter 塞 MDC</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">拦截器</span><span class="d">Sa-Token 校验登录</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">Controller</span><span class="d">接参 + 校验</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">Service</span><span class="d">事务 + 业务</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">Mapper → MySQL</span><span class="d">行锁 CAS</span></div>
+    </div>
+
+    <p>关键不是"经过了哪几层"，而是<b>每一层真正做了什么</b>：</p>
+
+    <div class="tbl-wrap small">
+      <table>
+        <thead>
+          <tr><th style="width:130px">层</th><th>它真正干的事（这才是要背的）</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><b>浏览器 / Vite</b></td><td>axios 拦截器统一挂 <code>sa-token</code> 头；Vite 把 <code>/api</code> 代理到网关 9000。<b>前端只认一个入口，不感知后端拆了几个服务。</b></td></tr>
+          <tr><td><b>网关 9000</b></td><td><code>TraceIdGlobalFilter</code>（<code>@Order(-1)</code>，最先执行）生成或沿用 <code>X-Trace-Id</code>，加进下游请求头并回写响应头；按 <code>mall_api</code> 路由把 <code>/api/**</code> 转发到 <code>lb://mall-app</code>。<b>顺带把 <code>/internal/**</code> 一律返回 404</b>（内部接口不对公网暴露）。</td></tr>
+          <tr><td><b>Servlet Filter</b></td><td><code>TraceIdFilter</code>（<code>HIGHEST_PRECEDENCE</code>）把 traceId 放进 <b>MDC</b>，让本进程所有日志都带上它；<code>finally</code> 里必须 <code>clear()</code>——线程池复用不清会串号。</td></tr>
+          <tr><td><b>Sa-Token 拦截器</b></td><td><code>SaInterceptor</code> 拦 <code>/api/**</code>，<b>默认全部需要登录</b>，只放行登录/注册/支付回调/内部接口。未登录抛 <code>NotLoginException</code> → 全局异常 → <code>R.fail(401)</code>。<b>放行 ≠ 裸奔</b>：回调靠验签、内部接口靠 HMAC 签名。</td></tr>
+          <tr><td><b>Controller</b></td><td>薄薄一层：接 DTO（<code>@Valid</code> 校验）、取当前用户、调 Service、包 <code>R.ok(...)</code>。<b>不写业务逻辑。</b></td></tr>
+          <tr><td><b>Service</b></td><td>业务的真正所在：<code>@Transactional</code> 事务边界 + 幂等 token 消费 + 逐项校验 + 行锁 CAS 扣库存 + 落单 + 发延迟消息（<b>afterCommit</b>）。</td></tr>
+          <tr><td><b>Mapper → MySQL</b></td><td>XML 里手写 SQL；<code>UPDATE … WHERE id=? AND stock>=?</code> 由 InnoDB <b>行排他锁 + 条件更新</b>保证原子，返回 0 即库存不足。</td></tr>
+          <tr><td><b>返回</b></td><td>统一 <code>R{code,msg,data}</code> 原路返回；任何一层抛的 <code>BusinessException</code> 都被 <code>@RestControllerAdvice</code> 兜成同结构，<b>不把堆栈泄漏给前端</b>。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      把请求想成一份<b>要去公司大楼办的公文</b>：Vite 是"指路牌"（把你送到正确的大楼）；网关是<b>门卫</b>（盖一个"访问编号" traceId，并告诉你哪些楼层不对外）；Filter 是<b>走廊里的监控</b>（编号跟着你走遍全程）；拦截器是<b>刷卡闸机</b>（没工牌进不去）；
+      Service 才是<b>真正办事的柜台</b>；<b>出事时接线员（全局异常）统一给你一句人话，而不是把内部流程图摔你脸上。</b>
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码（两段就够）</summary>
+      <div class="lvl-body">
+        <p><b>网关为什么是链路第一跳</b>——它是唯一能"生成 traceId 并透传给所有下游"的地方：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">gateway/…/filter/TraceIdGlobalFilter.java</span><span class="loc">:46-54</span></div>
+          <pre><code>String incoming = request.getHeaders().getFirst(TRACE_HEADER);
+String traceId = (incoming != null &amp;&amp; !incoming.isBlank())
+        ? incoming
+        : "gw-" + UUID.randomUUID().toString().substring(0, 8);
+ServerHttpRequest mutated = request.mutate().header(TRACE_HEADER, traceId).build();
+exchange.getResponse().getHeaders().set(TRACE_HEADER, traceId);</code></pre>
+        </div>
+        <p>于是 <code>grep &lt;traceId&gt;</code> 能<b>跨 gateway / mall-app / ai-service 三个进程</b>捞出同一次请求的全部日志。这是 V1.5 埋的伏笔在 V4 兑现。</p>
+
+        <p><b>Service 层为什么长这样</b>——幂等在前、扣库存在中、发消息在最后且在事务提交后：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:57-63, 91-95, 132</span></div>
+          <pre><code>@Transactional(rollbackFor = Exception.class)
+public OrderVO create(CreateOrderRequest req) {
+    Long userId = StpUtil.getLoginIdAsLong();
+    // 0. 幂等 token：DEL 原子消费，一次有效（防双击重复下单）
+    if (StringUtils.hasText(req.getIdempotentToken())) { ... }
+    ...
+    // 1. 数据库层 CAS 扣减（WHERE stock >= ?）
+    if (skuMapper.deductStock(sku.getId(), it.getQuantity()) == 0) { ... }
+    ...
+    delayMessageSender.sendAfterCommit(order.getId());   // ★ 事务提交后再发</code></pre>
+        </div>
+        <p>三个细节值得记：<b>①</b> 扣库存用 CAS 不是"乐观锁"（<code>version</code> 字段从未参与比对）；<b>②</b> 消息带 <code>orderId</code> 不带状态，消费时回查最新态；<b>③</b> <code>sendAfterCommit</code>——事务回滚了消息却飞出去，消费者会查到幽灵订单。完整推演见 <a href="03-订单与交易.html">03 页</a>与 <a href="05-高并发与可靠性.html">05 页</a>。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "以一次下单请求为例：前端只认 <code>/api</code> 一个入口，Vite 代理到网关。网关做两件事——<b>注入 traceId 让链路日志可 grep，以及把内部接口 404 掉</b>。
+          进到应用后，Filter 先把 traceId 塞进 MDC；Sa-Token 拦截器校验登录态；Controller 只接参不写逻辑；Service 里开事务，先做幂等、再靠 <code>WHERE stock&gt;=? </code>的行锁 CAS 扣库存，最后<b>在事务提交后</b>投递延迟消息。
+          返回统一是 <code>R{code,msg,data}</code>，异常都被全局兜底成同样结构、不泄漏堆栈。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          两条最容易翻车的：<b>①</b> 扣库存说成"乐观锁"—— <code>t_product_sku.version</code> 是纯预留字段，正确说法是"<b>行锁 + <code>WHERE stock&gt;=?</code> 条件更新，CAS 思想</b>"。
+          <b>②</b> 说"网关做了鉴权"——项目里<b>鉴权在应用的 Sa-Token 拦截器</b>，网关只做 traceId 注入、路由、遮内部接口。把职责说错，面试官会顺着问网关的鉴权过滤器，你就接不住了。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 1.7 ================= -->
+  <h2><span class="h2n">1.7</span>数据库全景（24 张表）</h2>
+
+  <div class="card">
+    <h3 class="card-title">24 张表 = V1:10 + V2:10 + V3:4 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">核实：backend/src/main/resources/db/migration/ 下 V1~V4 各文件 CREATE TABLE 计数</p>
+
+    <p><strong>一句话：</strong>表结构<b>只增不改</b>，由 Flyway 4 个迁移脚本管理；<code>V4</code> 不加表，只给 <code>t_payment</code> 加唯一索引 <code>uk_order_id</code>。<code>db/migration/</code> 是<b>唯一权威</b>，任何文档与它冲突以它为准。</p>
+
+    <h4>用户域（2 张）</h4>
+    <div class="tbl-wrap small">
+      <table>
+        <thead><tr><th style="width:190px">表</th><th>一句话职责</th><th style="width:110px">来源</th></tr></thead>
+        <tbody>
+          <tr><td><code>t_user</code></td><td>用户账号，密码存 BCrypt 哈希；<code>uk_username</code> 保证登录名唯一。</td><td>V1</td></tr>
+          <tr><td><code>t_user_address</code></td><td>收货地址簿，<code>is_default</code> 标记默认地址。</td><td>V1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h4>商品域（4 张）</h4>
+    <div class="tbl-wrap small">
+      <table>
+        <thead><tr><th style="width:190px">表</th><th>一句话职责</th><th style="width:110px">来源</th></tr></thead>
+        <tbody>
+          <tr><td><code>t_product</code></td><td>商品 SPU（名称/副标题/分类/主图/图文详情），列表页聚合出"起售价"。</td><td>V1</td></tr>
+          <tr><td><code>t_product_sku</code></td><td>规格 SKU（价格/库存/销量）；<b>扣库存就发生在这张表</b>，<code>version</code> 是纯预留字段。</td><td>V1</td></tr>
+          <tr><td><code>t_product_image</code></td><td>商品/规格图集，<code>sku_id</code> 为空是商品级图、非空是规格专属图。</td><td>V1</td></tr>
+          <tr><td><code>t_cart</code></td><td>购物车（京东模式，MySQL 持久化）；<code>uk_user_sku</code> 是原子 UPSERT 的基础。</td><td>V1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h4>内容域（10 张，含 RAG 语料）</h4>
+    <div class="tbl-wrap small">
+      <table>
+        <thead><tr><th style="width:190px">表</th><th>一句话职责</th><th style="width:110px">来源</th></tr></thead>
+        <tbody>
+          <tr><td><code>t_note</code></td><td>种草笔记主表（正文/状态/审核结果/热度分与各类计数）。</td><td>V2</td></tr>
+          <tr><td><code>t_note_image</code> / <code>t_note_tag</code></td><td>笔记的图片列表与标签。</td><td>V2</td></tr>
+          <tr><td><code>t_note_product</code></td><td><b>种草关联商品</b>——内容域与商品域的衔接点（"笔记详情页去购买"靠它）。</td><td>V2</td></tr>
+          <tr><td><code>t_note_like</code> / <code>t_note_collect</code></td><td>点赞 / 收藏；<code>uk(note_id,user_id)</code> 联合唯一索引<b>天然幂等</b>，物理拒绝重复。</td><td>V2</td></tr>
+          <tr><td><code>t_user_follow</code> <span class="badge badge-red">零代码使用</span></td><td><b>关注关系表——建了但从未使用。</b>关注流从未实现，属 V5 规划。被问到要诚实说"预留表，关注流没做"。</td><td>V2</td></tr>
+          <tr><td><code>t_audit_record</code></td><td>审核流水，配合 MQ 异步审核写回结果。</td><td>V2</td></tr>
+          <tr><td><code>t_knowledge_doc</code> / <code>t_knowledge_chunk</code></td><td>RAG 语料：文档与其分块（含 embedding），来源是商品说明书 + 种草笔记。</td><td>V2</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h4>交易域（4 张）</h4>
+    <div class="tbl-wrap small">
+      <table>
+        <thead><tr><th style="width:190px">表</th><th>一句话职责</th><th style="width:110px">来源</th></tr></thead>
+        <tbody>
+          <tr><td><code>t_order</code></td><td>订单主表，状态机字段；<code>uk_order_no</code> 兜幂等，<code>idx(user_id, created_at)</code> 支撑列表分页。<code>version</code> 同样是纯预留字段。</td><td>V1</td></tr>
+          <tr><td><code>t_order_item</code></td><td>订单明细，<b>存商品名/规格/成交价快照</b>——防止商品改价后历史订单被篡改。</td><td>V1</td></tr>
+          <tr><td><code>t_drop_activity</code></td><td>限量发售活动（发售价/发售库存/起止时间）。</td><td>V3</td></tr>
+          <tr><td><code>t_drop_record</code></td><td>抢购记录，与 <code>uk</code> 配合做"每人限购"。</td><td>V3</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h4>支付域（2 张）</h4>
+    <div class="tbl-wrap small">
+      <table>
+        <thead><tr><th style="width:190px">表</th><th>一句话职责</th><th style="width:110px">来源</th></tr></thead>
+        <tbody>
+          <tr><td><code>t_payment</code></td><td>支付单，存回调原文与第三方流水号；<b>V4 加的 <code>uk_order_id</code> 保证"一个订单只有一活单"</b>。</td><td>V3 / V4</td></tr>
+          <tr><td><code>t_refund</code></td><td>退款申请与处理状态。</td><td>V3</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h4>AI 域（2 张）</h4>
+    <div class="tbl-wrap small">
+      <table>
+        <thead><tr><th style="width:190px">表</th><th>一句话职责</th><th style="width:110px">来源</th></tr></thead>
+        <tbody>
+          <tr><td><code>t_conversation</code></td><td>AI 会话（按用户隔离，含会话类型）。</td><td>V1</td></tr>
+          <tr><td><code>t_message</code></td><td>会话消息，<code>extra_json</code> 存引用来源 / 商品卡片 / 用户图片。</td><td>V1</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="redline">
+      <b>三条必须记住的诚实边界：</b>
+      ① <code>t_user_follow</code> <b>表存在但零代码使用</b>（<code>grep t_user_follow</code> 无任何 Java/XML 引用）；
+      ② <code>t_product_sku.version</code> 与 <code>t_order.version</code> 都是<b>预留字段、从未参与比对</b>；
+      ③ <code>V4</code> 迁移<b>不加表</b>，只删历史重复支付单 + 加唯一索引。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：为什么"只增不改"</summary>
+      <div class="lvl-body">
+        <p>Flyway 校验已执行脚本的 checksum，改了旧脚本会直接启动失败。所以表结构的演进方式只能是"新加版本文件"：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V1__init.sql</span><span class="loc">:8-11</span></div>
+          <pre><code>-- 迁移约定：
+--   1. 只做增量，不修改已执行的迁移文件（已执行文件的 checksum 会被校验）。
+--      要改表结构请新增 V2__xxx.sql、V3__xxx.sql……
+--   3. 不使用 DROP TABLE —— 迁移脚本必须是"向前"的，删表另写迁移。</code></pre>
+        </div>
+        <p>V4 正是这条约定的样板：它不建表，只做一次"清理 + 加索引"，把并发双击产生的重复支付单收拾干净后建立 <code>uk_order_id</code>。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "数据库一共 <b>24 张表</b>，由 Flyway 的 <b>4 个迁移脚本</b>管理：V1 十张打底（用户/商品/订单/会话），V2 十张做内容社区和 RAG 语料，V3 四张做支付和限量发售，V4 不加表、只加了一个唯一索引兜支付幂等。
+          我在设计上坚持<b>表结构只增不改</b>，因为 Flyway 会校验 checksum，改历史脚本等于让所有人启动失败——这也是为什么我特意保留了 <code>version</code> 这种'当前没用到'的字段：它是我明确标注过的预留，不是我忘了删。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          被问"你这张关注表怎么用的"——<b>直说"这是预留表，关注流规划在 V5、还没实现"</b>。
+          硬编一个关注流的实现，面试官让你讲拉模式推模式、大 V 写放大，你立刻露馅。<b>诚实边界是加分项，编造才致命。</b>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 1.8 ================= -->
+  <h2><span class="h2n">1.8</span>技术栈与版本矩阵</h2>
+
+  <p>版本号全部来自 <code>pom.xml</code> 实测，不是记忆——被问"你用哪个版本"时要有底气。掌握度直接决定你在这项技术上被追问时"扛几层"。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th style="width:96px">层</th><th style="width:210px">技术</th><th style="width:150px">版本</th><th>为什么选它（一行）</th><th style="width:96px">掌握度</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>语言/框架</td><td>Java · Spring Boot</td><td>17 · 3.4.5</td><td>3.4.5 稳定、资料多，求职前不为追新大改。</td><td><span class="badge badge-familiar">熟悉</span></td></tr>
+        <tr><td>持久层</td><td>MyBatis（XML 手写 SQL）</td><td>3.0.4</td><td>SQL 可见可控，便于 <code>explain</code> 与慢 SQL 优化；<b>不引分页插件</b>，分页手写 <code>LIMIT</code>。</td><td><span class="badge badge-master">掌握</span></td></tr>
+        <tr><td>数据库</td><td>MySQL 8</td><td>8（192.168.6.102）</td><td>行锁 + <code>WHERE stock&gt;=?</code> 条件更新保证扣库存原子；联合唯一索引做幂等。</td><td><span class="badge badge-master">掌握</span></td></tr>
+        <tr><td>认证</td><td>Sa-Token</td><td>1.39.0</td><td>前后端分离要无状态登录态，轻量、API 简洁；被问就说"Security 也了解，OAuth2/方法级鉴权是它强项"。</td><td><span class="badge badge-familiar">熟悉</span></td></tr>
+        <tr><td>缓存</td><td>Redis</td><td>本机/内网</td><td>商品详情读多写少、点赞是热点写；五类落点：缓存三兄弟/计数桶/热榜 zset/限流 Lua/分布式锁。</td><td><span class="badge badge-master">掌握</span></td></tr>
+        <tr><td>消息</td><td>RabbitMQ</td><td>本机/内网</td><td>三种真实形态：审核异步、订单延迟取消（TTL+DLX）、限量发售削峰建单。</td><td><span class="badge badge-master">掌握</span></td></tr>
+        <tr><td>数据库版本</td><td>Flyway</td><td>Boot 托管</td><td>多人协作改表没版本管理必炸；迁移脚本只增不改。</td><td><span class="badge badge-familiar">熟悉</span></td></tr>
+        <tr><td>对象存储</td><td>StorageService 抽象</td><td>本地磁盘 ⇄ MinIO</td><td>图片存本地重启就丢；配一行切 MinIO，<b>没配也能跑（降级）</b>。</td><td><span class="badge badge-familiar">熟悉</span></td></tr>
+        <tr><td>可观测</td><td>traceId · Actuator</td><td>MDC + Filter</td><td>请求跨多模块，没链路 ID 无法排查；日志可跨三个进程 grep 同一 traceId。</td><td><span class="badge badge-familiar">熟悉</span></td></tr>
+        <tr><td>服务化</td><td>Nacos · Spring Cloud Gateway</td><td>Cloud 2024.0.1<br>Alibaba 2023.0.3.2</td><td>只拆 AI 服务时的注册发现与统一入口。<b>诚实定位：了解层。</b></td><td><span class="badge badge-know">了解</span></td></tr>
+        <tr><td>熔断</td><td>Resilience4j</td><td>Spring Cloud 官方</td><td>AI 调用会超时会挂，不能让下单陪葬——熔断降级保护主链路。</td><td><span class="badge badge-know">了解</span></td></tr>
+        <tr><td>AI</td><td>Spring AI + DeepSeek</td><td>1.0.0 · <code>deepseek-v4-flash-vision-exp</code></td><td>Function Calling 不查库就会编造商品价格；RAG 只答非结构化内容。<b>API Key 走环境变量注入。</b></td><td><span class="badge badge-know">了解</span></td></tr>
+        <tr><td>前端</td><td>Vue 3 · Vite · Element Plus · Pinia · axios</td><td>—</td><td>12 个页面组件；axios 拦截器统一带 Token，SSE 渲染 AI 回复。</td><td><span class="badge badge-familiar">熟悉</span></td></tr>
+        <tr><td>测试/CI</td><td>JUnit5 · Mockito · GitHub Actions</td><td>26 用例 / 6 类</td><td>没测试的代码没人敢改；Mockito <code>mockStatic</code> 钉住 StpUtil，纯内存毫秒级。</td><td><span class="badge badge-familiar">熟悉</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <span class="ct">三条版本相关的口径</span>
+    <b>① AI 是 </b><code>Spring AI 1.0</code><b>，不是 1.1.x</b>（早期某份教程写错过，别沿用）；
+    <b>② 本机无 Docker</b>，MySQL / Nacos 在 <code>192.168.6.102</code>，<code>docker-compose.yml</code> 仅作参考；
+    <b>③ Java 17 是底线不是亮点</b>——会讲虚拟线程是加分项，但求职前不为追新大改。
+  </div>
+
+  <!-- ================= 1.9 ================= -->
+  <h2><span class="h2n">1.9</span>面试怎么讲"介绍一下你的项目"</h2>
+
+  <p>这是每个面试的<b>第一问</b>，也是你唯一能主动定义整场节奏的机会。下面两段直接可背——但<b>顺序比措辞重要</b>：先传统后端，AI 最后一句带过。</p>
+
+  <div class="callout talk">
+    <span class="ct">30 秒版本（面试官还在翻简历时用）</span>
+    "我做的是一个'<b>AI 种草商城</b>'，本质是一个内容电商平台：内容社区是流量入口，电商交易是变现主干，AI 是智能引擎，三者是一条闭环——
+    用户发笔记被种草、看商品下单支付、完成后回社区晒单。
+    技术上我用 <b>Spring Boot 3 单体</b>起步，按业务域分包，然后按版本演进：<b>V1</b> 跑通下单闭环并解决防超卖，<b>V1.5</b> 补工程基建，<b>V2</b> 加内容社区和消息异步，<b>V3</b> 做支付与限量发售的削峰治理，<b>V4</b> 只把 AI 拆成独立服务。
+    <b>每一步我都能说清'为什么这么做、为什么不那么做'。</b>"
+  </div>
+
+  <div class="callout talk">
+    <span class="ct">90 秒版本（面试官开始记笔记时用）</span>
+    "这个项目的核心是<b>三条闭环</b>：内容社区产出笔记、笔记关联商品形成种草、下单支付后口碑沉淀回社区。<br><br>
+    <b>技术上我重点做的几块：</b>①<b>下单防超卖</b>——用 <code>WHERE stock&gt;=?</code> 的行锁 CAS 条件更新，不是乐观锁；②<b>限量发售削峰</b>——"<b>Redis 预减挡量、MQ 摊峰、DB CAS 保正确</b>"三层，投递失败还做了对称回补；③<b>幂等设计</b>——四种手段（唯一索引 / 状态机条件更新 / 一次性 token / 消费端回查）各有真实落点；④<b>缓存三兄弟</b>——穿透空值标记、击穿互斥锁重建、雪崩 TTL 加随机，而且 <b>Redis 挂了自动降级走 DB</b>；⑤<b>Feed 流游标分页</b>——热度排序用 <code>(hot_score, id)</code> 二元组游标兜住页边界。<br><br>
+    <b>边界我也清楚：</b>AI 和微服务是我的了解层，<b>只拆了 AI 服务，主体还是单体</b>；商品搜索目前是最简实现，成熟方案我还没做。"
+  </div>
+
+  <div class="callout warn">
+    <span class="ct">开场别先讲 AI（最重要的一条）</span>
+    <b>面试官听到"AI 商城"的第一反应是"这是不是蹭热点"。</b>你一开口就讲 Function Calling、RAG、向量检索，只会强化这个怀疑，而且把战场拉到你的弱项上。<br>
+    <b>正确顺序：先讲传统后端硬骨头</b>（防超卖 / 幂等 / 缓存 / 消息 / 事务），让面试官先认可"这人有真东西"；<b>AI 放在最后，并且用"业务场景之一"来定性</b>——"AI 会在 AI 客服这个场景用到，我定位为了解层，重心在传统后端体系"。<br>
+    这条纪律贯穿整本手册：<b>06 页 AI 模块只需要 15 分钟，05 页高并发才是要背到滚瓜烂熟的王牌。</b>
+  </div>
+
+  <div class="callout danger">
+    <span class="ct">开口前再默念一遍口径红线</span>
+    <b>不说"乐观锁"</b>（说"行锁 + <code>WHERE stock&gt;=?</code> 条件更新，CAS 思想"）；
+    <b>不说"幂等四式"</b>（说"幂等设计的四种手段"）；
+    <b>不说"微服务架构"</b>（说"只拆了 ai-service，主体是单体"）；
+    <b>不说"RAG 什么都能答"</b>（说"RAG 只答非结构化内容，价格库存走 SQL"）；
+    <b>不说"用 MySQL 全文索引搜商品"</b>（全文索引用在<b>笔记</b>上，商品是 <code>LIKE</code>）。
+    完整红线见 <a href="08-面试速查与自查.html">08 页</a>——这五条说错一条，前面讲得再好都会被扣分。
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+
+</main>
+
+<script src="_assets/app.js"></script>
+</body>
+</html>

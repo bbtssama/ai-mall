@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 订单与交易 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="03">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+
+<main class="main">
+
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>一 · 结构与业务链路</b></div>
+    <h1>03 · 订单与交易</h1>
+    <p class="lede">这页讲的是整个项目的"钱袋子"。超卖、重复下单、重复支付、订单超时——每一个都是资损场景，每一个都是面试必问。看完你要能白板画出下单链路、防超卖的那一行 SQL、支付回调的六步、以及限量发售的削峰全景。</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 45 分钟</span>
+      <span class="badge badge-star">面试权重 ★★★</span>
+      <span class="badge badge-gray">涉及 5 张表 / order+pay 两包 35 个类</span>
+    </div>
+  </header>
+
+  <div class="toolbar"></div>
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START  以下为本页正文，由子代理撰写
+       ==================================================================== -->
+
+  <h2><span class="h2n">3.1</span>订单域全景：两张表加一个状态机</h2>
+
+  <div class="card">
+    <h3 class="card-title">订单域全景：两张表 + 一个状态机 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：order/bean/Order.java · OrderItem.java · mapper/OrderMapper.xml · OrderItemMapper.xml</p>
+    <p><strong>一句话：</strong>一次下单 = <code>t_order</code> 里一行主记录 + <code>t_order_item</code> 里 N 行明细。主表回答"这笔交易是谁的、多少钱、到哪一步了"，明细表回答"买了哪些 SKU、各几件、什么价"。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      订单主表像餐厅的<b>账单抬头</b>（桌号、总额、当前状态），订单明细像账单下面<b>一行行的菜品</b>。抬头会变（待支付 → 已支付 → 已取消），但下面那几行菜名和单价一旦写上去就不该再变——这正是 3.5 节要讲的"快照"。
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:170px">表</th><th>定位</th><th>关键字段 / 约束</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>t_order</code></td>
+            <td>订单主表，一单一行</td>
+            <td><code>order_no</code>（<code>uk_order_no</code> 唯一）、<code>status</code>、<code>total_amount</code>、收货人三字段、<code>pay_time</code>、<code>cancel_time</code>、<code>version</code>；索引 <code>idx_user_created(user_id, created_at)</code> 供"我的订单"分页</td>
+          </tr>
+          <tr>
+            <td><code>t_order_item</code></td>
+            <td>订单明细，一单 N 行，<b>商品信息冗余快照</b></td>
+            <td><code>order_id</code>、<code>sku_id</code>、<code>product_name</code> / <code>sku_name</code> / <code>price</code>（三个快照字段）、<code>quantity</code>；索引 <code>idx_order(order_id)</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>订单号由代码生成（17 位时间戳 + 4 位随机 + 用户尾号），唯一性由 <code>uk_order_no</code> 兜底，而不是靠代码保证不重复——这条"<b>能用数据库约束兜底的就不靠应用层判断</b>"的思路，后面 3.4、3.9 会反复出现。</p>
+    <h4>状态机：五个状态，两条出口</h4>
+    <p><strong>一句话：</strong>订单状态不是一堆 if-else，而是<b>五个常量 + 一个由 SQL 条件更新实现的流转规则</b>。所有状态变更都走同一条 SQL：<code>UPDATE t_order SET status=? WHERE id=? AND status=?</code>。</p>
+    <div class="flow">
+      <div class="flow-node"><span class="n">PENDING_PAY</span><span class="d">待支付<br>下单默认状态</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">PAID</span><span class="d">已支付<br>支付回调推进</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">SHIPPED</span><span class="d">已发货<br>常量已定义</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">COMPLETED</span><span class="d">已完成<br>常量已定义</span></div>
+    </div>
+    <p>待支付还有一条出口：<code>PENDING_PAY → CANCELLED</code>（<b>已取消</b>）。触发它的只有两条路径——用户手动取消，或 30 分钟超时消息到达。取消成功后必须回补库存。</p>
+    <div class="callout warn">
+      <span class="ct">诚实边界（面试主动讲，是加分项）</span>
+      <code>STATUS_SHIPPED</code> 与 <code>STATUS_COMPLETED</code> 只是在 <code>Order.java</code> 里定义了常量，<b>全项目没有任何一处代码会把订单推进到这两个状态</b>（没有发货接口、没有确认收货接口）。同理 <code>Payment.STATUS_FAILED</code> 也从未被写入。所以准确的说法是："<b>状态机定义了五个状态，目前落地了待支付 / 已支付 / 已取消三条边，发货和收货留到 V5</b>"——不要说成"完整的订单生命周期都实现了"。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：状态机是靠 WHERE 条件更新实现的</summary>
+      <div class="lvl-body">
+        <p>关键不在 Java 侧，而在 MyBatis 的 <code>WHERE</code> 子句——<b>旧状态就是闸门</b>。返回值 <code>rows</code> 才是真正有用的信息：<code>1</code> = 我抢到了这次流转，可以继续做后续动作（回补库存、关支付单）；<code>0</code> = 别人抢先了，我什么都不做。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">mapper/OrderMapper.xml</span><span class="loc">:54-61</span></div>
+          <pre><code>&lt;!-- 状态机 CAS：防并发重复流转。取消时回填 cancel_time --&gt;
+&lt;update id="updateStatus"&gt;
+    UPDATE t_order
+    SET status = #{toStatus},
+        &lt;if test="toStatus == 'CANCELLED'"&gt;cancel_time = #{cancelTime},&lt;/if&gt;
+        version = version + 1
+    WHERE id = #{id} AND status = #{fromStatus}
+&lt;/update&gt;</code></pre>
+        </div>
+        <p>两个细节：<b>一是</b><code>version = version + 1</code> 只是每次流转自增做个标记，<code>WHERE</code> 里<b>没有</b>拿它做比对（3.3 节详说这里为什么不能说成乐观锁）；<b>二是</b><code>cancel_time</code> 用 <code>&lt;if&gt;</code> 动态拼接，只有取消才回填，支付时不写。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "订单表有五个状态：待支付、已支付、已发货、已完成、已取消。所有状态流转都走同一条 SQL——<code>UPDATE ... WHERE id=? AND status=旧状态</code>，把并发裁决交给数据库的行锁。返回影响行数 0 就说明这次流转没抢到，直接放弃、不做后续动作。<b>这套写法天然幂等</b>：状态一旦改过去，再执行同样的流转就找不到旧状态的行了。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>1. 不要说"我们用了状态机引擎"。</b>项目里没有 Spring StateMachine、没有 DSL，就是把 <code>WHERE status = 旧值</code> 硬编码在 Mapper XML 里。准确说法是"<b>用条件更新实现状态机语义</b>"。<br>
+          <b>2. 不要给 <code>SHIPPED</code> / <code>COMPLETED</code> 编流程。</b>它们只是常量，代码里没有任何流转。<br>
+          <b>3. <code>version</code> 字段不是乐观锁</b>——见 3.3，这条红线说错就露馅。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.2</span>下单主流程：八步走完一次 create</h2>
+
+  <div class="card">
+    <h3 class="card-title">create 的八步 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：order/service/impl/OrderServiceImpl.java:56-135</p>
+    <p><strong>一句话：</strong>下单是一个<b>包在 <code>@Transactional</code> 里的大方法</b>，从幂等校验一路做到发延迟消息。任何一步抛业务异常，整个事务回滚，库存不会被扣掉。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      这八步像"一手交钱一手交货"的柜台流程：先查你是不是拿着号（token），再一件件点货出库（校验 + 扣库存），然后开单（主表 + 明细），最后把购物篮收走并设一个 30 分钟闹钟。<b>任何一步卡住，整笔交易作废、货退回原位</b>——这就是事务。
+    </div>
+    <ol class="steps">
+      <li><b>① 校验幂等 token（防双击）</b><code>OrderServiceImpl.java:62-67</code>。带 token 就调 <code>redisOps.consumeToken(...)</code> 消费，返回 <code>false</code> 立即抛"请勿重复提交订单"；token 为空则跳过（兼容未接入的调用方）。</li>
+      <li><b>② 校验明细非空</b><code>OrderServiceImpl.java:68-71</code>。条目为空抛 <code>CART_EMPTY</code>。最廉价的一道防御，放在扣库存之前。</li>
+      <li><b>③ 逐项查 SKU + 查商品，校验上架</b><code>OrderServiceImpl.java:79-90</code>。先 <code>selectById</code> 拿 SKU，再回查商品确认 <code>status == 1</code>。这里读到的 <code>stock</code> 只用来<b>快速失败</b>（提前给出友好提示），<b>不是</b>扣减依据。</li>
+      <li><b>④ 扣库存：CAS 条件更新</b><code>OrderServiceImpl.java:91-95</code>。调 <code>skuMapper.deductStock(...)</code>，返回 0 说明并发下库存不足，抛 <code>STOCK_NOT_ENOUGH</code>。这是整条链路的技术核心，3.3 节单独讲透。</li>
+      <li><b>⑤ 组装明细 + 累加总额</b><code>OrderServiceImpl.java:96-103</code>。把商品名、规格名、单价<b>复制</b>进 <code>OrderItem</code>（快照，见 3.5），同时算 <code>total</code>。<b>金额来自库里查出的 <code>sku.getPrice()</code>，不是前端传的</b>。</li>
+      <li><b>⑥ 插入订单主表</b><code>OrderServiceImpl.java:107-115</code>。生成订单号，状态固定为 <code>STATUS_PENDING_PAY</code>，<code>insert</code> 回填自增主键。</li>
+      <li><b>⑦ 批量插入明细 + 清购物车</b><code>OrderServiceImpl.java:118-125</code>。<code>batchInsert</code> 一次 SQL 写入所有明细；只有 <code>fromCart == true</code> 时才按 skuId 清购物车，直接购买不清——避免误删购物车里同款。</li>
+      <li><b>⑧ 注册"提交后发延迟消息"</b><code>OrderServiceImpl.java:132</code>。调 <code>delayMessageSender.sendAfterCommit(order.getId())</code>。注意是 <b>afterCommit</b>，不是当场发——3.6 节展开。</li>
+    </ol>
+    <details class="lvl mech">
+      <summary>机制与代码：扣库存与建单在同一把行锁里</summary>
+      <div class="lvl-body">
+        <p>代码里有一段注释值得逐字读，因为它同时说清了"为什么快"和"代价是什么"：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:73-76</span></div>
+          <pre><code>// 1. 逐项校验 + CAS 扣库存（任一失败抛异常，@Transactional 整体回滚）
+//    说明：扣库存放在最前，可尽早暴露库存不足（快速失败）；但热点行锁仍持有至本方法事务提交，
+//    后续写订单/明细/清购物车都在锁覆盖范围内。要进一步缩短锁时长可把扣库存拆为独立短事务。
+List&lt;OrderItem&gt; orderItems = new ArrayList&lt;&gt;(items.size());</code></pre>
+        </div>
+        <p><b>为什么扣库存放在最前：</b>尽早失败，避免白跑后面几步。<b>代价是什么：</b>InnoDB 的排他锁一直持有到事务提交，意味着"写订单 + 写明细 + 清购物车"这三步也在这把锁的保护（和束缚）之下。作者在注释里主动写了改进方向——<b>能主动说出自己方案的代价，比假装它没有代价更让人信服</b>。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "下单是一个事务方法，八步：幂等 token 校验、明细非空校验、逐项查 SKU 并校验上架、<b>CAS 条件更新扣库存</b>、组装明细并累加金额、插订单主表、批量插明细并按需清购物车、最后注册提交后发延迟消息。任何一步业务异常都抛出去让事务整体回滚，所以不会出现'库存扣了但订单没建'。<b>金额统一用数据库里的 SKU 价格算，不信前端传的。</b>"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错 / 预判追问</span>
+          <b>追问一："为什么扣库存放在最前面？"</b>会的人答"快速失败 + 让热点行锁覆盖后续写操作"；不会的人答"随便放的"。<br>
+          <b>追问二："扣库存和建单在同一个事务里，锁不是很长吗？"</b>答"是，这是已知代价，注释里写了改进方向——拆独立短事务或走 Redis 预扣"。<br>
+          <b>别说错：</b>第 ③ 步查出的 <code>stock</code> 只是<b>提示用</b>，不能拿它当扣减依据——否则就退化成"先查再改"（3.3 节的反面教材）。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.3</span>防超卖：行锁 + <code>WHERE stock&gt;=?</code> 条件更新</h2>
+
+  <div class="card">
+    <h3 class="card-title">超卖是怎么发生的（先看事故，再看方案） <span class="badge badge-star">本页最重要</span></h3>
+    <p class="card-sub">对应代码：mapper/ProductSkuMapper.xml:31-47 · goods/mapper/ProductSkuMapper.java</p>
+    <p><strong>一句话：</strong>库存 <b>1 件</b>，两个请求同时到达，如果先 <code>SELECT</code> 查库存再 <code>UPDATE</code> 扣减，两个请求都会认为"还有货"，最后卖出 2 件。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:80px">时刻</th><th>线程 A</th><th>线程 B</th></tr></thead>
+        <tbody>
+          <tr><td>t1</td><td><code>SELECT stock</code> → 读到 <b>1</b></td><td>—</td></tr>
+          <tr><td>t2</td><td>—</td><td><code>SELECT stock</code> → 读到 <b>1</b>，<b>也认为有货</b></td></tr>
+          <tr><td>t3</td><td><code>UPDATE stock = 0</code>，下单成功</td><td>—</td></tr>
+          <tr><td>t4</td><td>—</td><td><code>UPDATE stock = -1</code>，下单成功 → <b>超卖，库存变负</b></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>根因只有一句话：<b>"读"和"写"是两条 SQL，两步之间别人可以插队</b>。这是 TOCTOU（检查时与使用时不一致）的经典形态。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      两人同时抢最后一张票。<b>先查再改</b>像是"先问售票员还有没有票（查到有），然后转身去取钱，回来再买"——你取钱的时候别人已经把票买走了。<b>条件更新</b>像是"一张嘴就说'给我出票，且必须还有余票'，售票员在同一个动作里既检查又出票"——不存在中间窗口。
+    </div>
+    <h4>本项目方案：一条 SQL 把"检查"和"扣减"焊死</h4>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">mapper/ProductSkuMapper.xml</span><span class="loc">:35-40</span></div>
+      <pre><code>&lt;update id="deductStock"&gt;
+    UPDATE t_product_sku
+    SET stock = stock - #{quantity},
+        sales = sales + #{quantity}
+    WHERE id = #{id} AND stock &gt;= #{quantity}
+&lt;/update&gt;</code></pre>
+    </div>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:91-95</span></div>
+      <pre><code>// 数据库层 CAS 扣减（WHERE stock &gt;= ?）：InnoDB 对命中行加排他锁，返回 0 = 并发下库存不足
+if (skuMapper.deductStock(sku.getId(), it.getQuantity()) == 0) {
+    throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH,
+            "商品[" + product.getSpuName() + "]库存不足");
+}</code></pre>
+    </div>
+    <h4>为什么"这一条 SQL 就是原子的"</h4>
+    <p>三个事实，讲清楚就够了：</p>
+    <ul>
+      <li><b>InnoDB 对 <code>UPDATE</code> 命中的行加排他锁（X 锁）</b>。线程 A 执行这条 SQL 时，<code>id=?</code> 那一行被锁住；线程 B 对同一行的 <code>UPDATE</code> 必须<b>阻塞等待</b>，直到 A 的事务提交或回滚。</li>
+      <li><b>条件判断发生在锁内。</b><code>stock &gt;= ?</code> 是在 B 拿到锁之后、按<b>最新</b>的库存值重新判断的。A 把库存扣到 0 之后，B 拿到锁再判断 <code>0 &gt;= 1</code> 为假，更新 0 行 → 扣不到货。</li>
+      <li><b>返回值就是裁决结果。</b><code>rows == 1</code> 说明我抢到了，可以继续建订单；<code>rows == 0</code> 说明没抢到，直接抛"库存不足"。<b>不需要应用层重试，也不需要额外加锁。</b></li>
+    </ul>
+    <p>合成一句话：<b>行排他锁保证了串行，谓词写在 UPDATE 里保证了"判断依据是最新值"</b>。所以库存永远不会被扣成负数。</p>
+    <h4>三条路的对比</h4>
+    <div class="vs">
+      <div class="bad">
+        <h5>先查再改（SELECT 再 UPDATE）</h5>
+        <p>两条 SQL，<code>SELECT</code> 与 <code>UPDATE</code> 之间有窗口。并发下两个请求都能读到"还有货"，各自扣一次 → <b>超卖</b>。有人想"加个 <code>if (stock &gt; qty)</code> 判断"——那只是把窗口收窄，没消除，因为判断用的还是<b>刚才读到的旧值</b>。</p>
+      </div>
+      <div>
+        <h5>SELECT ... FOR UPDATE 再改</h5>
+        <p><b>正确</b>，理论上和条件更新等效：先加锁、再读、再改，读到的就是锁内最新值。代价是比条件更新<b>多一次数据库往返</b>，而且锁的持有时间更长。</p>
+      </div>
+      <div class="good">
+        <h5>条件更新（本项目方案）</h5>
+        <p>一次往返，判断与扣减在<b>同一条 SQL</b> 内由数据库原子完成，代码只需看返回值。本质是 <b>CAS 思想</b>（Compare-And-Swap）：把"期望条件"写进 WHERE，让数据库告诉我们有没有 swap 成功。</p>
+      </div>
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：回补库存是逆操作，同样只认条件更新的结果</summary>
+      <div class="lvl-body">
+        <p>扣出去的库存必须有地方加回来（取消订单、超时未支付），对应 <code>ProductSkuMapper.xml:43-47</code> 的 <code>addStock</code>：<code>UPDATE t_product_sku SET stock = stock + ? WHERE id = ?</code>。它是<b>无条件加</b>，因为它只在"状态机确认取消成功之后"才被执行——<code>OrderServiceImpl.cancel</code> 先 <code>updateStatus(id, PENDING_PAY, CANCELLED, now)</code>，<code>rows == 0</code> 抛"仅待支付订单可取消"，<code>rows == 1</code> 才逐项 <code>addStock</code>。</p>
+        <p><b>顺序至关重要：CAS 成功之后才回补。</b>如果反过来先回补再 CAS，"竞争失败"的线程也会执行回补 → <b>状态没变、库存却加了 = 库存虚增</b>，真实资损。这和 3.6 的三方竞争是同一个道理。</p>
+        <p>另外，<code>deductStock</code> 的 XML 注释里<b>主动写了"本 SQL 未使用 version 字段"</b>，同时说明"锁持有范围从本语句到事务 COMMIT，含后续写订单/明细/清购物车"。作者自己把口径和代价都钉死了——很值得学的工程习惯。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="redline">
+          <b>绝不说"乐观锁"。</b>扣库存只有一种正确说法：<b>"行锁 + <code>WHERE stock&gt;=?</code> 条件更新，本质是 CAS 思想"</b>。<br>
+          <code>t_product_sku.version</code> 是<b>纯预留字段，从未参与任何比对</b>——翻 <code>ProductSkuMapper.xml</code> 就知道了：<code>deductStock</code> 的 SQL 里根本没有它，XML 注释也明写了"本 SQL 未使用 version 字段"。这一个词说错，面试官立刻就知道你没真读自己的代码。
+        </div>
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "防超卖的核心是一行 SQL：<code>UPDATE t_product_sku SET stock = stock - ? WHERE id = ? AND stock &gt;= ?</code>。<br>
+          InnoDB 会对命中的行加排他锁，<code>stock &gt;= ?</code> 这个条件判断在锁内、按最新库存值执行，判断和扣减在同一条 SQL 里原子完成。返回影响行数 0 就说明并发下库存不足，抛业务异常回滚整个下单事务。<br>
+          它是 CAS 思想——把期望条件写进 WHERE，让数据库裁决。不需要应用层重试、不需要额外分布式锁，<b>也不需要 version 字段</b>。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错 / 预判追问</span>
+          <b>追问一："那 <code>version</code> 字段留着干嘛？"</b>——诚实答："它是建表时的预留字段，目前只由 <code>updateStatus</code> 每次流转自增做标记，<b>不参与任何并发控制</b>。可以理解为技术债，留着是为了将来真要用版本号做并发控制时不用改表结构。"<b>能主动承认"这是预留、没起作用"，比硬编一个用途可信得多。</b><br>
+          <b>追问二："这是乐观锁吗？"</b>——"不是。乐观锁是'读版本号 → 带版本号更新 → 比对影响行数'，需要应用层重试循环；这里是数据库行锁 + 条件谓词，一次 SQL 完成。"<br>
+          <b>追问三："高并发下行锁会不会成瓶颈？"</b>——"会。同一热点的 UPDATE 会串行排队，连接池可能先被打爆。" → <b>顺势引到 3.10 的限量发售</b>（Redis 预减 + MQ 削峰就是为解决这个）。<br>
+          <b>红线延伸：</b>本项目<b>没有</b>用分布式锁做扣库存，不要把"加个 Redis 锁"说成自己的方案——预减 + CAS 才是。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.4</span>下单幂等：一次性 token 的签发与原子消费</h2>
+
+  <div class="card">
+    <h3 class="card-title">用户双击"提交订单"会发生什么 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：order/controller/OrderRestController.java:32-35 · OrderServiceImpl.java:141-147、62-67 · common/redis/RedisOps.java:313-325</p>
+    <p><strong>一句话：</strong>结算页打开时后端签发一个一次性 token（写 Redis，TTL 10 分钟），提交订单时带回；服务端用 <code>DEL</code> 把它删掉——<b>删到了就放行，删不到就说明这个 token 已经被用过</b>，拒绝重复提交。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      像游乐场的<b>一次性手环</b>：进闸口时工作人员把腕带剪断收走（<code>DEL</code>），你第二次拿同一根断腕带过来，闸口自然不认。<b>关键在于"剪断"这个动作本身就是"检查 + 作废"合体</b>——不存在"先检查真假、再剪"的两步窗口。
+    </div>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:141-147</span></div>
+      <pre><code>@Override
+public String createIdempotentToken() {
+    Long userId = StpUtil.getLoginIdAsLong();
+    String token = java.util.UUID.randomUUID().toString().replace("-", "");
+    redisOps.set(TOKEN_KEY_PREFIX + userId + ":" + token, "1", 600);
+    return token;
+}</code></pre>
+    </div>
+    <p>key 的拼法是 <code>aimall:order:token:{userId}:{token}</code>——<b>按用户隔离</b>，防止 A 用户的 token 被 B 用户猜中或复用。TTL 600 秒要覆盖"进结算页 → 填地址 → 提交"的正常操作时长，同时不留下太长的泄漏窗口。</p>
+    <details class="lvl mech">
+      <summary>机制与代码：为什么这里用 DEL，而不是 Lua 脚本</summary>
+      <div class="lvl-body">
+        <p>本项目在需要"读—判断—写"复合语义时一律用 Lua。但这个 token 的消费<b>不需要 Lua</b>，因为 <code>DEL</code> 本身已经是单条原子命令：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/redis/RedisOps.java</span><span class="loc">:323-325</span></div>
+          <pre><code>// 注释原文：DEL 是原子的——删除成功即"只此一次"
+public Boolean consumeToken(String key) {
+    return safe(() -&gt; stringRedisTemplate.delete(key), null, "consumeToken", key);
+}</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:60-67</span></div>
+          <pre><code>// 0. 幂等 token 校验（防双击重复下单）：DEL 原子消费，一次有效。
+//    token 为空 = 调用方未接入（兼容）；Redis 不可用 = fail-open 放行。
+if (org.springframework.util.StringUtils.hasText(req.getIdempotentToken())) {
+    Boolean consumed = redisOps.consumeToken(TOKEN_KEY_PREFIX + userId + ":" + req.getIdempotentToken());
+    if (Boolean.FALSE.equals(consumed)) {
+        throw new BusinessException(ResultCode.BAD_REQUEST, "请勿重复提交订单");
+    }
+}</code></pre>
+        </div>
+        <p><b>三种返回值必须分清</b>（最容易被追问的细节）：<code>true</code> = 首次消费（<code>DEL</code> 真删掉了 1 个 key），放行；<code>false</code> = token 已被用过 / 不存在（<code>DEL</code> 返回 0），拒绝；<code>null</code> = Redis 不可用（<code>safe()</code> 包装降级），<b>fail-open 放行</b>。代码里的判断是 <code>Boolean.FALSE.equals(consumed)</code>——只把明确的 false 当重复，<code>null</code> 走放行，这个写法本身就是 fail-open 的实现。</p>
+      </div>
+    </details>
+    <div class="callout ok">
+      <span class="ct">关键取舍：Redis 不可用时 fail-open（放行），为什么？</span>
+      <b>因为"防重"是优化，不是正确性。</b>两条理由：<br>
+      <b>1. 后面还有兜底。</b>就算 token 校验完全失效、用户真的提交了两次，订单表的 <code>uk_order_no</code>、状态机 CAS、以及支付侧的 <code>uk_order_id</code> 都还在——多出来的那一单不会造成资损级错误。<br>
+      <b>2. 反过来（fail-close）是灾难。</b>如果 Redis 一挂就拒绝所有下单，等于把<b>一个旁路缓存组件变成了全站单点故障</b>——<code>RedisOps</code> 这个可降级门面的整个设计哲学就是"Redis 挂了业务变慢，而不是不可用"。<br>
+      一句话背下来：<b>"防重是优化不是正确性，别让缓存故障挡住正常下单。"</b>
+    </div>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "下单防双击用的是一次性 token：结算页加载时后端签发 UUID 写 Redis、TTL 10 分钟，key 里带 userId 防串用；提交订单时带回，服务端用 <code>DEL</code> 消费——<code>DEL</code> 是单命令原子操作，返回 1 就是首次消费放行，返回 0 说明已被用过，直接拒。<b>Redis 不可用时我们选择 fail-open 放行</b>，因为防重是优化不是正确性，后面还有唯一索引和状态机兜底；fail-close 反而会让缓存故障变成全站下不了单。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>1. token 和分布式锁不是一回事。</b>锁挡的是"并发"（会误杀两笔真实的并发订单），token 挡的是"重复"（同一个 token 用第二次）。两个用户拿不同 token 同时下单是<b>允许</b>的。<br>
+          <b>2. 不要把它说成"幂等四式"。</b>口径是"<b>幂等设计，我用了四种手段：唯一索引 / 状态机条件更新 / 一次性 token / 消费端回查</b>"——"四式"是自造名词，已废弃。<br>
+          <b>3. token 可以为空。</b><code>hasText(...)</code> 为假时直接跳过校验（兼容未接入的调用方、Postman 调试）。这是<b>兼容性取舍</b>，安全上弱一点，但避免了"必须同步升级前后端"的部署僵局——主动说出来比被追问出来好。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.5</span>订单快照：为什么明细表要冗余商品信息</h2>
+
+  <div class="card">
+    <h3 class="card-title">商品改名/改价，历史订单不能跟着变 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：order/bean/OrderItem.java:23-36 · db/migration/V1__init.sql:122-132</p>
+    <p><strong>一句话：</strong>下单的那一刻，把商品的<b>名字、规格名、成交单价复制一份</b>存进订单明细。之后商家怎么改名改价，历史订单显示的仍是当时的样子。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      超市小票。你三年前买的牛奶小票上印着当时的价格，就算这款牛奶今天涨价了、改名了、下架了，那张小票上的数字<b>一个字也不会变</b>。小票不是"商品的引用"，而是"那一次交易的记录"。订单明细就该是小票。
+    </div>
+    <p>如果不做快照会怎样？明细只存 <code>sku_id</code>，展示时 join 商品表——于是：<b>商品改价后，用户翻历史订单发现"我明明花 199 买的，怎么显示 299"</b>；商品改名后，历史订单里的名字也跟着变；商品下架后，订单里的商品名直接查不到、页面显示空白。<b>这在电商里是投诉级 bug，也是对账纠纷的源头。</b></p>
+    <details class="lvl mech">
+      <summary>机制与代码：快照是下单时"顺手抄一份"</summary>
+      <div class="lvl-body">
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:96-103</span></div>
+          <pre><code>OrderItem oi = new OrderItem();
+oi.setSkuId(sku.getId());
+oi.setProductName(product.getSpuName());   // 商品名快照
+oi.setSkuName(sku.getSkuName());           // 规格名快照
+oi.setPrice(sku.getPrice());               // 成交单价快照
+oi.setQuantity(it.getQuantity());
+orderItems.add(oi);
+total = total.add(sku.getPrice().multiply(BigDecimal.valueOf(it.getQuantity())));</code></pre>
+        </div>
+        <p>表结构里三个字段的注释也写明了语义（<code>V1__init.sql:126-128</code>）：<code>product_name</code> "商品名快照"、<code>sku_name</code> "规格名快照"、<code>price</code> "成交单价快照"。<code>sku_id</code> 也留着——但它不用于展示，只用于<b>追溯和回补库存</b>（<code>addStock(oi.getSkuId(), ...)</code>）。<b>"展示看快照、逆操作看 id"，两个字段各有分工。</b></p>
+        <p>顺带一个容易忽略的好处：<b>订单详情查询不需要 join 商品表</b>。<code>OrderItemMapper.selectByOrderId</code> 一条 SQL 就把明细全查出来，商品表怎么改都不影响。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "订单明细表里冗余了商品名、规格名、成交单价三个快照字段。原因是订单是<b>交易记录</b>不是商品的引用——商品改名改价下架之后，历史订单必须显示下单当时的样子，否则金额对不上就是投诉和对账纠纷。写入时机就是下单那一刻，从库里的 SKU 和商品读出最新值抄一份。<code>sku_id</code> 同时保留，但只用于追溯和库存回补，不用于展示。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错 / 预判追问</span>
+          <b>追问："快照会造成数据冗余吧？"</b>——"会，这是有意为之的取舍。订单明细是低频写入、永久保留、金额必须可追溯的数据，用一点空间换'历史订单永不变形'非常划算。"<br>
+          <b>不要说"订单项只存 id 就够了"</b>——那是没想过商品会变的答案。<br>
+          <b>连带追问："下单金额以谁为准？"</b>——以数据库里 SKU 的价格为准（算 <code>total</code> 用的是 <code>sku.getPrice()</code>），不接受前端传的金额。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.6</span>订单超时取消：TTL + DLX 延迟消息</h2>
+
+  <div class="card">
+    <h3 class="card-title">30 分钟不付款，库存要自动还回去 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：order/mq/OrderDelayMqConfig.java · OrderDelayMessageSender.java · OrderCancelConsumer.java</p>
+    <p><strong>一句话：</strong>下单成功后往一个<b>没有消费者</b>的队列里丢一条消息，这个队列设了 30 分钟 TTL 和死信路由；消息躺满 30 分钟"死亡"后被自动转运到真正的工作队列，消费端检查"订单是否仍待支付"，是则取消并回补库存。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      像洗衣店的<b>寄存柜</b>：你把衣服存进去（入队），柜子有 30 天保管期（TTL）。到期没人来取，管理员不会把衣服扔掉，而是按规则<b>转送到"待处理区"</b>（死信路由），那里的工作人员再判断"这件衣服的主人还要不要"（回查订单状态）。
+    </div>
+    <h4>为什么不用"定时任务扫表"</h4>
+    <div class="vs">
+      <div class="bad">
+        <h5>定时任务轮询扫超时单</h5>
+        <p>比如每分钟扫一次 <code>WHERE status='PENDING_PAY' AND created_at &lt; now-30min</code>。</p>
+        <p>问题：<b>实时性差</b>（平均晚 30 秒到 1 分钟）；<b>DB 压力恒定</b>——不管有没有超时单都在扫；订单量上来后单次扫描越来越慢。</p>
+      </div>
+      <div class="good">
+        <h5>MQ 延迟消息（本项目主方案）</h5>
+        <p>下单时投一条消息，<b>到期即触发</b>，不用扫描。DB 只在真正需要取消时才被访问，负载与超时单数量成正比，而不是与总订单量成正比。</p>
+        <p>扫表的思路没被丢掉，它变成<b>补偿任务的兜底</b>（见下）。</p>
+      </div>
+    </div>
+    <p>兜底入口就是 <code>OrderMapper.selectTimeoutPending</code>（<code>OrderMapper.xml:36-45</code>）：扫描"超时仍未取消的待支付订单"，专门兜住"消息丢了 / 没发出去"的漏网之鱼。注释里也写了"小数据量直接全表过滤状态；量级上来后可加 <code>(status, created_at)</code> 索引"。</p>
+    <h4>队列级 TTL vs 消息级 TTL：队头阻塞</h4>
+    <p>RabbitMQ 为性能考虑，<b>只检查队首消息是否过期</b>，不扫描整个队列。于是消息级 TTL（每条消息自带不同过期时间）有一个致命坑：</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:110px">队列位置</th><th>TTL 设置</th><th>实际结果</th></tr></thead>
+        <tbody>
+          <tr><td>队首消息 A</td><td>60 分钟</td><td>没到期，堵在那里</td></tr>
+          <tr><td>第二条消息 B</td><td>1 分钟</td><td><b>不会 1 分钟后投递</b>——必须等 A 先死、跟着一起走；实际延迟变成 60 分钟</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>这叫<b>队头阻塞</b>。本项目的规避办法是<b>统一过期时间 = 用队列级 TTL</b>（参数设在队列上，全队列共享一个时钟）：</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">order/mq/OrderDelayMqConfig.java</span><span class="loc">:73-80</span></div>
+      <pre><code>@Bean
+public Queue orderDelayQueue() {
+    Map&lt;String, Object&gt; args = new HashMap&lt;&gt;();
+    args.put("x-message-ttl", ORDER_TTL_MILLIS);              // 队列里所有消息 30 分钟过期
+    args.put("x-dead-letter-exchange", ORDER_EXCHANGE);       // 过期后投给业务交换机
+    args.put("x-dead-letter-routing-key", DLX_ROUTING_KEY);   // 用这个 key 重新路由
+    return QueueBuilder.durable(DELAY_QUEUE).withArguments(args).build();
+}</code></pre>
+    </div>
+    <p>TTL 常量是 <code>ORDER_TTL_MILLIS = 30 * 60 * 1000L</code>。<b>为什么不用官方延迟插件</b>（<code>rabbitmq-delayed-message-exchange</code>）：它要求 Broker 安装插件，生产环境不一定装得了，本地起的原生 RabbitMQ 也没有——而 TTL + DLX 是<b>零插件</b>的标准方案。代价是"所有订单只能同一个超时时长"，要做"VIP 15 分钟 / 普通 30 分钟"就得换延迟插件或多条不同 TTL 的队列。</p>
+    <h4>三方竞争同一订单</h4>
+    <p>消费者收到消息时，订单<b>不一定</b>还是待支付——消息在队列里躺了 30 分钟，这期间什么都可能发生：</p>
+    <div class="flow vertical">
+      <div class="flow-node"><span class="n">线程 A：用户手动取消</span><span class="d">POST /api/v1/orders/{id}/cancel</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">线程 B：超时延迟消息到达</span><span class="d">OrderCancelConsumer.onCancelMessage</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">线程 C：支付回调到达</span><span class="d">PaymentService.handleCallback 第 ⑥ 步（反方向：PENDING_PAY → PAID）</span></div>
+    </div>
+    <p>A 和 B 都要做 <code>PENDING_PAY → CANCELLED</code>；C 要做 <code>PENDING_PAY → PAID</code>。三个入口<b>共用同一个闸门</b>——<code>WHERE status = 'PENDING_PAY'</code>，所以只有一个能过：</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">order/mq/OrderCancelConsumer.java</span><span class="loc">:67-97（日志与 null 防御从略）</span></div>
+      <pre><code>public boolean cancelIfStillPending(Long orderId) {
+    Order order = orderMapper.selectById(orderId);
+    // 已支付/已取消：最常见的正常分支，直接跳过
+    if (!Order.STATUS_PENDING_PAY.equals(order.getStatus())) { return false; }
+    int rows = orderMapper.updateStatus(orderId,   // 状态机 CAS：并发下只有一个线程能改成功
+            Order.STATUS_PENDING_PAY, Order.STATUS_CANCELLED, LocalDateTime.now());
+    if (rows == 0) { return false; }               // 输家：被别的线程抢先
+    // 回补库存——必须在 CAS 成功之后，否则输家也会回补（库存虚增）
+    orderItemMapper.selectByOrderId(orderId)
+            .forEach(oi -&gt; skuMapper.addStock(oi.getSkuId(), oi.getQuantity()));
+    paymentService.closeIfPaying(orderId);
+    return true;
+}</code></pre>
+    </div>
+    <p>如果 A、B 两次都成功取消，<b>库存会被回补两次 → 库存虚增</b>，这是真实资损。CAS 让输家拿到 0 行、在回补之前就返回，所以库存只会被加回一次——<b>顺序仍然是关键：CAS 成功之后才回补</b>。</p>
+    <p>A、B 竞争的处理是"静默输家"（<code>log + return false</code>）；而 B、C 撞车（取消 vs 支付）后果更严重：如果取消赢了、支付回调随后到达，就会出现<b>钱收了、货没发</b>——代码在这里只能 <code>log.error</code> 提示"需退款/人工兜底"。这不是 CAS 能解决的，<b>资金状态与业务状态必须分开记账、差异显式化</b>。</p>
+    <details class="lvl mech">
+      <summary>机制与代码：发送侧为什么必须 afterCommit</summary>
+      <div class="lvl-body">
+        <p><b>事务里直接发 MQ 是反模式。</b>MQ 不参与数据库事务，是两个独立系统。如果在下单事务还没提交时就 <code>convertAndSend</code>，一旦后续步骤异常、事务回滚，<b>消息却已经飞出去了</b>——30 分钟后消费者查到一个根本不存在的"幽灵订单"。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/mq/OrderDelayMessageSender.java</span><span class="loc">:42-55</span></div>
+          <pre><code>public void sendAfterCommit(Long orderId) {
+    if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+        log.warn("sendAfterCommit 在无事务上下文调用，退化为立即发送 orderId={}", orderId);
+        sendNow(orderId);
+        return;
+    }
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() { sendNow(orderId); }
+    });
+}</code></pre>
+        </div>
+        <p><b>这个类被抽出来当"唯一出口"，本身就是踩坑的产物。</b>早期只有普通下单发这条消息；后来限量发售（3.10）也建订单，却忘了发——导致<b>抢购单永不超时取消，限量库存被死单永久占用</b>。根因是"建单必发延迟消息"这个约束散落在各处、靠人记。抽成唯一组件之后，任何建单路径都调 <code>sendAfterCommit</code>，漏发 = 漏调方法，一眼可见。</p>
+        <p><code>sendNow</code> 的降级也值得一提：MQ 不可用时<b>只记日志、不炸主流程</b>，漏掉的单由补偿任务兜底。<b>超时取消属于"尽力而为"功能，不该因为它挂了就让下单失败。</b></p>
+        <p>消费端还有一条强相关的修复：早期版本在 <code>@Transactional</code> 方法<b>内部</b> try-catch 吞掉异常——异常不冒出代理，Spring 无从感知，<b>半截事务照样提交</b>（状态已改、库存已回补，最后 <code>closeIfPaying</code> 抛异常 → 回滚不生效，支付单永远 PAYING）。现在的写法是让异常冒出 → 事务回滚 → 容器 reject（<code>default-requeue-rejected=false</code>，不重入队防毒消息循环）→ 死信路由进 DLQ 等人工。<b>"事务里吞异常"和"事务里发消息"是同一族反模式：都骗过了事务管理器。</b>详见 05 页。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "订单 30 分钟未支付自动取消，用 <b>TTL + 死信队列</b> 做延迟消息，零插件。下单后往一个没有消费者的队列丢 id，队列设 <code>x-message-ttl</code> 30 分钟和死信路由；消息过期后自动转运到工作队列，消费端回查订单——仍待支付就 CAS 取消并回补库存。<br>
+          <b>为什么用队列级 TTL 而不是消息级：</b>RabbitMQ 只看队首过期，消息级 TTL 会队头阻塞；我们所有订单超时时间一致，队列级天然免疫。<br>
+          <b>发送侧用 afterCommit 注册提交后回调</b>——事务里直接发是反模式，回滚会产生幽灵消息。<b>消费端靠状态机 CAS 收敛</b>，因为用户手动取消、超时消息、支付回调三个线程会竞争同一订单。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>1. 消费端收到消息时订单不一定还是待支付</b>——不要说"消息到了就取消"。正确说法是"回查最新状态 + 状态机 CAS 兜底"。<br>
+          <b>2. 消息体只带 orderId</b>（连状态、金额都不带）。理由："消息在队列里躺 30 分钟，世界已经变了"——带快照会做错决策。<br>
+          <b>3. 不要说"我们用延迟插件"</b>——本项目明确不用插件，是 TTL + DLX。<br>
+          <b>4. 扫表方案没有消失</b>，它以补偿任务的形式留着兜底。说"我们只用了 MQ"是不完整的。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.7</span>支付闭环：<code>t_payment</code> 状态机 + PayChannel 抽象</h2>
+
+  <div class="card">
+    <h3 class="card-title">为什么不在订单表加个"已支付"标记 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：pay/bean/Payment.java · pay/channel/PayChannel.java · MockPayChannel.java · pay/service/PayChannelRouter.java</p>
+    <p><strong>一句话：</strong>资金的事单独一张表、单独一个状态机。<b>订单管交易，支付单管资金</b>；一次"发起支付"的唯一标识是支付单号，它才是回调幂等的锚点。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      订单是<b>合同</b>，支付单是<b>每一次打款的回执</b>。合同可以多次尝试打款（第一次超时了再付一次），但每一笔打款都有且只有一张回执。把"已支付"标记直接打在合同上，你就说不清"是哪一次打款成功了"。
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:130px">问题</th><th>在订单表加 <code>paid</code> 字段会怎样</th></tr></thead>
+        <tbody>
+          <tr><td><b>幂等粒度错</b></td><td>一次订单可能<b>多次发起支付</b>（第一次超时后重付）。"哪一次成功了"这个事实只能锚在支付单号上，标记在订单上说不清。</td></tr>
+          <tr><td><b>对账无锚点</b></td><td>第三方交易号 <code>third_trade_no</code>、回调原始报文 <code>callback_body</code> 放哪？塞进订单表会让它膨胀成大杂烩。</td></tr>
+          <tr><td><b>状态耦合</b></td><td>订单有订单的状态机，支付有自己的状态机（<code>PAYING → PAID / CLOSED</code>），两者<b>生命周期不同步</b>——订单已取消，支付单可能还停在 PAYING 等关闭。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>支付单的四个状态（<code>Payment.java:24-30</code>）：</p>
+    <div class="flow">
+      <div class="flow-node"><span class="n">PAYING</span><span class="d">待支付<br>已建单等付款</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">PAID</span><span class="d">已支付<br><b>终态，绝不回退</b></span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">CLOSED</span><span class="d">已关闭<br>超时 / 取消</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">FAILED</span><span class="d">支付失败<br>常量已定义</span></div>
+    </div>
+    <p>合法流转只有三条边：<code>PAYING→PAID</code>（回调验签通过 / 主动查单查到已付）、<code>PAYING→CLOSED</code>（30 分钟超时 / 用户取消 / 订单取消）、<code>PAYING→FAILED</code>。说状态名时用<b>代码里的真名</b>，不要说成 <code>WAITING_PAY</code> / <code>SUCCESS</code>——那是通用叫法，本项目没这么写。</p>
+    <h4>PayChannel：为什么恰好是这三个方法</h4>
+    <p><strong>一句话：</strong>任何第三方支付网关（支付宝 / 微信 / 银联 / Stripe）接入都逃不出三件事——<b>下单换收银台、验签、主动查单</b>。抽象出这三件事，接口就不会"为某家定制"。</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/channel/PayChannel.java</span><span class="loc">:28-54</span></div>
+      <pre><code>public interface PayChannel {
+    /** 渠道标识，与 t_payment.channel 对应：MOCK / ALIPAY / WECHAT */
+    String code();
+    /** ① 发起支付：返回给前端的"收银台"信息 */
+    CashierInfo create(String paymentNo, java.math.BigDecimal amount, String subject);
+    /** ② 校验回调报文签名 */
+    boolean verifyCallback(java.util.Map&lt;String, String&gt; params);
+    /** ③ 主动查单：用于"回调丢失"时的对账兜底 */
+    QueryResult query(String paymentNo);
+}</code></pre>
+    </div>
+    <p>三个方法的设计意图正好对上后面几节：<code>create</code> 对应"发起支付"（3.7），<code>verifyCallback</code> 对应"防伪造回调"（3.8），<code>query</code> 对应"回调会丢 → 主动查单"（3.9）。<b>接口的形状本身就是业务问题的形状。</b></p>
+    <p>路由类 <code>PayChannelRouter.resolve(channel)</code> 按渠道码挑实现，<b>找不到时降级为 MOCK 并打 WARN，而不是抛错</b>。理由很实在：支付是交易主链路，配置里写错一个字母就让整个下单不可用，代价太大。</p>
+    <div class="callout warn">
+      <span class="ct">诚实标注：这里的渠道是模拟的</span>
+      <b><code>MockPayChannel</code> 是模拟渠道；<code>AlipaySandboxChannel</code> 这个类<b>不存在</b></b>——它只在 <code>PayChannel</code> 和 <code>MockPayChannel</code> 的<b>注释里</b>作为"将来配了沙箱凭证可以接入的实现"被提到过。<br>
+      正确说法："<b>我做了一层支付渠道抽象，默认实现是本地模拟渠道；换真实渠道只改实现类、业务代码零改动</b>"。绝不能吹成"我接了支付宝/微信支付"，也不能说"支付功能是假的"——<b>假的只有"第三方服务器不存在"这一件事</b>，HMAC 签名、验签、幂等、金额核对、状态机、订单联动全是真实链路。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：mock-pay 不直接改状态，而是走真实回调链路</summary>
+      <div class="lvl-body">
+        <p>模拟渠道没有"第三方页面"，怎么触发回调？<code>PaymentController.mockPay</code> 的做法很讲究：它<b>自己不碰状态</b>，而是以"第三方"的身份构造一条<b>带真实签名</b>的回调报文——填 <code>payment_no</code> / <code>order_no</code> / <code>trade_no</code> / <code>amount</code> / <code>status=PAID</code>，再用 <code>mockPayChannel.sign(params)</code> 算签名塞进 <code>sign</code> 字段——然后调 <code>paymentService.handleCallback(MockPayChannel.CODE, params)</code>。</p>
+        <p>所以验签、幂等、金额核对、状态机流转<b>全部真实走过</b>。这也意味着你可以真实验证安全链路：手动 curl 一条假签名的回调，它会返回 <code>sign-error</code>；把 amount 改小再签，它会返回 <code>amount-mismatch</code>。<b>"模拟"的只有第三方不存在，工程链路 100% 是真的。</b></p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我们没有在订单表加'已支付'标记，而是独立的支付单表。三个原因：一是幂等粒度——一次订单可能多次发起支付，回调必须锚在支付单号上；二是对账锚点——第三方交易号和回调原始报文要有地方留痕；三是状态解耦——订单和支付的生命周期不同步，订单取消了支付单可能还在 PAYING。<br>
+          渠道层做了一层 <code>PayChannel</code> 抽象，三个方法：下单换收银台、验签、主动查单——任何支付网关都逃不出这三件事。<b>默认实现是本地模拟渠道，唯一模拟的是'第三方服务器不存在'，签名验签、幂等、金额核对、状态机全是真的。</b>换真实渠道只改实现类。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>1. 不要说"我接了支付宝沙箱"</b>——<code>AlipaySandboxChannel</code> 不存在，只在注释里出现过。<br>
+          <b>2. 不要说"支付是 mock 的所以没什么可讲"</b>——验签/幂等/金额核对/状态机/查单契约都是按真实支付宝链路建模的。<br>
+          <b>3. 状态名用真名</b>：<code>PAYING / PAID / CLOSED / FAILED</code>。别用 <code>WAITING_PAY / SUCCESS</code>。<br>
+          <b>4. 不要说"我们用状态机引擎"</b>——就是把 <code>WHERE status=旧值</code> 写在 Mapper XML 里。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.8</span>HMAC 签名与验签：防伪造回调</h2>
+
+  <div class="card">
+    <h3 class="card-title">不验签的回调接口 = 向全世界开放的"改单入口" <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：pay/channel/MockPayChannel.java:66-121 · pay/service/PaymentService.java:150-156</p>
+    <p><strong>一句话：</strong>支付回调是<b>公网可访问、没有登录态</b>的接口，如果不验签，任何人执行一条 curl 就能把任意订单标成"已支付"。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      验签像信封上的<b>火漆印章</b>。拆信（解析报文）之前先看印章（验签）对不对——印章不对，信里写得再动听（"这笔钱我付了"）也不能信。
+    </div>
+    <h4>不验签的世界会怎样</h4>
+    <p>假设回调只做"取参数、改状态"，那么任何人都可以：<b>白嫖订单</b>（发一条 <code>payment_no=P123</code>，这单就被"支付"了）；<b>篡改金额</b>（把自己的 1 分钱订单标成已付，买走 399 的商品）；<b>伪造退款</b>。所以回调的第一件事永远是验签，它回答："这条报文真的来自第三方吗？中途有没有被改过哪怕一个字符？"<b>验签失败必须拒绝，不存在"为了成功率放行"。</b></p>
+    <h4>从哈希到 HMAC：三步演进</h4>
+    <p><b>第一步：普通哈希。</b><code>SHA256("amount=399&amp;payment_no=P123")</code> 得到一串固定长度的指纹，改一个字指纹全变，所以能发现"被改过"。<b>但攻击者也知道你的拼接规则</b>：他改完 amount 重新拼一遍、重新算个哈希附上，照样骗过你。缺的是"只有双方知道的秘密"。</p>
+    <p><b>第二步：加盐哈希。</b>双方约定密钥 <code>secret</code>，算 <code>SHA256(明文 + secret)</code>。攻击者不知道密钥，改了报文就伪造不出正确哈希。<b>但密码学上这种手搓拼接有已知弱点</b>（长度扩展攻击），不能自己发明。</p>
+    <p><b>第三步：HMAC。</b>标准化的"带密钥哈希"构造，内部用两轮哈希嵌套密钥，数学上免疫长度扩展攻击。一句话：<b>HMAC = 篡改检测（哈希）+ 身份证明（密钥）的工程化合体</b>。真实支付宝回调报文里的 <code>sign</code> 字段就是干这个的。</p>
+    <h4>签名时参数排序的坑</h4>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/channel/MockPayChannel.java</span><span class="loc">:95-106</span></div>
+      <pre><code>public String sign(Map&lt;String, String&gt; params) {
+    Map&lt;String, String&gt; sorted = new TreeMap&lt;&gt;(params);   // ① 按 key 字典序排序
+    List&lt;String&gt; parts = new ArrayList&lt;&gt;();
+    sorted.forEach((k, v) -&gt; {
+        // ② 签名字段本身不参与签名；空值不参与
+        if (!SIGN_PARAM.equals(k) && v != null && !v.isBlank()) {
+            parts.add(k + "=" + v);
+        }
+    });
+    String plain = String.join("&amp;", parts);                // ③ 拼成 k=v&amp;k=v
+    return hmacSha256(plain, secret);                       // ④ HMAC-SHA256
+}</code></pre>
+    </div>
+    <p><b>为什么必须 <code>TreeMap</code> 排序：</b><code>HashMap</code> 的遍历顺序由 hash 桶决定、<b>语义上不保证稳定</b>。同样的参数两次遍历可能拼出 <code>a=1&amp;b=2</code> 和 <code>b=2&amp;a=1</code>——签名时对时错，是那种"本地好好的、一上线随机失败"的诡异 bug。各家支付网关文档都强调"按 ASCII 码升序拼接"，原因就在这。</p>
+    <p><b>为什么 <code>sign</code> 自己不参与签名：</b>签名不能签自己（循环依赖）。验签方拿到报文后把 <code>sign</code> 摘出来、用剩余参数重算，再比对。</p>
+    <h4>为什么用 MessageDigest.isEqual 而不是 equals</h4>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/channel/MockPayChannel.java</span><span class="loc">:66-79</span></div>
+      <pre><code>public boolean verifyCallback(Map&lt;String, String&gt; params) {
+    if (params == null || params.isEmpty()) { return false; }
+    String sign = params.get(SIGN_PARAM);
+    if (sign == null || sign.isBlank()) { log.warn("回调缺少签名字段"); return false; }
+    String expected = sign(params);
+    // 注意：用 constant-time 比较，防时序攻击（安全编码习惯）
+    return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
+            sign.getBytes(StandardCharsets.UTF_8));
+}</code></pre>
+    </div>
+    <p><code>equals</code> 碰到第一个不同的字符就<b>立即返回 false</b>——比对耗时与"正确前缀有多长"成正比。攻击者据此可以<b>逐字节爆破</b>：先试 256 种首字符，哪个响应慢一点点哪个就对；再试第二位……这就是<b>时序攻击</b>。<code>MessageDigest.isEqual</code> 是 constant-time 比较，无论差异在第几位耗时都恒定。</p>
+    <p>验签失败之后的处理只有一条路——拒绝：</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/service/PaymentService.java</span><span class="loc">:150-156</span></div>
+      <pre><code>// ---------- ① 验签 ----------
+PayChannel payChannel = router.resolve(channel);
+if (!payChannel.verifyCallback(params)) {
+    log.warn("支付回调验签失败，疑似伪造请求 channel={} params={}", channel, params);
+    // 验签失败必须拒绝——这是安全红线，不能"为了成功率"放行
+    return new CallbackResult(false, null, "sign-error");
+}</code></pre>
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：HMAC 与 RSA2 的选型，以及回调端点的身份模型</summary>
+      <div class="lvl-body">
+        <p>真实支付宝用的是 <b>RSA2（非对称）</b>：我方用应用私钥签名，支付宝用应用公钥验签；我方收到回调时用支付宝公钥验签。本项目用 <b>HMAC-SHA256（对称）</b>，因为模拟渠道收发双方都是我们自己，对称密钥更合适。换 RSA2 只需替换签名/验签两个私有方法——<b>接口形状不变，这就是抽象的价值</b>。</p>
+        <div class="tbl-wrap">
+          <table class="small">
+            <thead><tr><th></th><th>HMAC-SHA256（本项目 Mock）</th><th>RSA2（真实支付宝）</th></tr></thead>
+            <tbody>
+              <tr><td>密钥</td><td>收发双方<b>共享</b>同一个</td><td>我方私钥签 / 对方公钥验（<b>不共享</b>）</td></tr>
+              <tr><td>适合</td><td>自建渠道（收发都是自己）</td><td>多方互信（我方 ↔ 支付宝）</td></tr>
+              <tr><td>泄露面</td><td>密钥给谁谁就能伪造</td><td>私钥只在自己手里</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b>回调端点为什么不加登录校验</b>（<code>PaymentController</code> 类注释）：第三方支付平台不可能持有我们用户的 token。回调接口的"身份"由<b>验签</b>保证，不是 token——<b>业务接口靠"你是谁"（认证），回调接口靠"消息是谁发的、有没有被改"（完整性）</b>，这是设计上的根本差异。</p>
+        <p><b>返回值为什么是特定字符串而永不抛异常</b>：支付宝要求收到字面量 <code>success</code> 才停止重发，返回其他内容或抛异常（包括 500 状态码）它都会持续重试（8 次以上）。所以 <code>callback</code> 方法连兜底 catch 返回的都是 <code>"system-error"</code> 字符串，而不是抛出去。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "回调处理第一件事是验签。因为回调是公网端点、没有登录态，不验签的话任何人都能 curl 一条请求把订单改成已支付。<br>
+          我们用的是 HMAC-SHA256：参数按 key 字典序排序、拼成 k=v&amp;k=v、sign 字段本身不参与，然后用共享密钥算 HMAC，比对时用 <code>MessageDigest.isEqual</code> 做常量时间比较防时序攻击。<br>
+          两个容易踩的点：<b>一是必须排序</b>，HashMap 遍历顺序不保证，不排序会签名时对时错；<b>二是不能用 equals 比签名</b>，它会因为首字符不同提前返回，耗时泄露信息，能被逐字节爆破。<br>
+          真实支付宝用的是 RSA2 非对称，我们 Mock 用对称是因为收发双方都是自己——换渠道只替换签名验签两个私有方法。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>1. 不要说"验签了就不用核对金额"</b>——验签管"消息真伪"，金额核对管"钱够不够"，是两件事（见 3.9）。<br>
+          <b>2. 不要说"HTTPS 已经保证了，不用验签"</b>——HTTPS 防的是传输途中被窃听篡改，验签防的是发起方本身就是假的。攻击者可以对你的 HTTPS 接口直接发请求。<br>
+          <b>3. 别说"验签失败也返回 success 让对端别重试"</b>——验签失败是安全红线，必须拒绝。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.9</span>支付幂等三层 + 主动查单对账</h2>
+
+  <div class="card">
+    <h3 class="card-title">重复回调必然发生，回调也必然会丢 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：pay/service/PaymentService.java:148-245 · mapper/PaymentMapper.xml · db/migration/V4__payment_order_unique.sql</p>
+    <p><strong>一句话：</strong>回调<b>重复</b>靠三层防线吸收掉（唯一索引 / 已支付快路径 / 状态机 CAS）；回调<b>丢失</b>靠主动查单捞回来。两者是一对，缺一不可。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      快递电话（回调）可能被打两次（重复），也可能你一次没接到（丢失）。重复按两次门铃不会让快递多送一份——那是<b>幂等</b>；没接到就得自己上 App 查物流——那是<b>主动查单</b>。只做前者，漏接一次包裹就永远卡在"待收"；只做后者，你每次都得主动去查。
+    </div>
+    <h4>三层防线</h4>
+    <div class="flow vertical">
+      <div class="flow-node"><span class="n">第 1 层 · 物理层：uk_payment_no / uk_order_id 唯一索引</span><span class="d">重复"创建"直接被数据库拒绝——<code>t_payment.payment_no</code> 唯一；V4 又加了 <code>uk_order_id</code> 保证一订单一活单</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">第 2 层 · 快路径：已 PAID → 直接回 success</span><span class="d">挡"串行重复"（对方重发，最常见）。<b>它挡不住并发</b>——两个回调同时到达时，两个都查到 PAYING</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">第 3 层 · 慢路径：WHERE status='PAYING' 状态机 CAS</span><span class="d">挡"并发重复"。两个回调都往下走时，只有 CAS 让其中一个拿到 0 行。<b>SQL 的 WHERE 才是幂等的真身</b></span></div>
+    </div>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">mapper/PaymentMapper.xml</span><span class="loc">:45-58</span></div>
+      <pre><code>&lt;!-- ★ 幂等的状态机 CAS：WHERE status = 期望状态
+     重复回调（网络重传/第三方重试）时第二次影响 0 行，Service 据此判断"已处理过"。
+     这比"先 SELECT 判断再 UPDATE"可靠——后者在并发下两个请求可能都读到 PAYING。 --&gt;
+&lt;update id="updateToPaid"&gt;
+    UPDATE t_payment
+    SET status = 'PAID', third_trade_no = #{thirdTradeNo},
+        callback_body = #{callbackBody}, paid_time = NOW()
+    WHERE payment_no = #{paymentNo}
+    AND status = #{expectStatus}
+&lt;/update&gt;</code></pre>
+    </div>
+    <p>回调的完整六步（<code>PaymentService.handleCallback</code>）：<b>① 验签 → ② 定位支付单 → ③ 幂等快路径 → ④ 金额核对 → ⑤ 支付单 CAS → ⑥ 订单 CAS → 回 success</b>。每一步去掉会出什么事，值得背下来：</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:130px">去掉哪一步</th><th>后果</th></tr></thead>
+        <tbody>
+          <tr><td>① 验签</td><td>回调端点公网可访问无登录 → <b>任何人都能把订单改成已支付</b>，curl 一条命令即可</td></tr>
+          <tr><td>③ 幂等快路径</td><td>功能仍正确（CAS 兜着），但每次重复都要跑一遍 UPDATE——<b>快路径是性能优化，CAS 才是正确性保证</b></td></tr>
+          <tr><td>④ 金额核对</td><td><b>1 分钱买走 399</b>：改小 amount 重新签名打回来</td></tr>
+          <tr><td>⑤ 支付单 CAS</td><td>并发两个回调同时穿过第 ③ 步 → 用旧报文覆盖交易号</td></tr>
+          <tr><td>⑥ 订单 CAS</td><td>与"超时取消"竞态：支付成功的瞬间订单被取消任务改成 CANCELLED → 钱收了货没发</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>第 ④ 步金额核对有三个分支：<code>amount-missing</code>（回调缺金额字段）、<code>amount-invalid</code>（不是合法数字）、<code>amount-mismatch</code>（与支付单金额不等）。代码注释里写着这一处的评审修正：「早期写法 <code>amountStr != null</code> 才核对——"回调不带金额字段"就能绕过核对，等于给"1 分钱买 399"留了门。金额是回调和支付单的必配字段，缺失本身就是异常。」</p>
+    <p>这三个分支有三个必须能说清的点：<b>一是"缺失即拒绝"</b>——如果允许缺失，攻击者只要不带 amount 字段就能绕过整条核对逻辑，"可选的安全检查等于没有安全检查"；<b>二是用 <code>compareTo</code> 不用 <code>equals</code></b>——<code>BigDecimal.equals</code> 连精度一起比（<code>399</code> 与 <code>399.00</code> 不相等），<code>compareTo</code> 只比数值；<b>三是金额以我方支付单为准</b>（它取自 <code>order.getTotalAmount()</code>），回调只用来比对，不作为数据源。</p>
+    <h4>回调会丢：主动查单对账</h4>
+    <p>回调除了重复还会<b>丢</b>——第三方认为通知成功了，但我方实际没处理成功，这条通知就永久消失了。这时用户付了钱、系统不知道，是资损方向最严重的故障。</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/service/PaymentService.java</span><span class="loc">:226-245（长行已折行重排，便于阅读）</span></div>
+      <pre><code>public boolean sync(String paymentNo) {
+    Payment payment = paymentMapper.selectByPaymentNo(paymentNo);
+    if (payment == null || Payment.STATUS_PAID.equals(payment.getStatus())) { return false; }
+    PayChannel.QueryResult r = router.resolve(payment.getChannel()).query(paymentNo);
+    if (PayChannel.QueryResult.UNKNOWN.equals(r.status())) { return false; }  // 查不到 ≠ 没付，绝不擅改
+    if (PayChannel.QueryResult.PAID.equals(r.status())) {
+        paymentMapper.updateToPaid(paymentNo, Payment.STATUS_PAYING, r.thirdTradeNo(), "query-sync");
+        orderMapper.updateStatus(payment.getOrderId(),
+                Order.STATUS_PENDING_PAY, Order.STATUS_PAID, LocalDateTime.now());
+        return true;
+    }
+    return false;
+}</code></pre>
+    </div>
+    <p>核心原则一句话：<b>"以第三方为准修正本地，但 UNKNOWN 绝不动状态"</b>。查不到 ≠ 没支付——渠道超时、网络抖动都可能返回查不到，此时宁可不改，否则就是拿不确定的信息去覆盖确定的资金状态。<code>QueryResult</code> 的三个值 <code>PAID / NOT_PAY / UNKNOWN</code> 就是为这个语义设计的。</p>
+    <div class="callout warn">
+      <span class="ct">诚实边界</span>
+      <b>MOCK 渠道的 <code>query</code> 恒返回 UNKNOWN</b>（没有真第三方可查），所以 <code>sync</code> 在 MOCK 下是一条<b>死路径</b>——它为真实渠道而生，接口契约先立好。这个边界主动讲出来，比被追问出来好得多。<br>
+      另外：这条链路只处理了<b>重复支付</b>与<b>回调丢失</b>；<code>t_refund</code> 表在 V3 迁移里建了，但<b>退款流程没有实现</b>——遇到"支付成功但订单已取消"只能记 error 日志走人工。这是明确的技术债。
+    </div>
+    <details class="lvl mech">
+      <summary>机制与代码：V4 那次真实事故——并发双击产生两张 PAYING 单</summary>
+      <div class="lvl-body">
+        <p>这是本页最值得讲的一个踩坑故事。V3 原始实现的"查复用 → 插入"<b>不是原子的</b>：用户双击"去支付"，两个请求同时执行 <code>selectByOrderId</code>，都返回 null（或都判定已过期），于是<b>各自插了一条 PAYING 单</b>——同一个订单出现两张支付单，用户在收银台看到两个单号、可能付两次，对账彻底乱。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V4__payment_order_unique.sql</span><span class="loc">:13-20</span></div>
+          <pre><code>-- 先清历史可能的重复行（保留每个订单最新一条），否则唯一索引建不起来
+DELETE p1 FROM t_payment p1
+    INNER JOIN t_payment p2
+    ON p1.order_id = p2.order_id
+   AND p1.id &lt; p2.id;
+
+ALTER TABLE t_payment
+    ADD UNIQUE KEY uk_order_id (order_id);</code></pre>
+        </div>
+        <p><b>注意第一步</b>：有重复数据的话唯一索引<b>根本建不起来</b>。迁移脚本必须考虑存量数据——这是工程细节上的加分点。应用层的兜底则是"唯一索引 + 冲突回查复用"：<code>PaymentService.create</code> 在"无行"分支里 <code>insert</code>，外面 <code>catch (DuplicateKeyException e)</code> —— 撞 <code>uk_order_id</code> 说明并发线程刚建过，于是 <code>selectByOrderId</code> 回查、直接复用那一行（与点赞幂等同款写法）。</p>
+        <p>由此带来的<b>模型变化</b>：一个订单的支付尝试<b>只占一行</b>。<code>PAYING → PAID / CLOSED</code> 之后再次发起支付，不再是插新行，而是"复用该行重开"（<code>updateForRecreate</code>：换 <code>payment_no</code>、重置金额/渠道/过期时间，并带 <code>AND status != 'PAID'</code> 条件守卫——<b>PAID 行永不可重开</b>）。</p>
+        <p>顺着这个取舍还能答一个反直觉的问题：<b>为什么过期单要"重开"而不是"直接复用"</b>——因为过期单在渠道侧已经不可支付了，原样复用用户会<b>永远付不了款</b>。这是 V3 评审修正过的一处。另外 <code>uk_payment_no</code> 和 <code>uk_order_id</code> 管的是两件不同的事：前者防"同一支付单号被创建两次"，后者防"同一订单有多张活单"。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "重复回调必然发生，所以我做了三层防线：第一层是物理层——支付单号唯一索引、以及 V4 加的一订单一活单的 <code>uk_order_id</code>；第二层是幂等快路径——已经 PAID 就直接返回 success，让第三方停止重试；第三层是状态机 CAS——<code>WHERE status='PAYING'</code>，挡住两个回调同时穿过快路径的并发场景。<b>快路径是性能优化，CAS 才是正确性保证。</b><br>
+          另外回调除了重复还会丢，所以还有主动查单对账：向渠道查，查到 PAID 就用 CAS 把状态补上；<b>查不到（UNKNOWN）绝不改状态</b>，因为查不到不等于没付。<br>
+          还踩过一个真实的坑：原来'查完再插'不是原子的，并发双击会产生两张 PAYING 单，后来用 V4 迁移加 <code>uk_order_id</code>，插入撞索引就回查复用。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>1. 重复回调必须回 <code>success</code>。</b>不回的话第三方认为通知失败，会一直重发（8 次以上）。<b>只有业务性失败才返回失败码让它重发。</b><br>
+          <b>2. 不要说"我们用了一张专门的幂等表"</b>——本项目没有 <code>t_mq_consume_log</code> 之类的表，幂等全部落在<b>业务表自身的唯一索引和状态机</b>上。<br>
+          <b>3. 第 ⑥ 步订单 CAS 返回 0 行时不要回滚支付单</b>——钱确实收到了，回滚支付单反而制造假账。正确语义是"支付单保持 PAID（资金事实）、订单已是 CANCELLED（库存事实），差异交给退款"——<b>资金状态与业务状态分开记账，差异显式化</b>。<br>
+          <b>4. 口径：</b>说"<b>幂等设计，用了唯一索引 / 状态机条件更新 / 一次性 token / 消费端回查四种手段</b>"，不要说"幂等四式"。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.10</span>限量发售：Redis 预减 + MQ 异步下单</h2>
+
+  <div class="card">
+    <h3 class="card-title">把一个热点 SKU 从"万级并发"降到"匀速建单" <span class="badge badge-star">第二重要</span></h3>
+    <p class="card-sub">对应代码：pay/service/DropService.java · DropRedisSupport.java · pay/mq/DropOrderExecutor.java · DropMqConfig.java</p>
+    <p><strong>一句话：</strong>HTTP 线程只做两件内存级操作（Lua 原子预减 + 投递 MQ）就立刻返回"已受理"，真正的建单交给 MQ 消费者匀速完成。</p>
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      像热门诊所的<b>分诊台 + 候诊区</b>。分诊台（Redis 预减）只做一件事：看还有没有号，有就发号、没有就当场劝返——<b>纯内存操作，快得几乎不耗时</b>。拿到号的人去候诊区（MQ）排队，医生（消费线程）按自己的节奏一个一个看。如果没有分诊台，一万个人同时冲进诊室门口抢医生——那就是"1 万 QPS 直怼数据库行锁"。
+    </div>
+    <p>为什么业务上叫"限量发售"而不是"秒杀"：本项目对标得物/潮玩电商，真实玩法是<b>限量发售</b>（球鞋、潮玩、联名款），不是淘宝双十一秒杀。凭空长出秒杀模块，面试官一句"你们业务为什么需要秒杀"就露馅——<b>但防超卖的技术含量一点没少</b>。</p>
+    <h4>削峰链路全景</h4>
+    <div class="flow vertical">
+      <div class="flow-node"><span class="n">① 预热</span><span class="d">活动开始时把 <code>t_drop_activity.drop_stock</code> 灌进 Redis（<code>aimall:drop:stock:{activityId}</code>）；访问详情页时懒预热，用 <code>SET NX</code> 原子写入</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">② Lua 原子预减（判重 + 扣减同一脚本）</span><span class="d">HTTP 线程。库存不够返回 -1，重复提交返回 -3，未预热返回 -2，成功返回剩余量</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">③ 投递 DropOrderMessage</span><span class="d">消息体只带 activityId / userId / quantity，<b>不带金额</b>；投递失败立即对称回补预减</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">④ 立即返回 QUEUED</span><span class="d">HTTP 线程到此结束（毫秒级）。<b>此时订单还不存在，所以返回不了订单号</b></span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">⑤ 消费端事务建单</span><span class="d">回查活动（不信任消息体）→ DB 行锁 CAS 扣 SKU 库存 → 建订单 + 写 <code>t_drop_record</code>（<code>uk_activity_user</code> 幂等）→ <code>sendAfterCommit</code> 挂 30 分钟超时取消</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">⑥ 失败三分流</span><span class="d">撞唯一键 → 回补 + 幂等跳过；业务异常 → 回补 + 写失败标记；未知异常 → 重抛进 DLQ 等人工</span></div>
+      <div class="flow-arrow"></div>
+      <div class="flow-node"><span class="n">⑦ 前端轮询 result</span><span class="d"><code>GET /api/v1/drops/{id}/result</code> 每 1~2 秒一次，QUEUED → SUCCESS(orderId) / FAILED</span></div>
+    </div>
+    <h4>三层防护：预减挡量 / MQ 摊峰 / DB CAS 保正确</h4>
+    <p><b>"挡量"与"削峰"是两件不同的事，缺一不可</b>——这是这题最值钱的一句话：</p>
+    <ul>
+      <li><b>Redis 预减是准入闸门</b>：放行的消息数 ≤ 库存量。库存抢完后，洪峰在 Redis 里被纯内存操作拒绝，<b>DB 完全无感</b>。</li>
+      <li><b>MQ 是节奏器</b>：通过闸门的瞬时洪峰被摊平成消费速率，DB 的行锁不再被万级请求争抢、连接池不会被打爆。</li>
+      <li><b>DB 行锁 CAS 是正确性底线</b>：Redis 只是<b>准入层，不是真值</b>；真值永远在 <code>t_product_sku.stock</code>。消费端仍然走 3.3 那条 <code>WHERE stock &gt;= ?</code>，所以即使 Redis 计数失真也绝不会超卖。</li>
+    </ul>
+    <p>消费端扣库存走的还是 3.3 那一条——<code>skuMapper.deductStock(sku.getId(), msg.quantity())</code> 返回 0 就抛 <code>STOCK_NOT_ENOUGH("已被抢完")</code>（<code>DropOrderExecutor.java:100-107</code>）。<b>削峰改变的是"流量到达 DB 的节奏"，防超卖的兜底层次一寸不少。</b></p>
+    <p>第三层是 <code>t_drop_record</code> 上的 <code>uk_activity_user(activity_id, user_id)</code>——<b>一人一单的唯一索引物理拒绝</b>。撞键会抛 <code>DuplicateKeyException</code>，在事务内成为回滚信号，被上层捕获做幂等跳过。语义上要说清：唯一索引硬保证"<b>一人一次成功</b>"，<code>per_limit</code> 约束的是"<b>单次购买上限</b>"，组合起来 = "每人可成功一次、单次最多 per_limit 件"（这是 V3 评审澄清过的一处，早期两者语义看起来是矛盾的）。</p>
+    <h4>真实 Lua 脚本：判重与扣减必须在同一脚本里</h4>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/service/DropRedisSupport.java</span><span class="loc">:50-56</span></div>
+      <pre><code>private static final String DEDUCT_LUA =
+        "local stock = tonumber(redis.call('get', KEYS[1]) or '-1') " +
+        "if stock &lt; 0 then return -2 end " +
+        "if redis.call('exists', KEYS[2]) == 1 then return -3 end " +
+        "if stock &lt; tonumber(ARGV[1]) then return -1 end " +
+        "redis.call('set', KEYS[2], ARGV[1], 'EX', tonumber(ARGV[2])) " +
+        "return redis.call('decrby', KEYS[1], ARGV[1])";</code></pre>
+    </div>
+    <p><b>为什么"判重 + 扣减"必须在同一脚本：</b>拆成两步（先 <code>EXISTS</code> 再 <code>DECRBY</code>）的话，同一用户的两个并发请求可能<b>都通过判重、各自扣一次库存</b>——名额被同一个人占两份。Lua 在 Redis 单线程里原子执行，天然串行。这也是把"防重复提交"从应用层下沉到 Redis 的原因：HTTP 线程无状态，挡不住同一用户的双击。</p>
+    <p><b>为什么不用分布式锁：</b>"判断 + 扣减"本质上是一次原子计数，Lua 一发入魂；加锁方案每次"加锁 → 读 → 改 → 解锁"要两次网络往返，而且全局串行化。<b>锁适合保护复杂临界区（一长段业务逻辑），简单原子计数用 Lua 更快更简单。</b></p>
+    <h4>关键的对称回补：堵住"预减了但没下单"的库存黑洞</h4>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:170px">场景</th><th>为什么必须回补</th></tr></thead>
+        <tbody>
+          <tr><td><b>提交侧：MQ 投递失败</b><br><code>DropService.java:159-165</code></td><td>此刻 Redis 已经预减成功，但消息<b>根本没进队列</b>——永远不会有人来建单。不回补就是"<b>预减了但没下单</b>"的库存黑洞：名额凭空消失，用户还查不到订单。</td></tr>
+          <tr><td><b>消费侧：建单失败</b><br><code>DropOrderExecutor.java:65-79</code></td><td>预减成功但建单没成 → 白吃名额。不回补的结果是"<b>看着抢完了，实际有货</b>"——对用户是资损。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/service/DropRedisSupport.java</span><span class="loc">:65-68</span></div>
+      <pre><code>private static final String ROLLBACK_LUA =
+        "redis.call('incrby', KEYS[1], ARGV[1]) " +
+        "redis.call('del', KEYS[2]) " +
+        "return 1";</code></pre>
+    </div>
+    <p><b>回补是预减的严格逆操作</b>——库存加回 + 删掉受理标记，而且同样用 Lua 保证原子。拆开执行时，两步之间用户重试提交会被"删了一半"的标记挡住或放过，窗口内行为不可预期；单脚本还省一次网络往返。这两段脚本统一归属在 <code>DropRedisSupport</code> 一个类里，是因为预减发生在提交侧、回补发生在消费侧，<b>若各写一份必然漂移</b>。</p>
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">pay/service/DropService.java</span><span class="loc">:156-166</span></div>
+      <pre><code>try {
+    rabbit.convertAndSend(DropMqConfig.EXCHANGE, DropMqConfig.ORDER_ROUTING_KEY, msg);
+    log.info("抢购消息已入队 activityId={} userId={} remain={}", activityId, userId, remain);
+} catch (AmqpException e) {
+    // 投递失败必须立即回补预减：名额不白占，用户可重试
+    dropRedis.rollbackDeduct(activityId, userId, quantity);
+    log.error("抢购消息投递失败（已回补预减）activityId={} userId={}: {}",
+            activityId, userId, e.getMessage());
+    throw new BusinessException(ResultCode.BAD_REQUEST, "系统繁忙，请稍后重试");
+}</code></pre>
+    </div>
+    <h4>为什么返回 QUEUED 而不是订单号</h4>
+    <p>这是异步化的必然结果：<b>接口返回时订单还不存在</b>。<code>buy</code> 是"过闸门"（毫秒级返回受理），订单由 MQ 消费者异步创建，所以接口不可能返回 <code>orderId</code>。前端拿到 <code>QUEUED</code> 后每 1~2 秒轮询 <code>result</code>，<code>SUCCESS</code> 时带上 orderId 再跳订单页——<b>"受理与结果分离"是秒杀/抢购类系统的标准接口形态</b>。</p>
+    <p>判定优先级是：<b>DB 记录（真值）&gt; 失败标记 &gt; 受理标记（处理中）&gt; 未参与</b>（<code>DropService.result</code> 就是按这个顺序 <code>return</code> 的：查到 <code>t_drop_record</code> 直接 <code>success(orderId)</code>，否则依次查失败标记、受理标记）。三个 Redis key 的分工也要分清：<code>aimall:drop:stock:{id}</code> 是库存计数（准入层），<code>aimall:drop:user:{id}:{uid}</code> 是受理标记（防重复提交，与扣减同脚本写入），<code>aimall:drop:fail:{id}:{uid}</code> 是失败标记（前端据此区分"处理中"和"失败"）。后两个标记 TTL 都是 600 秒，覆盖"排队 → 建单"的正常窗口。</p>
+    <details class="lvl mech">
+      <summary>机制与代码：失败三分流 + 降级链 + 三个不能说错的口径</summary>
+      <div class="lvl-body">
+        <p>消费端把三类异常分成三套路数（<code>DropOrderExecutor.execute</code>）：</p>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th style="width:180px">异常</th><th>含义</th><th>处置</th></tr></thead>
+            <tbody>
+              <tr><td><code>DuplicateKeyException</code></td><td><code>uk(activity_id,user_id)</code> 冲突 = 该用户此前已建单成功（重复投递 / 并发提交）</td><td>回补本条消息的预减，<b>幂等跳过</b></td></tr>
+              <tr><td><code>BusinessException</code></td><td>业务性失败（库存不足 / 不在发售时间）</td><td>回补预减 + 写失败标记，<b>ACK 不重试</b>（重试也不会成功）</td></tr>
+              <tr><td>其他 <code>Exception</code></td><td>未知故障（DB 抖动等）</td><td><b>原样重抛</b> → 容器 reject（<code>default-requeue-rejected=false</code>）→ <b>进 DLQ 等人工</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>这里有一个<b>诚实加分点</b>：分支① 如果是<b>纯重投</b>（首条消息已被消费过），这次回补会让 Redis <b>多记一点库存</b>——多放几个请求进来，但 <b>DB CAS 仍然兜底</b>，方向是安全的；反过来"少记"才会让用户"有货抢不到"，那才是资损。<b>所以取舍是：宁可多放，不可少记。</b>能讲出"降级方向的正确性"，比背方案高一个段位。</p>
+        <p><b>降级链</b>（与内容审核同款"可插拔"原则）：Redis 可用 + MQ 可用 → 标准链路；MQ 不可用 → 预减 + <b>本地线程池</b>异步建单（无削峰但体验一致）；投递失败 → 立即回补预减 + 提示重试；Redis 不可用 → 本地线程池异步建单（DB CAS + 唯一索引硬扛）。</p>
+        <p>这里还有一个高频追问：<b>为什么建单逻辑要单独拆成 <code>DropOrderExecutor</code> 一个 bean</b>，而不是放在 <code>DropService</code> 里？因为本地降级路径需要<b>事务方法经 Spring 代理调用</b>——如果 <code>createDropOrder</code> 是 <code>DropService</code> 的私有方法，内部 <code>this.createDropOrder()</code> 自调用不走代理，<code>@Transactional</code> 就失效变裸奔（与 <code>@Async</code> 自调用失效同源）。拆成独立 bean 之后，消费端和降级端都通过代理调用它，事务语义才稳定。</p>
+        <p><b>三个口径必须说准。</b>其一，<b>消息里不带金额</b>——只带 <code>activityId / userId / quantity</code>，金额在消费端<b>回查 DB</b>（<code>act.getDropPrice().multiply(...)</code>），不信任消息体，理由同 3.6："消息在队列里待着的时候，世界已经变了"。其二，<b>预热必须用 <code>SET NX</code></b>：早期是 check-then-set（GET 判空 → SET 覆盖），并发首访时两个请求都会判"未预热"，后一个 SET 会把<b>已经扣减过的库存重置回全量</b>——直接超卖；<code>setIfAbsent</code> 把"判断 + 写入"原子化。其三，<b>抢购参数必须过 Bean Validation</b>：早期用裸 Map 接参，传负数会让 Lua 的 <code>DECRBY</code> 变成反向加库存、订单金额算出负数，现在由 <code>DropBuyRequest</code> 上的 <code>@Min(1) @Max(99)</code> 拦在最外层。最后是<b>一致性边界（诚实说）</b>：Redis 预减与 DB 实扣是两个存储、<b>没有事务</b>，回补也可能失败、TTL 到期重灌也可能覆盖，所以这是<b>最终一致</b>——活动结束后对账（Redis 剩余 vs DB 应余）校正，"已受理但订单还没建好"的窗口期由前端轮询掩盖。</p>
+      </div>
+    </details>
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">60 秒版本</span>
+          "限量发售我用的是三层防护：<b>Redis 预减挡量、MQ 摊峰、DB 行锁 CAS 保正确</b>。<br>
+          提交侧 HTTP 线程只做内存操作：先用一段 Lua 脚本原子地做'判重 + 扣库存'——这两步必须在同一个脚本里，拆成两步的话同一用户的并发请求会都通过判重、各扣一次库存；然后投一条消息到 MQ、立即返回 <code>QUEUED</code>。<b>返回不了订单号是因为订单还不存在</b>，由消费者异步创建，所以前端轮询 result 接口。<br>
+          消费端在一个事务里回查活动、用 <code>WHERE stock&gt;=?</code> 扣库存、建订单、写限购记录——<code>uk(activity_id, user_id)</code> 是第三层防护，物理保证一人一单。失败按三类分流：撞唯一键就回补预减并幂等跳过，业务失败就回补加写失败标记，未知异常重抛进死信队列等人工。<br>
+          有两个容易被忽略的点：<b>一是投递 MQ 失败要立刻对称回补预减</b>，否则就是'预减了但没下单'的库存黑洞；<b>二是回补也要用 Lua</b>，因为'库存加回 + 删受理标记'两步拆开会有窗口。<br>
+          边界我也说清楚：Redis 计数是准入层不是真值，真值在 DB；两边没有事务，是最终一致，靠活动结束后对账校正。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错（这条最容易被深挖）</span>
+          <b>1. 预减和削峰不是一回事。</b>预减挡的是<b>量</b>（准入闸门，放行数 ≤ 库存）；MQ 摊的是<b>峰</b>（节奏器，DB 行锁不被万级请求争抢）。<b>两件事缺一不可</b>——这句话要背下来。<br>
+          <b>2. 不要说"Redis 预减的库存就是真实库存"</b>——它是准入层，真值在 <code>t_product_sku.stock</code>，由 DB CAS 兜底。<br>
+          <b>3. 不要漏掉"投递失败要回补"</b>——很多人只答消费端失败回补，漏了提交侧这个更危险的场景（消息根本没进队列，永远不会有人来处理）。<br>
+          <b>4. 不要说"加了分布式锁"</b>——预减已经够了，加锁反而是瓶颈。<br>
+          <b>5. 不要说"我们用消息里的金额建单"</b>——金额回查 DB。<br>
+          <b>6. 别把"限量发售"叫成"秒杀"</b>——业务口径是得物式的限量发售；技术一样，但业务叙述要对得上。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <h2><span class="h2n">3.11</span>面试话术：两段可背诵的答案</h2>
+
+  <div class="card">
+    <h3 class="card-title">把这两段背熟，订单链路这块就稳了 <span class="badge badge-star">冲刺</span></h3>
+    <p class="card-sub">口径依据：项目手册口径红线 · 08 面试速查与自查</p>
+    <div class="callout talk">
+      <span class="ct">「下单怎么防超卖？」30 秒版</span>
+      "核心是一行 SQL：<code>UPDATE t_product_sku SET stock = stock - ?, sales = sales + ? WHERE id = ? AND stock &gt;= ?</code>。<br>
+      InnoDB 会对命中的行加排他锁，<code>stock &gt;= ?</code> 这个条件判断是在锁内、按最新的库存值执行的——<b>判断和扣减在同一条 SQL 里原子完成</b>。返回影响行数 0，就说明并发下库存不足，抛业务异常让整个下单事务回滚。<br>
+      这本质是 <b>CAS 思想</b>：把期望条件写进 WHERE，让数据库来裁决。不需要应用层重试、不需要额外加分布式锁，也<b>不需要 version 字段</b>。<br>
+      要说代价也有：高并发下同一热点的行锁会串行排队，所以限量发售那种瞬时洪峰的场景，我在它前面加了 Redis 预减 + MQ 削峰。"
+    </div>
+    <div class="callout talk">
+      <span class="ct">「秒杀 / 限量发售怎么设计？」60 秒版</span>
+      "三层防护：<b>Redis 预减挡量、MQ 摊峰、DB 行锁 CAS 保正确</b>。<br>
+      <b>提交侧</b>是 HTTP 线程，只做内存级操作：一段 Lua 脚本原子完成'判重 + 扣库存'——这两步必须在同一个脚本里，否则同一用户的并发请求会都通过判重、各扣一次库存；然后投一条消息进 MQ，立即返回 <code>QUEUED</code>。<b>不返回订单号是因为订单还不存在</b>，由消费者异步创建，前端轮询结果接口，拿到 SUCCESS 带 orderId 才跳订单页。<br>
+      <b>消费侧</b>在一个事务里：回查活动（不信任消息体）、用 <code>WHERE stock&gt;=?</code> 扣库存、建订单、写限购记录——<code>uk(activity_id, user_id)</code> 唯一索引物理保证一人一单，这是第三层。<br>
+      <b>失败分三类</b>：撞唯一键说明该用户已建单成功，回补预减并幂等跳过；业务性失败（库存不足、不在时间）回补预减 + 写失败标记，ACK 不重试；未知异常原样重抛进死信队列等人工。<br>
+      <b>两个我会主动说的点</b>：一是投递 MQ 失败要当场对称回补预减，否则就是'预减了但下单没成'的库存黑洞；二是'库存加回 + 删受理标记'也要用 Lua 保证原子。<br>
+      <b>边界我也说清楚</b>：Redis 计数是准入层不是真值，真值在 DB；两边没有事务，是最终一致，靠活动结束后对账校正。"
+    </div>
+    <div class="callout warn">
+      <span class="ct">每条最容易说错的点</span>
+      <b>「防超卖」这条：</b>绝不说"<b>乐观锁</b>"——正确说法是"行锁 + <code>WHERE stock&gt;=?</code> 条件更新（CAS 思想）"；<code>t_product_sku.version</code> 是纯预留字段、从未参与比对，被问到就诚实答"预留、没起作用，是技术债"；不要说"我先 SELECT 查一下库存再扣"（那正是有窗口的写法）；不要说"加个 Redis 分布式锁就解决了"（那不是本项目的方案）。<br><br>
+      <b>「限量发售」这条：</b>别把"预减"和"削峰"混成一件事——一个挡量、一个摊峰；别说"返回订单号后前端再查状态"（返回的时候订单还没建出来，只能是 QUEUED）；别漏"投递失败要回补"（这是简历里点名、也最容易被追问的那个场景）；别说"Redis 挂了就拒绝抢购"（实际是降级走 DB CAS + 唯一索引硬扛）。<br><br>
+      <b>跨条通用：</b>幂等口径是"<b>幂等设计（四种手段：唯一索引 / 状态机条件更新 / 一次性 token / 消费端回查）</b>"，<b>不说"幂等四式"</b>；不要说"我们用了状态机引擎"（就是 <code>WHERE status=旧值</code> 的条件更新）；支付渠道口径是"<b>渠道是模拟的，链路是真的</b>"，<code>AlipaySandboxChannel</code> 类不存在、只在注释里出现过。
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+
+</main>
+
+<script src="_assets/app.js"></script>
+</body>
+</html>

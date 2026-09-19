@@ -1,0 +1,1848 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 高并发与可靠性 · ai-mall 开发手册</title>
+<link rel="stylesheet" href="_assets/style.css">
+</head>
+<body data-page="05">
+
+<!-- 侧边栏由 app.js 注入，勿手写 -->
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+  <header class="page-head">
+    <div class="crumb">ai-mall 开发手册 / <b>二 · 技术主题（面试王牌）</b></div>
+    <h1>05 · 高并发与可靠性</h1>
+    <p class="lede">这一页是全手册的<b>王牌集中地</b>：缓存、幂等、削峰、MQ 可靠性、限流、降级、补偿——这些<b>跨域复用的硬功夫</b>都在这里讲透。前四页讲的是「订单怎么走、笔记怎么发」这类<b>业务链路</b>；这一页讲的是<b>横切技术主题</b>——同一条链路换个域照样能用。看完你能回答：Redis 挂了业务凭什么不挂、缓存三兄弟各自怎么防、幂等的四种手段分别落在哪、消息不丢不重靠哪几层、降级路径为什么和主路径同等重要。</p>
+    <div class="head-meta">
+      <span class="badge badge-ver">阅读约 45 分钟</span>
+      <span class="badge badge-star">面试权重 ★★★</span>
+      <span class="badge badge-gray">涉及 10 张表 / 25 个类</span>
+    </div>
+  </header>
+  <div class="toolbar"></div>
+
+  <nav class="toc"></nav>
+
+  <!-- ====================================================================
+       CONTENT:START  以下为本页正文，由子代理撰写
+       ==================================================================== -->
+  <div class="callout brand">
+    <span class="ct">本页的分工边界（先看这条，免得看串）</span>
+    <b>凡是跨域复用的技术，只在本页讲透。</b>缓存、幂等、削峰、MQ 可靠性、限流、降级、补偿这些主题，本页讲机制、讲取舍、讲代码；03 订单页与 04 内容页里出现的同名主题，都只做一句话引导并链到本页。
+    反过来，本页提到订单/笔记的具体业务时，也只一句话带过并链回 03 / 04：
+    <b>防超卖的三层防护与支付闭环</b> → <a href="03-订单与交易.html">03 订单与交易</a>；
+    <b>Feed 游标分页、中文全文检索、点赞收藏的业务语义</b> → <a href="04-内容社区.html">04 内容社区</a>。
+  </div>
+
+  <!-- ================= 5.1 ================= -->
+  <h2><span class="h2n">5.1</span>一张图先看「可靠性体系」</h2>
+
+  <p>先建立整体图景。<b>一个请求从进来到落库，中间会经过若干「保护层」；不同链路的层数不一样，但每层都在回答同一个问题——「上游出问题时，我怎么不退化成故障」。</b></p>
+
+  <div class="arch">
+
+    <div class="arch-row">
+      <div class="arch-box plain" style="flex:1 1 100%">
+        <div class="ab-t">① 请求进来（读路径 / 写路径）</div>
+        <div class="ab-d">读：商品详情、笔记 Feed、热门榜 · 写：点赞、下单、支付回调、抢购、AI 问答</div>
+      </div>
+    </div>
+
+    <div class="arch-label">↓ 先过缓冲层：能不碰 DB 就不碰 DB</div>
+
+    <div class="arch-row">
+      <div class="arch-box blue" style="flex:1.4 1 0">
+        <div class="ab-t">② 缓存层 · ProductCacheService</div>
+        <div class="ab-d">穿透（空值标记）/ 击穿（`SET NX` 互斥锁）/ 雪崩（TTL 抖动）。命中即返回，<b>Redis 挂了降级查库，变慢不挂掉</b>。详见 <b>5.3</b></div>
+      </div>
+      <div class="arch-box blue" style="flex:1 1 0">
+        <div class="ab-t">③ 限流层 · RedisOps.allow</div>
+        <div class="ab-d">`INCR + EXPIRE` 的 <b>Lua 原子固定窗口</b>，按成本部署（AI 接口 10 次/60 秒）。Redis 挂了 <b>fail-open 放行</b>。详见 <b>5.6</b></div>
+      </div>
+    </div>
+
+    <div class="arch-label">↓ 写路径再过一层：挡住「重复」与「洪峰」</div>
+
+    <div class="arch-row">
+      <div class="arch-box amber" style="flex:1 1 0">
+        <div class="ab-t">④ 幂等层</div>
+        <div class="ab-d">参数校验 → 一次性 token（DEL 原子消费）→ 唯一索引。四种手段按语义选，详见 <b>5.7</b></div>
+      </div>
+      <div class="arch-box amber" style="flex:1 1 0">
+        <div class="ab-t">⑤ 削峰层 · Redis 预减 + MQ</div>
+        <div class="ab-d">Lua 判重+扣减（准入闸门，挡<b>量</b>）→ MQ 异步建单（节奏器，摊<b>峰</b>）。业务链路见 <a href="03-订单与交易.html">03 页</a>，机制见 <b>5.8</b></div>
+      </div>
+    </div>
+
+    <div class="arch-label">↓ 真正的正确性只有一处：DB 的行锁 CAS（`WHERE stock&gt;=?` / `WHERE status=旧值`）</div>
+
+    <div class="arch-row">
+      <div class="arch-box green" style="flex:1 1 0">
+        <div class="ab-t">⑥ 同步主链路</div>
+        <div class="ab-d">下单 = 行锁 CAS 扣库存 + 事务写订单 + afterCommit 挂延迟取消。详见 <a href="03-订单与交易.html">03 页</a> / <b>5.9</b></div>
+      </div>
+      <div class="arch-box green" style="flex:1 1 0">
+        <div class="ab-t">⑦ 异步消费（幂等收敛）</div>
+        <div class="ab-d">MQ 是 at-least-once：<b>不重</b>靠消费端回查 + 状态机 CAS + 唯一索引，详见 <b>5.8</b></div>
+      </div>
+    </div>
+
+    <div class="arch-label">↓ 最后一层：所有「没走完」的异步链路都靠它收敛</div>
+
+    <div class="arch-row">
+      <div class="arch-box violet" style="flex:1 1 100%">
+        <div class="ab-t">⑧ 补偿层 · CompensationTask（订单超时兜底 / 审核堆积重送 / 支付查单对账）</div>
+        <div class="ab-d">主链路追求「快」（异步），补偿任务保证「最终对」（定时扫描）。<b>重复靠幂等、丢失靠补偿</b>——两个机制都要有。详见 <b>5.11</b></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="callout analogy">
+    <span class="ct">打个比方</span>
+    这套结构像<b>一栋楼的安保体系</b>：门禁（限流）决定谁进得来，前台登记（幂等）保证同一个人不会领两把钥匙，电梯分流（削峰）把早高峰的人摊开，保险柜（DB 行锁）才是真正锁钱的地方，而监控回放（补偿任务）负责事后把每一次「好像没走完的流程」查清楚。
+    <b>关键不是某一层特别强，而是每层都想清楚了「它自己挂了该怎么办」。</b>
+  </div>
+
+  <div class="callout warn">
+    <span class="ct">看这张图要抓的 3 个认知</span>
+    <b>1. 保护层不是「每层都要过」。</b>读路径走 ①②；写路径走 ④⑤⑥；异步链路还要加 ⑦⑧。挑层是按链路选的，不是堆得越多越好。<br>
+    <b>2. 只有 DB 层承担正确性。</b>Redis 预减、缓存、限流全部是「准入/加速」层——<b>「Redis 层永远不承诺正确性，正确性永远在 DB 层」</b>，这是全项目所有 Redis 使用的统一哲学。<br>
+    <b>3. 每一层都有一条降级路径。</b>这是项目「零依赖能启动」的硬约束（docker-compose 不起也能跑），也是本页反复出现的主题。
+  </div>
+
+  <!-- ================= 5.2 ================= -->
+  <h2><span class="h2n">5.2</span>RedisOps 门面：把「降级」收敛到一处 <span class="badge badge-star">设计亮点</span></h2>
+
+  <div class="card">
+    <h3 class="card-title">全项目最重要的一个类 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>common/redis/RedisOps.java</code>（341 行，所有 Redis 调用的唯一入口）</p>
+
+    <p><strong>一句话：</strong>Redis 是<b>旁路缓存</b>——它挂了，业务应该「变慢」（直接查库）而不是「不可用」。但如果业务代码里到处裸调 <code>redisTemplate.opsForValue().get(key)</code>，那么 Redis 一断连，<b>所有走过这行代码的接口全部 500</b>——缓存反而成了故障放大器。所以项目把所有 Redis 操作收敛到一个门面类，每个方法都被 <code>safe()</code> 包住：<b>任何异常 → 打 WARN → 返回兜底值 → 业务自然走 DB</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      门面就像<b>小区门口那位万能管家</b>：你找他办任何事（取快递、报修、缴物业费），他从不为难你——办不成时只会说「今天先这样，您走另一条路试试」，而不会把整栋楼的门全部锁死。<br>
+      如果没有他，每个住户都得自己跑各种窗口；一旦某个窗口下班（Redis 挂），住户们就集体卡在门口。<b>把「办不成怎么退」这件事统一收在一处，是这一层存在的全部理由。</b>
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：safe() 包装 + 逐方法选降级值</summary>
+      <div class="lvl-body">
+        <p><b>① 异常 → 降级，收敛在一处：</b>所有 Redis 操作都经过这个方法，降级日志刻意用 WARN 而不是 ERROR。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/redis/RedisOps.java</span><span class="loc">:331-340（safe 包装）</span></div>
+          <pre><code>private &lt;T&gt; T safe(Supplier&lt;T&gt; supplier, T fallback, String op, String key) {
+    try {
+        T v = supplier.get();
+        return v == null ? fallback : v;
+    } catch (Exception e) {
+        // 注意：这是 WARN 不是 ERROR——降级是设计内的路径，不是故障
+        log.warn("Redis 不可用，降级为空操作 op={} key={} : {}", op, key, e.getMessage());
+        return fallback;
+    }
+}</code></pre>
+        </div>
+        <p><b>② 降级默认值必须逐方法按业务语义选</b>——这是本类最容易被问的设计点，<code>fallback</code> 不是随便填的。注意两个<b>三态</b>方法：<code>consumeToken</code> 返回 <code>Boolean</code>，用 <code>null</code> 和 <code>false</code> 表达<b>两种完全不同的意思</b>。</p>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr><th style="width:170px">方法</th><th style="width:120px">降级兜底值</th><th>调用方拿到的信号</th><th>业务后果</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>get</code> / <code>getObject</code></td><td><code>Optional.empty()</code></td><td>「缓存未命中」</td><td>查库，<b>变慢但正确</b></td></tr>
+              <tr><td><code>set</code> / <code>setObject</code> / <code>delete</code></td><td>空操作</td><td>「写没成功」</td><td>缓存下次重建，无害</td></tr>
+              <tr><td><code>setIfAbsent</code> / <code>tryLock</code></td><td><code>false</code> / <code>null</code></td><td>「没抢到锁」</td><td>走兜底路径（直接查库）</td></tr>
+              <tr><td><code>incr</code> / <code>hIncrBy</code></td><td><code>null</code></td><td>「计数不可用」</td><td>回退 DB 直写</td></tr>
+              <tr><td><code>takeAllAndClear</code> / <code>hmGetLongs</code></td><td><code>Map.of()</code></td><td>「没有增量」</td><td>本轮不落库，下轮再来</td></tr>
+              <tr><td><code>eval</code>（Lua 预减）</td><td><code>null</code></td><td>「Redis 不可用」</td><td>降级本地线程池 + DB CAS 兜底</td></tr>
+              <tr><td><code>zTopWithScore</code>（榜单）</td><td><code>List.of()</code></td><td>「榜单为空」</td><td>展示功能缺失，不伤主流程</td></tr>
+              <tr><td><b><code>allow</code>（限流）</b></td><td><b><code>true</code>（放行）</b></td><td>「限流组件失效」</td><td><b>fail-open</b>：限流是省钱不是保命，拒绝所有用户=自己制造全站故障</td></tr>
+              <tr><td><b><code>consumeToken</code>（幂等 token）</b></td><td><b><code>null</code>（放行）</b></td><td>「Redis 不可用」</td><td><b>fail-open</b>：防重是优化不是正确性，别让缓存故障挡住正常下单</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b>③ 为什么 <code>null</code> 和 <code>false</code> 必须分开（读代码核实的「三态设计」）：</b>以一次性 token 为例，方法签名是 <code>public Boolean consumeToken(String key)</code>（RedisOps.java:323-325），返回三个值：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/redis/RedisOps.java</span><span class="loc">:313-325（注释就是三态定义）</span></div>
+          <pre><code>/**
+ * 一次性消费 token：DEL 是原子的——删除成功即"只此一次"。
+ *
+ * &lt;p&gt;幂等 token 的经典语义：签发时 SET（TTL 兜底防泄漏），提交时 DEL；
+ * 返回 true=首次消费放行，false=已被用过拒绝。第二次提交同一个 token
+ * 删不到任何东西（返回 0），天然防重。&lt;/p&gt;
+ *
+ * @return true=消费成功放行；false=token 已被使用/不存在；null=Redis 不可用
+ *         （降级放行——fail-open，别让 Redis 故障挡住正常下单）
+ */
+public Boolean consumeToken(String key) {
+    return safe(() -&gt; stringRedisTemplate.delete(key), null, "consumeToken", key);
+}</code></pre>
+        </div>
+        <p>调用侧的分支把三种语义分开处理（OrderServiceImpl.java:62-67）：<code>Boolean.FALSE.equals(consumed)</code> 才抛「请勿重复提交订单」——<b>注意是 <code>FALSE.equals</code> 而不是 <code>!consumed</code></b>。如果写成 <code>!consumed</code>，那么 <code>null</code>（Redis 挂了）会被自动拆箱成 NPE 或当成「已用过」，<b>所有用户在 Redis 故障期间都下不了单</b>。这个细节就是「null 与 false 语义必须分开」的代价所在。</p>
+        <p><b>④ 可观测性：</b>每次降级打 WARN 日志（带 traceId）。类注释原话——「<b>Redis 挂了你却不知道</b>比 Redis 挂了更可怕」。降级日志刻意不用 ERROR，否则 Redis 一挂全站 ERROR 刷屏，真正的故障会被淹没。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我把所有 Redis 调用收口在一个 <code>RedisOps</code> 门面里，每个方法都过一层 <code>safe()</code> 包装：<b>异常 → 打 WARN → 返回一个兜底值 → 业务自然走 DB</b>。这样 Redis 挂了只会「变慢」，不会「变不可用」——否则缓存就成了故障放大器。<br>
+          <b>关键是兜底值不是统一填的，而是逐方法按业务语义选：</b>缓存读返回空（→ 查库）、计数返回 null（→ 走 DB 计数）、限流返回 <code>true</code> 放行、幂等 token 返回 <code>null</code> 放行。<b>限流和 token 用 fail-open 的理由是——它们一个省钱、一个防重，都不是正确性本身；拒绝所有用户反而是更大的事故。</b>而且 token 那里必须用三态：<code>true</code> 放行、<code>false</code> 拒绝、<code>null</code> 放行，<code>null</code> 和 <code>false</code> 语义不同，合并了就会在 Redis 故障时误拒全部下单。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 不要说「Redis 挂了就拒绝请求更安全」。</b>旁路组件挂了却让全站不可用，是把缓存变成了单点故障。<br>
+          <b>② 不要笼统说「降级就是返回 false」。</b>逐方法语义完全不同，这张表能背下来才算真懂。<br>
+          <b>③ 被追问「怎么知道 Redis 挂了」</b>，答<b>降级 WARN 日志（带 traceId）+ 可统计降级次数</b>；并主动说这条边界：项目<b>没有</b>降级告警，只有日志，这是已知缺口。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.3 ================= -->
+  <h2><span class="h2n">5.3</span>缓存三兄弟：穿透 / 击穿 / 雪崩 <span class="badge badge-red">必考</span></h2>
+
+  <p>这三个词是所有后端面试的第一道缓存题。<b>但它们不是同一件事，防的也是三种完全不同的死法。</b>下面每个都先「撞南墙」——不处理会发生什么。</p>
+
+  <div class="card">
+    <h3 class="card-title">穿透：查一个数据库里也不存在的 id <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>ProductCacheService.java:43-49</code> · <code>:109-124</code></p>
+
+    <p><strong>一句话：</strong>攻击者（或写错的爬虫）狂刷 <code>GET /products/-1</code>。这个 id <b>数据库里也不存在</b>，所以缓存永远不命中——<b>每个请求都穿透缓存直插 DB</b>。100 QPS 的恶意流量 = MySQL 平白多扛 100 QPS 全无效查询。而朴素缓存只在「查到东西」时才回写，所以它对此<b>完全失能</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      这像<b>总有陌生人打前台电话找一个不存在的员工</b>：前台查一次通讯录说「没有这个人」，挂了电话；一分钟后同一个人又打来问同一个名字——前台又查一次通讯录。<b>真正要做的不是查得更快，而是把「查无此人」也记在便签上贴桌上</b>：下次再问，看一眼便签直接回「没有」，通讯录碰都不用碰。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：空值标记 + 对比布隆过滤器</summary>
+      <div class="lvl-body">
+        <p><b>对策（本项目采用）：空值缓存。</b>查不到也往缓存里写一个标记，TTL 设短。四个细节都要点名：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">goods/service/impl/ProductCacheService.java</span><span class="loc">:42-52（常量定义）</span></div>
+          <pre><code>/** 缓存空值的标记（防穿透）。用特殊串而不是 null，因为很多客户端不存 null。 */
+private static final String NULL_MARK = "__NULL__";
+/** 基础 TTL（秒） */
+private static final long BASE_TTL = 30 * 60;
+/** TTL 随机抖动上限（秒），防雪崩 */
+private static final int TTL_JITTER = 10 * 60;
+/** 空值 TTL（秒）：比正常短，避免"刚上架就查不到" */
+private static final long NULL_TTL = 2 * 60;</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">goods/service/impl/ProductCacheService.java</span><span class="loc">:109-124（loadAndCache + marker key）</span></div>
+          <pre><code>private ProductVO loadAndCache(Long productId, String key) {
+    ProductVO vo = productService.detail(productId);
+    if (vo == null) {
+        // 防穿透：不存在也写标记，短期挡住重复查询
+        redisOps.set(NULL_MARK_KEY(productId), "1", NULL_TTL);
+        return null;
+    }
+    // 防雪崩：TTL 加随机抖动，避免同批商品同时失效
+    long ttl = BASE_TTL + ThreadLocalRandom.current().nextInt(TTL_JITTER);
+    redisOps.setObject(key, vo, ttl);
+    return vo;
+}
+
+private String NULL_MARK_KEY(Long productId) {
+    return KEY_PREFIX + "null:" + productId;      // aimall:product:null:{id}
+}</code></pre>
+        </div>
+        <p><b>读路径</b>命中 marker 时直接 <code>return null</code>，DB 一次都不碰（ProductCacheService.java:73-76）：<code>if (redisOps.get(NULL_MARK_KEY(productId)).isPresent()) { return null; }</code></p>
+        <div class="vs">
+          <div class="good">
+            <h5>空值标记（本项目）</h5>
+            <p>实现成本：几行代码，零新增组件。</p>
+            <p>精度：<b>精确</b>——命中即确定「不存在」。</p>
+            <p>代价：攻击者灌海量垃圾 id 会占内存，靠短 TTL（2 分钟）限制。</p>
+            <p>副作用：2 分钟内真上架的商品查不到（脏读窗口）。</p>
+          </div>
+          <div class="bad">
+            <h5>布隆过滤器（知道但没用）</h5>
+            <p>实现成本：要预热全量 id、要能重建（重启后必须重灌）。</p>
+            <p>精度：<b>有假阳性</b>——说「没有」才绝对可靠，说「有」可能是误判。</p>
+            <p>代价：<b>不支持删除</b>（清零会连带误清其他位），要计数布隆或定期重建。</p>
+            <p>新增要同步写、删除要额外处理，一致性成本高。</p>
+          </div>
+        </div>
+        <p><b>诚实说明为什么不选布隆：</b>商品 id 空间小、有 <code>t_product</code> 主键、误判的代价只是多查一次 DB；而布隆的预热/重建/删除一致性成本更重。<b>这是「知道方案但不盲目上」，不是「不知道布隆过滤器」。</b>真到百万级 key 时，布隆才是对的选择。</p>
+        <p><b>两个必答细节：</b>① <b>为什么 TTL 只有 2 分钟</b>——空值缓存 30 分钟 = 商品上架后半小时用户都查不到，2 分钟是「挡刷子」与「不脏读」的平衡；② <b>为什么用独立 key + 哨兵值 <code>"1"</code> 而不是往商品 key 里写 null</b>——很多 Redis 客户端不存 null，而且「key 存在但值是标记」和「key 不存在」是两种可区分的状态，独立 key 还从结构上避免了「空值覆盖真值」这种大事故。</p>
+        <div class="callout warn">
+          <span class="ct">一个很容易漏的联动</span>
+          <code>evict()</code> <b>必须两个 key 一起删</b>（ProductCacheService.java:102-105）：<code>delete(KEY_PREFIX + productId)</code> 加 <code>delete(NULL_MARK_KEY(productId))</code>。只删商品缓存不删 marker 的话，之前发生过穿透的商品<b>新上架后仍会被 marker 挡在门外</b>。能主动说出这一手，是很好的加分点。
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "穿透是「数据<b>不存在</b>」——查一个 DB 里也没有的 id，缓存永远不命中，请求全打到库。我用<b>空值缓存</b>：查不到也写一个标记，但用<b>独立 key</b> <code>aimall:product:null:{id}</code> 存哨兵值 <code>"1"</code>，<b>TTL 只给 2 分钟</b>——挡刷子够用，又不会出现「刚上架查不到」。<br>
+          <b>为什么不缓存 null：</b>很多客户端不存 null，而且「key 存在但是标记」和「key 不存在」是两种状态，必须区分。<b>删缓存时两个 key 要一起删</b>，否则新上架商品会被旧 marker 挡住。<br>
+          <b>更彻底的方案是布隆过滤器</b>：用极小内存回答「这个 id 一定不存在吗」。但它的代价我用不上——有假阳性、不支持删除、新增要同步、重启要重建。商品 id 空间小、误判只是多查一次库，所以我选了空值缓存。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 穿透和击穿的区别是本条最容易混的</b>：穿透打「<b>不存在的 key</b>」，击穿打「<b>存在但恰好过期的热点 key</b>」。一句话——<b>穿透 = 数据不存在；击穿 = 数据存在但缓存没了。</b><br>
+          <b>② 不要说「布隆过滤器一定有假阳性所以不能用」</b>——它解决的是穿透，而且在高规模下是对的选择；本项目不用的理由是成本收益，不是方案不好。<br>
+          <b>③ 不要说「空值缓存 TTL 随便设个几十分钟」。</b>长短都要能讲出理由。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">击穿：热点 key 过期的瞬间 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>ProductCacheService.java:65-99</code> · <code>RedisOps.tryLock / unlock:135-152</code></p>
+
+    <p><strong>一句话：</strong>某个爆款商品的缓存到期。<b>同一个毫秒内</b>几千个请求涌进来，全部发现缓存未命中（旧的已删、新的还没写），于是<b>几千个请求同时查 MySQL 并回写</b>。单次查询没什么，但几千个并发同时落库——MySQL 被打出一个尖刺。<b>击穿是「一个点」被击穿。</b></p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      像<b>公司食堂唯一的电饭煲坏了</b>，全公司一千个人同时冲进厨房自己煮——每个人都想「我自己煮一锅就好了」，结果一千个人挤在一个厨房里谁也煮不成。<br>
+      <b>互斥锁的做法是：只放一个人进厨房煮，其余人在门口等 50 毫秒再看一眼锅里有没有饭。</b>等到了就直接盛，还在煮就直接去外面买（兜底查库）——<b>绝不在门口死等</b>。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：互斥锁重建 + 对比逻辑过期</summary>
+      <div class="lvl-body">
+        <p><b>对策（本项目）：互斥锁重建</b>——同一 key 的重建只让一个线程做，其余等待后重读，重读不到直接查库兜底。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">goods/service/impl/ProductCacheService.java</span><span class="loc">:65-99（detailWithCache）</span></div>
+          <pre><code>public ProductVO detailWithCache(Long productId) {
+    String key = KEY_PREFIX + productId;
+
+    // ---- 1. 读缓存 ----
+    var cached = redisOps.getObject(key, ProductVO.class);
+    if (cached.isPresent()) {
+        return cached.get();                     // 命中：99% 的请求走到这就结束了
+    }
+    // 命中"空值标记"：说明这个商品确实不存在，直接返回 null（防穿透）
+    if (redisOps.get(NULL_MARK_KEY(productId)).isPresent()) {
+        return null;
+    }
+
+    // ---- 2. 未命中：互斥锁重建（防击穿）----
+    String lockKey = LOCK_PREFIX + productId;                 // aimall:lock:product:{id}
+    String lockValue = redisOps.tryLock(lockKey, 3000);       // SET NX PX 3000
+    try {
+        if (lockValue != null) {
+            // 拿到锁：查库 → 回写缓存
+            return loadAndCache(productId, key);
+        }
+        // 没拿到锁：别人在重建，等一下再读
+        sleepQuietly(50);
+        var retry = redisOps.getObject(key, ProductVO.class);
+        if (retry.isPresent()) {
+            return retry.get();
+        }
+        // 兜底：仍读不到就直接查库（缓存只是旁路，不能让它决定可用性）
+        return productService.detail(productId);
+    } finally {
+        if (lockValue != null) {
+            redisOps.unlock(lockKey, lockValue);
+        }
+    }
+}</code></pre>
+        </div>
+        <p><b>锁本身的实现要点</b>：<code>SET key value NX PX ttl</code> 一条命令完成「不存在才写 + 过期时间」；<b>value 存 UUID 标识锁主人</b>，释放时校验后再删——这一步必须用 Lua 保证原子（RedisOps.java:126-152）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/redis/RedisOps.java</span><span class="loc">:126-152（分布式锁）</span></div>
+          <pre><code>/** 释放锁的 Lua：必须校验 value 再删（防误删别人的锁） */
+private static final String UNLOCK_LUA =
+        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+
+public String tryLock(String lockKey, long ttlMillis) {
+    String value = java.util.UUID.randomUUID().toString();
+    Boolean ok = safe(() -&gt; stringRedisTemplate.opsForValue()
+                    .setIfAbsent(lockKey, value, ttlMillis, TimeUnit.MILLISECONDS),
+            false, "tryLock", lockKey);
+    return Boolean.TRUE.equals(ok) ? value : null;    // null = 没抢到（正常分支，不是异常！）
+}</code></pre>
+        </div>
+        <p>四个必须点名的细节：</p>
+        <ol class="steps">
+          <li><b>锁 TTL 为什么是 3 秒</b>：防止赢家查库途中崩溃导致死锁。代价是「赢家超 3 秒没干完，锁没了别人也能进」——最坏退化成无锁并发重建，<b>不会出错，只是多查一次库</b>。正因为代价这么轻，本项目才不引入看门狗续期。<b>按代价选复杂度。</b></li>
+          <li><b>为什么要存 UUID</b>：标识「这把锁是我的」。释放时校验，防锁误删——A 的锁超时自动释放后，A 执行到 finally 把 B 刚拿到的锁删了。</li>
+          <li><b>输家为什么 sleep 50ms 而不是一直等</b>：赢家查库加回写通常小于 50ms；等太久请求堆积。<b>等待要有上限</b>——与 V3 的 Redis 连接池 <code>max-wait</code>（2 秒）是同一个思想。</li>
+          <li><b>输家兜底为什么敢直接查库</b>：击穿的本质是「瞬时尖刺」。输家直接查库只是把尖刺从几千降到几十，可控。<b>缓存是旁路，不能让它决定可用性</b>——等锁不能等成故障。</li>
+        </ol>
+        <div class="vs">
+          <div class="good">
+            <h5>互斥锁重建（本项目）</h5>
+            <p>一致性：<b>强</b>——锁内写完，大家读到的都是新值。</p>
+            <p>延迟：未抢到锁的线程 sleep 50ms 重读。</p>
+            <p>复杂度：简单（一个 <code>SET NX</code> + 等待逻辑）。</p>
+            <p>隐藏坑：锁 TTL 到期重建未完会「双重建」——多查一次库，<b>不伤正确性</b>。</p>
+          </div>
+          <div class="bad">
+            <h5>逻辑过期（知道但没用）</h5>
+            <p>一致性：<b>最终一致</b>——过期后一段时间仍读旧值。</p>
+            <p>延迟：几乎无延迟（立即返回旧值 + 异步重建）。</p>
+            <p>复杂度：value 要包 <code>data + expireAt</code>，还要异步线程池。</p>
+            <p>隐藏坑：异步刷新线程挂了，缓存里<b>永远是一份旧数据</b>（没有物理过期兜底）。</p>
+          </div>
+        </div>
+        <p><b>本项目选互斥锁的理由：</b>商品详情不是微博热搜那种量级，50ms 等待可接受；而<b>「读到旧价格」是电商硬伤，比慢严重</b>——所以选一致性优先。逻辑过期适合极致热点（追求零延迟、能容忍短暂脏读）。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "击穿是「<b>数据存在，但缓存恰好过期了</b>」——爆款商品的 key 过期那一瞬间，几千个请求同时未命中，全部涌向 DB。<br>
+          我用<b><code>SET NX</code> 互斥锁重建</b>：只让一个线程拿锁去查库回写，其余线程 <code>sleep 50ms</code> 后重读缓存。<b>重读还读不到就直接查库兜底——缓存是旁路，不能让它决定可用性，等锁不能等成故障。</b><br>
+          锁有三个细节：<b>TTL 设 3 秒</b>防止赢家崩溃死锁；<b>value 存 UUID</b>，释放时校验再删（用 Lua 保证原子），防误删别人的锁；<b>TTL 到期重建未完只会退化成并发重建，多查一次库，不伤正确性</b>——所以我不上看门狗。<br>
+          <b>另一条路是逻辑过期</b>：key 永不过期、值里带过期时间，过期后返回旧值 + 异步重建，无锁无等待。但商品详情读到旧价格是硬伤，所以我选了一致性优先的互斥锁。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别把击穿说成「大量 key 同时过期」</b>——那是雪崩。击穿是<b>单点</b>热点 key，雪崩是<b>一整面</b>。<br>
+          <b>② 别说「拿不到锁的线程就等着」</b>——等待必须有上限，而且要能兜底查库，否则锁一卡整个接口全卡。<br>
+          <b>③ 别说「我们用了 Redisson 看门狗」</b>——本项目<b>没有</b> Redisson，就是 <code>SET NX PX</code> + Lua 释放，而且<b>刻意不续期</b>（重建超时的代价可接受）。被追问「为什么不用 Redisson」就答：锁适合保护复杂临界区，简单场景原生命令更轻，且看门狗解决的是「业务执行超长」的问题，本项目不需要。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">雪崩：大量 key 同时过期 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>ProductCacheService.java:116-118</code></p>
+
+    <p><strong>一句话：</strong>商品批量导入时给了<b>同一个 TTL</b>，30 分钟后同一秒全部失效——那一秒的未命中流量全部落库。<b>击穿是「一个点」，雪崩是「一整面」塌下来。</b></p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      击穿像<b>一扇门锁坏了，一群人挤那一扇门</b>；雪崩像<b>整层楼的灯在同一秒全灭</b>——不是某个灯泡的问题，是「同时」这件事本身造成的。<br>
+      <b>抖动的本质是把同步的失效点变成错峰</b>：不是让灯泡更耐用，而是让它们别在同一秒一起坏。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：一行代码的 TTL 抖动</summary>
+      <div class="lvl-body">
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">goods/service/impl/ProductCacheService.java</span><span class="loc">:116-118</span></div>
+          <pre><code>// 防雪崩：TTL 加随机抖动，避免同批商品同时失效
+long ttl = BASE_TTL + ThreadLocalRandom.current().nextInt(TTL_JITTER);
+redisOps.setObject(key, vo, ttl);</code></pre>
+        </div>
+        <p>把数字背下来：<b>基础 30 分钟（1800s）+ 0~10 分钟（0~600s）随机抖动 = 实际 TTL 落在 1800s ~ 2399s</b>。用 <code>ThreadLocalRandom</code> 而不是 <code>Random</code>：避免多线程争抢同一个 <code>Random</code> 内部的 CAS 种子。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">抖动前后对比</span><span class="loc">失效点分布</span></div>
+          <pre><code>无抖动：所有 key 同秒集体失效 ──► DB 瞬时被打爆（雪崩）
+        1800s
+有抖动：失效点均匀散落在 [1800s, 2400s]
+        ├──┬───┬─────┬────────┬──────┬───┤   ← DB 压力被"摊平"，无瞬时尖峰
+       1800                              2400</code></pre>
+        </div>
+        <p><b>本项目的雪崩成因是具体且非攻击场景的：商品批量导入时给了同一个 TTL。</b>能说出自己的真实成因，比背教材的「Redis 宕机」更有说服力。</p>
+        <div class="callout warn">
+          <span class="ct">诚实边界：雪崩 ≠ 只有 TTL 一个成因</span>
+          ① 大量 key 同时过期（本项目这个）；② <b>Redis 集群/主节点整体宕机</b>（缓存层整个消失，流量 100% 打 DB）；③ 热点数据集中（略等于击穿）。<br>
+          <b>抖动只解决第 ① 种，它降低的是「尖峰」，不改变「总量」。</b>真遇到 Redis 整体宕机，抖动救不了你——那时靠的是<b>降级门面（变慢不挂掉）+ 限流别让 DB 一起死</b>。多级缓存（本地 Caffeine + Redis）本项目<b>没做</b>，原因要能说：本地缓存的失效通知是分布式难题（实例 A 更新商品怎么通知 B 清本地？要靠广播/消息总线），单实例 + 商品详情 QPS 不高时 Redis 一层够用。
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "雪崩是「<b>大量 key 同时过期</b>」。我这里的成因很具体——<b>商品批量导入时给了同一个 TTL，30 分钟后同一秒集体失效</b>，那一秒的未命中流量全打到 DB。<br>
+          对策是<b>TTL 加随机抖动</b>：<code>基础 30 分钟 + 0~10 分钟随机</code>，实际 TTL 落在 1800~2400 秒，失效点被打散在一个十分钟的窗口里。<b>抖动范围取基础值的 1/3 左右是经验值</b>：太小等于没做，太大命中率会掉。<br>
+          <b>但要讲清它的边界：抖动只降低尖峰、不改变总量。</b>真正危险的是 Redis 整体宕机——那种情况下抖动用处不大，得靠降级门面 + 限流别让 DB 一起死。<b>多级缓存（本地 Caffeine + Redis）我没做</b>，因为本地缓存的失效通知在分布式下是难题，单实例 + 这个 QPS 用不上，不预支复杂度。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别说「雪崩和击穿差不多」</b>——一个是一整面、一个是单个点，对策也完全不同（抖动 vs 互斥锁）。<br>
+          <b>② 别把「加随机 TTL」说成万能解</b>——它挡不住 Redis 整体宕机。<br>
+          <b>③ 不要暗示项目做了多级缓存或熔断保护缓存</b>——项目和简历都只有「三兄弟 + 先更库再删缓存」，多级缓存必须明说「知道方案、本项目没做」。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">一致性：为什么是「先更库再删缓存」 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>ProductCacheService.evict:102-105</code> · <code>ProductRestController</code> 的接线位置</p>
+
+    <p><strong>一句话：</strong>写路径只有两步——<code>UPDATE DB → DELETE cache</code>。<b>不是「更新缓存」</b>。理由两条：① <b>删除是幂等的</b>，谁删都一样，而更新要自己算新值且并发下顺序可能倒置；② <b>先更库再删缓存</b>即使有并发读把旧值灌回缓存，也只是「短暂且必然被随后的删除清掉」——失败方向更安全。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      「更新缓存」像<b>黑板上的通知改了，你得挨个通知每个路过的人「新内容是这个」</b>——人多的时候你喊的话可能被后来的人盖掉；「删除缓存」像<b>直接把黑板擦了</b>——谁来看都是空的，下次有人要看自然去办公室里拿最新的贴上来。<br>
+      <b>擦黑板不用记内容、不怕顺序错、谁擦都一样——这就是「删除比更新安全」的全部理由。</b>
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：两种顺序的推演 + 接线位置</summary>
+      <div class="lvl-body">
+        <p><b>为什么不能「先删缓存再更库」</b>：删完、库还没更的窗口里，并发读会把<b>旧值重新灌进缓存</b>，结果缓存长期脏（要等 TTL 才自愈）。而「先更库再删缓存」的窗口里，读到的只是旧缓存，且这个脏值<b>一定会被随后的删除清掉</b>。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">goods/service/impl/ProductCacheService.java</span><span class="loc">:101-105（evict）</span></div>
+          <pre><code>/** 商品更新/下架时主动删除缓存（保证一致性） */
+public void evict(Long productId) {
+    redisOps.delete(KEY_PREFIX + productId);        // aimall:product:{id}
+    redisOps.delete(NULL_MARK_KEY(productId));      // aimall:product:null:{id} ← marker 一起删
+}</code></pre>
+        </div>
+        <p><b>为什么不追求强一致：</b>先更库再删缓存也有极小的不一致窗口（读者读到旧缓存），商品详情场景可接受。<b>「追求强一致就别用缓存」</b>——这是缓存方案的前提条件，不是能力缺陷。</p>
+        <p><b>「缓存三兄弟的代码为什么放在这一层」——读代码核实的接线位置：</b>缓存逻辑不在 <code>ProductServiceImpl.detail</code> 里，而在 <code>ProductCacheService</code>，由 <b>Controller 层</b>直接调 <code>detailWithCache</code>。原因是一个真实的构造器循环依赖：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">为什么放 Controller 层（ProductCacheService 类注释与调用点）</span><span class="loc">依赖方向</span></div>
+          <pre><code>// 若 ProductServiceImpl.detail 内部调 ProductCacheService
+// 而 ProductCacheService 又依赖 ProductService（查库兜底）
+// → 构造器循环依赖 → Boot 3 默认禁止（allow-circular-references=false）→ 启动失败
+
+// 现在的方向：
+// ProductRestController → ProductCacheService → ProductService（单向，无环）
+// ProductCacheService 依赖 RedisOps + ProductMapper + ProductService</code></pre>
+        </div>
+        <p>V2 就踩过同款（<code>AuditServiceImpl</code> 与 <code>NoteServiceImpl</code> 的环，最后删掉了多余依赖）。<b>缓存是「读路径的装饰」，放在 Controller 依赖注入天然无环，而且一眼可见「这个接口有缓存」。</b></p>
+        <p><b>为什么不用 <code>@Cacheable</code>：</b>类注释原话——「注解方便，但三兄弟的防护（空值/互斥锁/随机 TTL）都得自己写，那还不如显式写在 Service 里；逻辑一目了然，也便于在面试时逐条指给别人看。<b>可读性优先于「看起来高级」</b>。」</p>
+        <p><b>更高级的方案（知道名字即可）：</b>延迟双删（删缓存 → 更库 → sleep(N) → 再删）、订阅 binlog（Canal / Debezium）异步删缓存、cache key 带版本号。<b>延迟双删本项目不做</b>——商品缓存 TTL 只有 30 分钟，脏读窗口天然有上界，而写入频率极低（后台改商品），用 TTL 兜底胜过 sleep 拍不准。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "缓存一致性我走的是 Cache-Aside：<b>先更库，再删缓存</b>，注意是<b>删</b>不是更新。两个理由：<b>删除是幂等的</b>——谁删都一样、不用自己算新值、并发下也不怕顺序倒置；而更新缓存要算新值，两个线程写入顺序可能颠倒，旧值会复活。<br>
+          <b>为什么不能反过来先删缓存再更库：</b>删完、库还没更的那个窗口里，并发读会把旧值重新灌回缓存，缓存就长期脏了。先更库再删缓存即使有脏值，也是短暂且必然被后面的删除清掉的，<b>失败方向更安全</b>。<br>
+          <b>代价我也说清楚：</b>先更库再删缓存仍有一个极小窗口，追求强一致就不该用缓存——商品详情这个场景可以接受。另外 <code>evict</code> 要<b>两个 key 一起删</b>（商品 key + 空值 marker），漏了会让新上架商品查不到。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别说「我们更新缓存保证一致」</b>——并发下更新缓存是错的写法。<br>
+          <b>② 别说「用了 <code>@Cacheable</code>」</b>——项目没用注解，是显式写的。<br>
+          <b>③ 别把「延迟双删/binlog 订阅」说成项目做了</b>——那是「知道方案、本项目靠 TTL 兜底不做」。<b>主动划这条线加分，含糊过去被追问就翻车。</b>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.4 ================= -->
+  <h2><span class="h2n">5.4</span>计数增量桶：写放大治理</h2>
+
+  <div class="card">
+    <h3 class="card-title">一次互动三次 DB 写，热点行会被打爆 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：<code>NoteCounterStore.java</code> · <code>NoteCounterFlushTask.java:24</code> · <code>NoteServiceImpl.incrCount:507-528</code> / <code>flushCounters:544-565</code></p>
+
+    <p><strong>一句话：</strong>热门笔记每次被浏览，原实现要做「查 → 更新计数 → 重算热度」共 <b>3 次 DB 写</b>（代码注释原话是「1 SELECT + 3 UPDATE」），而且全打在同一行上——<b>InnoDB 的行锁把这行串行化，热点笔记的这行被高频写打爆</b>。改法是：互动只往 Redis Hash 里 <code>HINCRBY</code> 攒<b>增量</b>（内存、微秒级），每 60 秒由定时任务原子取走并加法回写 DB。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      这像<b>超市收银台不再「每卖一件就跑去仓库改一次库存牌」，而是先把每一笔记账在小本子上，每隔一小时把小本子上的总数一次抄进账本</b>。<br>
+      关键是小本子上记的是<b>「这一小时卖了多少」这个增量</b>，不是「现在还剩多少」这个全量——因为抄全量时两边会互相覆盖，而加法永远不会算错。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：为什么存 delta 而不是全量</summary>
+      <div class="lvl-body">
+        <p><b>核心设计（代码注释写得非常清楚）：</b></p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/NoteCounterStore.java</span><span class="loc">:14-28（为什么存增量而不是全量）</span></div>
+          <pre><code> *   互动发生：  HINCRBY aimall:cnt:{type}  {noteId}  ±1     （内存，微秒级）
+ *   读计数：    DB 快照值 + HMGET 增量                       （近实时）
+ *   定时落库：  Lua 原子取走全部增量 → UPDATE x_count += delta（批量回写）
+ *
+ * 为什么不存全量（GET-改-写回）：落库窗口内"Redis 全量值"与"DB 值"
+ * 互相覆盖，丢失更新的窗口永远存在。存增量则两侧都是加法，
+ * 天然可交换、可重试，没有覆盖语义。</code></pre>
+        </div>
+        <p><b>互动侧：</b>只做一次 <code>HINCRBY</code>（NoteCounterStore.java:47-49）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/NoteCounterStore.java</span><span class="loc">:42-49（incr）</span></div>
+          <pre><code>/**
+ * 计数加 delta。
+ *
+ * @return 落在 Redis 后的增量值；null = Redis 不可用（调用方回退 DB 直写）
+ */
+public Long incr(String type, Long noteId, long delta) {
+    return redisOps.hIncrBy(key(type), String.valueOf(noteId), delta);
+}</code></pre>
+        </div>
+        <p><b>落库侧：</b>定时任务每 60 秒跑一次，把三类增量原子取走后加法回写，并在落库完成后才重算热度（NoteCounterFlushTask.java:24，<code>@Scheduled(fixedDelay = 60 * 1000, initialDelay = 2 * 60 * 1000)</code>）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:544-565（flushCounters）</span></div>
+          <pre><code>@Override
+public void flushCounters() {
+    java.util.Set&lt;Long&gt; touched = new java.util.HashSet&lt;&gt;();
+    counterStore.takeAndClear(NoteCounterStore.VIEW).forEach((id, delta) -&gt; {
+        noteMapper.applyViewDelta(id, delta);
+        touched.add(id);
+    });
+    counterStore.takeAndClear(NoteCounterStore.LIKE).forEach((id, delta) -&gt; {
+        noteMapper.applyLikeDelta(id, delta);
+        touched.add(id);
+    });
+    counterStore.takeAndClear(NoteCounterStore.COLLECT).forEach((id, delta) -&gt; {
+        noteMapper.applyCollectDelta(id, delta);
+        touched.add(id);
+    });
+    if (touched.isEmpty()) {
+        return;
+    }
+    // 回写完成后 DB 是最新值：此刻重算热度才是准的
+    touched.forEach(this::refreshHotScore);
+    log.debug("计数增量已落库，触发热度重算的笔记数={}", touched.size());
+}</code></pre>
+        </div>
+        <p><b>取走+清空必须原子（Lua）：</b>拆成 <code>HGETALL</code> → <code>DEL</code> 两步的话，两步之间到达的 <code>HINCRBY</code> 会被随后的 <code>DEL</code> 一起删掉——增量凭空丢失（落库丢计数）。脚本内先取后删原子执行，取走之后新到的增量进入「新一轮」，下轮再落（RedisOps.java:283-311，<code>TAKE_ALL_LUA</code>）。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/redis/RedisOps.java</span><span class="loc">:290-293（TAKE_ALL_LUA）</span></div>
+          <pre><code>private static final String TAKE_ALL_LUA =
+        "local all = redis.call('hgetall', KEYS[1]) " +
+        "redis.call('del', KEYS[1]) " +
+        "return all";</code></pre>
+        </div>
+        <p><b>读路径口径：</b>列表页/详情页读的是「DB 快照 + 未落库增量」的拼接值（<code>readDeltas</code> 批量 <code>HMGET</code>，NoteCounterStore.java:52-66；<code>applyDelta</code> 做加法，NoteServiceImpl.java:531-534），所以用户看到的仍是<b>近实时</b>的计数，不会因为落库间隔而卡住 60 秒不涨。</p>
+        <p><b>降级路径是现成的：</b>Redis 不可用时 <code>incr</code> 返回 <code>null</code>，<code>incrCount</code> 自动回退到 V2 的 DB 直写（<code>incrViewCount</code> / <code>decrLikeCount</code> 等，NoteServiceImpl.java:507-528）。<b>「旧代码就是降级路径」</b>——这是这套设计最舒服的地方：不是额外写一份兜底，而是保留旧实现当兜底。</p>
+        <div class="callout warn">
+          <span class="ct">代价是什么（面试要能主动说）</span>
+          <b>可能丢最后 60 秒的计数。</b>Redis 在这一刻宕机，未落库的增量就没了。为什么能接受？<b>计数是「展示数据」不是「资金数据」</b>——丢了最多是点赞数少几个，不丢单不资损。代码注释原话：计数与订单/支付的一致性等级<b>刻意区分</b>。反过来说，这个取舍不能用在下单/支付上，那里必须强一致 + CAS 兜底。<b>能主动画出这条线，才叫真懂一致性等级。</b>
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "热门笔记的计数有<b>写放大</b>问题：原先一次浏览要做「查 + 更新计数 + 重算热度」三次 DB 写，全打在同一行上，行锁把热点行串行化、被打爆。<br>
+          我改成 <b>Redis 攒增量 + 60 秒定时落库</b>：互动只做一次 <code>HINCRBY</code>（内存、微秒级），定时任务把增量原子取走后批量加法回写 DB，<b>热度的重算也收敛到落库路径上</b>——所以热度的更新频率等于落库频率，<b>与流量解耦</b>，这就是写放大治理的完整闭环。<br>
+          <b>关键设计是存 delta 不是全量：</b>存全量时「Redis 全量值」和「DB 值」会互相覆盖，丢更新的窗口永远在；存增量两侧都是加法，天然可交换、可重试，没有覆盖语义。<b>取走+清空用 Lua 保证原子</b>，否则两步之间新到的增量会被 <code>DEL</code> 误删。<br>
+          <b>代价我主动说：</b>Redis 宕机会丢最后 60 秒的增量。但计数是展示数据不是资金数据，一致性等级和订单/支付刻意区分开——Redis 不可用时还会自动降级回 DB 直写，功能不坏只是慢。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别说「放 Redis 就是为了快」就完事</b>——真实动机是<b>写放大治理</b>（热点行的行锁被高频写打爆），说清动机才叫懂。<br>
+          <b>② 别说「定时落库保证计数不丢」</b>——它会丢最后一个周期的增量，代价必须主动交代。<br>
+          <b>③ 别说「存 Redis 全量值然后定时刷回 DB」</b>——那正是被否掉的写法，会丢更新。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.5 ================= -->
+  <h2><span class="h2n">5.5</span>热门榜：zset + 双轨刷新</h2>
+
+  <div class="callout warn" style="margin-top:0">
+    <span class="ct">先说跨页关系，避免重复</span>
+    榜单的<b>业务侧展示</b>（热度公式、读榜接口、下架笔记从榜上自然消失）在 <a href="04-内容社区.html">04 页 4.8</a> 已经从内容域视角讲了一遍。<b>本节只从横切技术视角补充两件事：为什么必须是 zset（结构选型）与双轨刷新的必要性（可靠性）。两页口径一致，不重复叙述。</b>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">zset 是唯一同时满足「去重 + 有序 + TopN」的结构 <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：<code>NoteServiceImpl.java:63-65 / :391-399 / :406-456 / :473-483</code> · <code>HotRankRebuildTask.java:25</code></p>
+
+    <p><strong>一句话：</strong>排行榜需要三件事——<b>成员唯一</b>（一篇笔记只上一次榜）、<b>按分数自动有序</b>、<b>能取 Top-N 和查排名</b>。Redis 五种基本结构里<b>只有 zset 一条同时满足</b>，而且全是 <code>O(logN)</code> 级别。同时榜单用<b>两条轨道</b>维护：互动时增量刷新保实时，定时全量重建保「Redis 挂了也能自己爬起来」。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      zset 像<b>一个会自动重新排队的候诊大厅</b>：新病人（笔记）进来时，护士就把他插到正确的位置（写入时付出 <code>O(logN)</code>），所以任何时候叫号（读 Top-N）都能直接从头念，不用现场把全厅的人重新排一遍。<br>
+      如果把排行榜放在 MySQL 里 <code>ORDER BY hot_score DESC LIMIT 50</code>，就变成<b>每次叫号都要全院重新排一次队</b>（filesort）——而这是个<b>高频写 + 高频读</b>的场景，这条路走不通。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：双轨刷新 + 一个可以主动交代的真实缺陷</summary>
+      <div class="lvl-body">
+        <p><b>热度公式（两个方法共用同一份）：</b>点赞 ×3 + 收藏 ×5 + 浏览 ×1。权重差异是有意的——<b>收藏是最强的兴趣信号，浏览最廉价、最容易被刷</b>。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:485-488</span></div>
+          <pre><code>/** 热度分 = 点赞*3 + 收藏*5 + 浏览*1（refreshHotScore/rebuildHotRank 共用同一公式） */
+private int hotScoreOf(Note n) {
+    return n.getLikeCount() * 3 + n.getCollectCount() * 5 + n.getViewCount();
+}</code></pre>
+        </div>
+        <p><b>轨道一 · 增量刷新（保实时）：</b>落库任务重算某篇热度后同步写 zset（NoteServiceImpl.java:391-399）。<b>Redis 不可用时静默降级</b>——榜单纯展示，不决定可用性。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:391-399（refreshHotScore）</span></div>
+          <pre><code>private void refreshHotScore(Long noteId) {
+    Note n = noteMapper.selectById(noteId);
+    if (n == null) {
+        return;
+    }
+    int score = hotScoreOf(n);
+    noteMapper.updateHotScore(noteId, score);
+    redisOps.zAdd(HOT_RANK_KEY, String.valueOf(noteId), score);
+}</code></pre>
+        </div>
+        <p><b>轨道二 · 全量重建（保自愈）：</b>每 30 分钟以 DB 为真值重灌一遍（<code>HotRankRebuildTask.java:25</code>，<code>@Scheduled(fixedDelay = 30 * 60 * 1000, initialDelay = 3 * 60 * 1000)</code>）。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:473-483（rebuildHotRank）</span></div>
+          <pre><code>@Override
+public void rebuildHotRank() {
+    List&lt;Note&gt; top = noteMapper.selectPublishedForRank(HOT_RANK_REBUILD_SIZE);
+    if (top.isEmpty()) {
+        return;
+    }
+    redisOps.delete(HOT_RANK_KEY);
+    for (Note n : top) {
+        redisOps.zAdd(HOT_RANK_KEY, String.valueOf(n.getId()), hotScoreOf(n));
+    }
+    log.info("热门榜已全量重建，成员数={}", top.size());
+}</code></pre>
+        </div>
+        <p>zset 的 key 是 <code>aimall:hot:notes</code>，重建候选上限 <code>HOT_RANK_REBUILD_SIZE = 1000</code>（NoteServiceImpl.java:63-65）。</p>
+        <div class="vs">
+          <div class="good">
+            <h5>增量刷新（实时）</h5>
+            <p>解决的问题：<b>实时性</b>——刚被点赞的笔记立刻往上走。</p>
+            <p>代价：多一次重算 + 一次 Redis 写。</p>
+            <p>只有它会怎样：<b>Redis 一重启（且没持久化），榜单直接空掉且永远补不回来</b>——增量只在「下次互动」时才写，没人互动就永远没数据。</p>
+          </div>
+          <div class="bad">
+            <h5>全量重建（30 分钟）</h5>
+            <p>解决的问题：<b>冷启动 / 漂移自愈</b>——以 DB 为真值重灌一遍，纠正 score 算错与长期不一致。</p>
+            <p>代价：一次批量写 + <b>毫秒级空窗</b>。</p>
+            <p>只有它会怎样：榜单最坏滞后 30 分钟——刚爆火的笔记上不去，体验差。</p>
+          </div>
+        </div>
+        <p><b>一句话口径：增量保实时，全量保自愈。</b>更底层的理由是——<b>缓存永远可以由源数据重建</b>，DB 才是真值，Redis 只是加速。这也是 HotRankRebuildTask 类注释的原话。</p>
+        <p><b>读榜：zset 只出 id 顺序，明细一次 <code>IN</code> 批量回查。</b>这条是「反 N+1」在榜单上的复用（代码注释明确记了一次 P2 修复：早期实现是循环逐条 <code>selectById</code>，Top50 = 50 次 SQL，与列表接口辛苦做的批量查询自相矛盾）。另外<b>排序的真相在 zset 里</b>——<code>IN</code> 返回顺序不保证与传入一致，所以最后一步是<b>按 zset 顺序组装</b>，DB 只负责补明细（NoteServiceImpl.java:406-456）。</p>
+        <div class="callout warn">
+          <span class="ct">可以主动交代的真实缺陷（说出来比不说值钱）</span>
+          <b>① 口径不一致：</b>全量重建只灌<b>热度最高的 1000 篇</b>，但增量刷新（<code>refreshHotScore</code>）<b>不受这个限制</b>——任何被点赞的笔记都会 <code>zAdd</code> 进榜。结果是一篇靠点赞爬进榜、但排名在 1000 名之外的笔记，<b>下一次全量重建会把它静默擦掉</b>，榜单随重建周期出现锯齿抖动。<b>这不是性能问题，是正确性问题</b>（增量与全量的口径必须一致）。解法有：增量侧加同样的边界判断、全量侧不做 delete 而是「灌全部 + 定期裁剪」、或用影子 key 原子切换。<br>
+          <b>② 先删后灌有毫秒级空窗：</b>这期间读榜单会拿到空列表。标准解法是<b>影子 key + <code>RENAME</code> 原子替换</b>（Redis 的 RENAME 是原子的）。本项目接受这个空窗，因为榜单是<b>派生数据</b>——但要主动说「我知道标准解法是影子 key」，否则就是没意识到。
+        </div>
+        <div class="callout ok">
+          <span class="ct">边界一句话（这条也是分水岭）</span>
+          <b>榜单是派生数据，可以容忍短暂不准</b>——这正是敢用「增量 + 最终一致」的前提。反过来说：<b>库存、金额是账目数据，绝不能这么干</b>，必须强一致 + 条件更新兜底。能主动画出这条线，才算真懂自己为什么敢用 zset。
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "热门榜我用 Redis zset，因为排行榜需要三件事：去重、按分数排序、取 Top-N——<b>只有 zset 一条结构同时满足</b>，而且都是 <code>O(logN)</code>。底层是 skiplist + dict：dict 负责按成员 <code>O(1)</code> 找分数，跳表负责按分数有序与范围查询。<br>
+          热度公式是<b>点赞×3 + 收藏×5 + 浏览×1</b>，收藏权重最高，因为它是最强的兴趣信号。<br>
+          <b>维护用双轨：增量刷新保实时</b>，落库时同步 <code>zAdd</code>；<b>定时全量重建保自愈</b>——每 30 分钟以 DB 为真值重灌一遍，解决 Redis 重启后榜单空掉、以及长期增量累积的漂移。一句话是<b>「增量保实时，全量保自愈」</b>。<br>
+          读榜时 zset 只出 id 顺序，明细用一次 <code>IN</code> 批量回查，避免 N+1；而且最后要按 zset 顺序组装，因为 <code>IN</code> 不保证顺序。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 不要把重建说成「为了性能」</b>——它的价值是<b>正确性自愈</b>：只有增量的话，Redis 一重启榜单就空了，而且没人互动就永远补不回来。<br>
+          <b>② 主动交代缺陷：</b>全量只灌 Top1000、增量不设限，口径不一致会导致榜单抖动；先删后灌还有毫秒级空窗。敢主动讲这条，比「我用 zset 做了排行榜」值钱得多——它证明你在 review 自己的代码。<br>
+          <b>③ 别把 zset 说成「Redis 里放了个有序 List」</b>——底层是跳表 + 字典，不是数组。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.6 ================= -->
+  <h2><span class="h2n">5.6</span>接口限流：Redis <code>INCR</code> + <code>EXPIRE</code> 的 Lua 原子固定窗口</h2>
+
+  <div class="card">
+    <h3 class="card-title">分开执行 <code>INCR</code> 和 <code>EXPIRE</code> 会导致用户被永久限流 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>RedisOps.java:214-240</code>（<code>RATE_LIMIT_LUA</code> + <code>allow</code>） · 调用点 <code>ChatRestController.java:118-124</code></p>
+
+    <p><strong>一句话：</strong>只有 AI 对话接口带限流（<b>每用户 10 次 / 60 秒</b>），因为 AI 是<b>按 token 计费</b>的真实成本，被脚本刷一晚就是真金白银，而且一次问答耗时 3~10 秒会占住 Tomcat 线程池，把正常用户连坐。实现是 Redis 固定窗口计数——但<b>计数与设置过期必须在同一个 Lua 脚本里</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      把 <code>INCR</code> 和 <code>EXPIRE</code> 分开写，像<b>进景区先刷一次卡（计数 +1）、再走到另一个窗口去盖章（设置有效期）</b>：万一你刷完卡、走到盖章窗口时窗口临时关了——<b>你的卡永远不过期</b>，此后每次刷卡都显示「已超次数」。<br>
+      Lua 的做法是<b>刷卡和盖章在同一张桌子上一次办完</b>：要么都成功，要么都没发生，不存在「刷了卡没盖成章」的中间态。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：真实 Lua 脚本 + 固定窗口的边界缺陷</summary>
+      <div class="lvl-body">
+        <p><b>真实 Lua 脚本与调用代码：</b></p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/redis/RedisOps.java</span><span class="loc">:226-240（RATE_LIMIT_LUA + allow）</span></div>
+          <pre><code>private static final String RATE_LIMIT_LUA =
+        "local n = redis.call('incr', KEYS[1]) " +
+        "if n == 1 then redis.call('expire', KEYS[1], ARGV[1]) end " +
+        "return n";
+
+public boolean allow(String key, int limit, int windowSeconds) {
+    Long n = safe(() -&gt; stringRedisTemplate.execute(
+                    new DefaultRedisScript&lt;&gt;(RATE_LIMIT_LUA, Long.class),
+                    Collections.singletonList(key), String.valueOf(windowSeconds)),
+            null, "allow", key);
+    if (n == null) {
+        return true;    // Redis 不可用 → 放行（限流组件不应成为可用性瓶颈）
+    }
+    return n &lt;= limit;
+}</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">ai/controller/ChatRestController.java</span><span class="loc">:118-124（checkRateLimit 调用点）</span></div>
+          <pre><code>private void checkRateLimit() {
+    Long userId = cn.dev33.satoken.stp.StpUtil.getLoginIdAsLong();
+    boolean allowed = redisOps.allow("aimall:rate:chat:" + userId, 10, 60);
+    if (!allowed) {
+        throw new BusinessException(com.aimall.common.api.ResultCode.AI_SERVICE_ERROR,
+                "问得太频繁啦，休息一下再来～（每分钟 10 次）");
+    }
+}</code></pre>
+        </div>
+        <p><b>为什么必须用 Lua（这是本节的核心）：</b>早期两步写法是 <code>INCR</code> 之后再 <code>EXPIRE</code>。如果 <code>INCR</code> 成功但 <code>EXPIRE</code> 恰好失败（Redis 瞬断），<b>key 存在但永不过期</b> → 计数器只增不减 → <b>该用户被永久限流到 10 次</b>，而且没人能发现原因。Lua 把两步合成原子操作，从根上消除这个窗口。代码注释原话：「这也是<b>多命令复合语义必须 Lua</b> 的又一实例（与限量发售预减同理）」——本项目第三次应用这个原则。</p>
+        <p><b>为什么 <code>if n == 1</code> 才设置过期：</b>只有窗口内第一次请求需要设 TTL。若每次都 <code>EXPIRE</code>，窗口会被无限延长，变成「60 秒内没请求才算过窗口」的滑动语义，与固定窗口不一致。</p>
+        <p><b>限流键为什么要带 <code>userId</code>：</b>按用户隔离。所有用户共用一个 key 就是「全局限流」——一个人刷爆，所有人都用不了。带上 userId 才是「每人每分钟 10 次」。</p>
+        <p><b>fail-open 的取舍：</b>Redis 不可用时 <code>allow</code> 返回 <code>true</code> 放行。代码注释原话——「限流组件不应成为可用性瓶颈」。理由要能讲透：<b>限流是为了控成本，「因限流组件挂了导致正常用户全用不了」是更严重的事故。</b>拒绝服务比多花点钱更糟。这与「缓存挂了走 DB」是同一种思想：兜底优先保可用。</p>
+        <div class="callout warn">
+          <span class="ct">固定窗口的边界缺陷（必须主动说）</span>
+          <b>窗口切换瞬间最多放行 2 倍。</b>比如第 1 分钟最后 1 秒打满 10 次 + 第 2 分钟第 1 秒再打 10 次——<b>1 秒内实际 20 次</b>穿过。这是固定窗口的<b>固有缺陷，不是实现 bug</b>。<br>
+          <b>更严格的方案（说得出名字就够）：</b><br>
+          <b>滑动窗口</b>——用 zset 存每次请求的时间戳，<code>ZREMRANGEBYSCORE</code> 清掉窗口外的、<code>ZCARD</code> 计数，统计精确；代价是每个请求要写一次 zset，内存与开销更大。<br>
+          <b>令牌桶 / 漏桶</b>——恒定速率放行、允许受控突发，网关常用。<br>
+          <b>本项目为何用固定窗口：</b>代码注释已写明——「限流的目的是防刷与成本控制，固定窗口实现简单、性能好；边界处最多放行 2 倍对本场景可接受。真要严格限流用 Redisson 的 RRateLimiter 或网关层限流。」<b>能说出自己方案的缺陷，比堆砌高级方案更显功底。</b>
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我在 AI 对话接口做了限流，<b>每用户 10 次 / 60 秒</b>。为什么只限 AI 而不限商品列表？因为 <b>AI 按 token 计费，一次问答真实花钱</b>，被脚本刷一晚就是真金白银；而且 AI 调用秒级耗时，会把 Tomcat 线程池占满、连坐正常用户。<b>限流是成本治理，不是炫技。</b><br>
+          实现是 Redis <code>INCR</code> + <code>EXPIRE</code> 的固定窗口，但<b>必须放在同一个 Lua 脚本里原子执行</b>——早期分成两行写有个隐蔽 bug：<code>INCR</code> 成功但 <code>EXPIRE</code> 恰好失败，key 就永不过期，<b>该用户会被永久限流到 10 次</b>。Lua 在 Redis 单线程里原子执行整段，从根上消除这个中间态。<br>
+          <b>降级方向是放行（fail-open）</b>：Redis 挂了限流就失效，因为「因限流组件挂了导致正常用户全用不了」比「多花点钱」严重得多。<br>
+          <b>我也知道固定窗口的缺陷</b>：窗口切换瞬间最多放行 2 倍。更严格要用滑动窗口（zset 存时间戳）或令牌桶，我只是判断这个场景防刷够用了。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别说「限流用 Redis <code>INCR</code> 加 <code>EXPIRE</code> 两行就够」</b>——那正是被评审修掉的 bug，两行之间永远有「恰好失败」的窗口。<br>
+          <b>② 别说「Redis 挂了就拒绝请求」</b>——那是 fail-close，等于把限流组件变成单点故障。<br>
+          <b>③ 被问「哪里用了限流」只答 AI 接口</b>，并说清成本理由。项目<b>没有</b>网关层限流、<b>没有</b> Sentinel、<b>没有</b>滑动窗口/令牌桶——主动说清这个边界，别说成「全站都有接口级限流」。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.7 ================= -->
+  <h2><span class="h2n">5.7</span>幂等设计：四种手段与真实落点 <span class="badge badge-red">必考 · 口径高危</span></h2>
+
+  <p><b>幂等的定义：同一个请求执行 N 次，效果等于执行 1 次。</b>它不是「防重复请求」，而是「<b>让重复请求无害</b>」——因为重复<b>一定</b>会发生，来源有三个：</p>
+  <div class="grid grid-3" style="margin:14px 0">
+    <div class="callout warn" style="margin:0"><span class="ct">① 用户重复提交</span>双击「提交订单」、网络慢时反复点、浏览器重放。这是最直观的来源。</div>
+    <div class="callout warn" style="margin:0"><span class="ct">② 第三方重复回调</span>支付回调必然重复——支付宝文档明确：未收到 success 会<b>重试 8 次以上</b>，间隔逐渐拉长。</div>
+    <div class="callout warn" style="margin:0"><span class="ct">③ MQ 重复消费</span>MQ 的语义是 <b>at-least-once</b>：先做业务后 ACK，进程在 ACK 前崩溃 → 消息重投 → 重复执行。<b>重复是常态不是异常。</b></div>
+  </div>
+  <p>在<b>资损场景</b>（下单、支付、限购、库存回补），幂等不是加分项，是<b>入场券</b>——重复一次就是重复扣钱/重复回补库存/超卖。项目用<b>四种手段</b>覆盖不同层面，下面是完整对照。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th style="width:150px">手段</th><th style="width:250px">真实落点</th><th>防的是什么</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>唯一索引</b></td><td><code>t_note_like</code> / <code>t_note_collect</code> 的 <code>uk_note_user</code>、<code>t_payment</code> 的 <code>uk_order_id</code>、<code>t_drop_record</code> 的 <code>uk_activity_user</code>、<code>t_audit_record</code> 的 <code>uk_biz</code></td><td>防「<b>新增</b>重复」：并发下物理拒绝多出一条记录</td></tr>
+        <tr><td><b>状态机条件更新</b></td><td><code>OrderMapper.updateStatus</code> / <code>PaymentMapper.updateToPaid</code> / <code>NoteMapper.updateStatus</code> 的 <code>WHERE status = 旧值</code></td><td>防「<b>流转</b>重复」：同一个状态不允许被改两次</td></tr>
+        <tr><td><b>一次性 token</b></td><td>下单幂等：签发侧 <code>OrderServiceImpl.createIdempotentToken:142-147</code>、消费侧 <code>:60-67</code>、原子 DEL <code>RedisOps.consumeToken:323-325</code></td><td>防「<b>进入流程</b>重复」：不碰 DB 的第一道闸</td></tr>
+        <tr><td><b>消费端回查</b></td><td><code>AuditConsumer</code> 消息只带 noteId 回查、<code>OrderCancelConsumer</code> 消息只带 orderId 回查、抢购消息不带金额</td><td>防「<b>过期状态</b>」：消息在队列里躺着时，世界已经变了</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">手段一：唯一索引——直接 INSERT，不先查 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>NoteServiceImpl.like:157-174</code> · <code>V2__content_and_rag.sql:70-79</code> · <code>PaymentService.create:106-115</code></p>
+
+    <p><strong>一句话：</strong>狂点红心（前端防抖失灵）时两个请求同时到达。如果代码先 <code>SELECT</code> 再 <code>INSERT</code>，两个线程都会查到「没点过」然后各插一条——把并发正确性交给<b>数据库的唯一约束（物理层面拒绝）</b>，成本最低也最可靠。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      「先查后插」像<b>两个人同时走进一间空会议室，都探头看了一眼说「没人，我进去」</b>——他们看的那一眼是同一瞬间，所以两个人都进去了。<br>
+      唯一索引像<b>门口那把只有一把钥匙的锁</b>：两个人同时伸手，物理上只有一个能拧开。把并发正确性交给物理约束，比在应用代码里判断可靠得多。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：约束住源头，代码只管捕获撞键</summary>
+      <div class="lvl-body">
+        <p><b>① 直接 INSERT + 捕获撞键（点赞：静默幂等）</b>——唯一索引声明与其对应写法：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">db/migration/V2__content_and_rag.sql</span><span class="loc">:70-79（t_note_like）</span></div>
+          <pre><code>-- ★ 联合唯一索引 = 天然幂等：重复点赞会撞唯一键，无需先查再插
+CREATE TABLE IF NOT EXISTS t_note_like (
+    id         BIGINT   NOT NULL AUTO_INCREMENT COMMENT '主键',
+    note_id    BIGINT   NOT NULL COMMENT '笔记 id',
+    user_id    BIGINT   NOT NULL COMMENT '点赞用户 id',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_note_user (note_id, user_id),
+    KEY idx_user (user_id)
+) ENGINE = InnoDB COMMENT ='笔记点赞表(联合唯一索引保证幂等)';</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/NoteServiceImpl.java</span><span class="loc">:155-174（like）</span></div>
+          <pre><code>@Override
+@Transactional(rollbackFor = Exception.class)
+public void like(Long noteId, boolean liked) {
+    Long userId = StpUtil.getLoginIdAsLong();
+    ensurePublished(noteId);
+    if (liked) {
+        try {
+            likeMapper.insert(noteId, userId);
+            incrCount(NoteCounterStore.LIKE, noteId, 1);
+        } catch (DuplicateKeyException e) {
+            // 已点过赞：幂等静默（不报错，前端体验为"红心已是亮的"）
+            log.debug("重复点赞已忽略 noteId={} userId={}", noteId, userId);
+        }
+    } else {
+        int rows = likeMapper.delete(noteId, userId);
+        if (rows &gt; 0) {
+            incrCount(NoteCounterStore.LIKE, noteId, -1);
+        }
+    }
+}</code></pre>
+        </div>
+        <p><b>② 冲突回查复用（支付单）：</b>并发双击下单支付时，两个请求同时走到「无行 → 插入」，第二个撞 <code>uk_order_id</code> 抛 <code>DuplicateKeyException</code> → 捕获后<b>回查复用</b>同一行（PaymentService.java:106-115）：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">pay/service/PaymentService.java</span><span class="loc">:106-115</span></div>
+          <pre><code>if (exist == null) {
+    // 首次：插入（并发第二个插入撞 uk_order_id → 回查复用）
+    Payment p = buildPayment(order, channel);
+    try {
+        paymentMapper.insert(p);
+    } catch (org.springframework.dao.DuplicateKeyException e) {
+        return toVO(paymentMapper.selectByOrderId(orderId), router.resolve(channel));
+    }
+    return toVO(p, router.resolve(channel));
+}</code></pre>
+        </div>
+        <p><b>③ INSERT IGNORE（审核流水去重）：</b><code>t_audit_record</code> 的 <code>uk_biz(biz_type, biz_id, biz_version)</code> + <code>INSERT IGNORE</code>，第二次插返回 0 行 → 直接跳过（AuditServiceImpl.java:121-130）。</p>
+        <div class="callout ok">
+          <span class="ct">金句：同一招（撞唯一键），四种处置方式按业务语义选</span>
+          <b>点赞/收藏</b>（<b>状态确认</b>型）→ <b>静默幂等</b>：重复 = 目标状态已达成，报错反而让前端红心变脏。<br>
+          <b>限量发售限购</b>（<b>资格获取</b>型）→ <b>报业务错</b>「请勿重复抢购」：用户是真的想要第二件，静默成功会让他以为抢到了第二件。<br>
+          <b>支付单</b>（<b>资源绑定</b>型）→ <b>冲突回查复用</b>：重复请求要的就是「那个已存在的支付单」，回查复用让两次请求返回同一个结果。<br>
+          <b>审核流水</b>（<b>流水去重</b>型）→ <b>INSERT IGNORE 跳过</b>：只关心「这个版本审过没」。<br>
+          <b>能讲出这套对比，说明你理解的是语义而不是背诵方案。</b>
+        </div>
+        <p><b>为什么「先查再插」不行（最容易被追问的一点）：</b>查与插之间有窗口，两个线程的 SELECT 都在对方 INSERT 之前完成，都以为「没点过」→ 插两条。这是经典的 <b>TOCTOU</b>（Time-Of-Check-To-Time-Of-Use）竞态——<b>看起来更严谨的写法反而是错的</b>。</p>
+        <p><b>深挖一层（撞键后事务其实已标回滚）：</b>撞键发生在事务内，Spring 会把 <code>DuplicateKeyException</code>（<code>DataIntegrityViolationException</code> 的子类）视为运行时异常 → <b>标记事务回滚</b>。所以 <code>NoteServiceImpl.like</code> 里 catch 住它之后，这次请求<b>整体回滚（含 incrCount）</b>，只是不返回错误给用户。结果正好是「红心已经是亮的、计数没有被重复 +1」——<b>正是幂等想要的结果</b>（第一次点赞早已成功提交）。这条因果关系能讲清，是很硬的加分项。</p>
+        <p><b>唯一索引 vs 状态机 CAS 的分工（必答）：</b><b>唯一索引防「新增重复」</b>（防止多出一条记录）；<b>状态机 CAS 防「流转重复」</b>（防止同一个状态被改两次）。一个管「有没有」，一个管「变没变」。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "点赞的幂等<b>不靠代码判断，靠数据库唯一索引</b>：<code>t_note_like</code> 上有 <code>uk_note_user(note_id, user_id)</code>，代码直接 <code>INSERT</code> 不先查，撞键抛 <code>DuplicateKeyException</code> 就当「已点过」静默成功。<b>为什么不能先查后插？那是 TOCTOU 竞态</b>——两个线程的 SELECT 都在对方 INSERT 之前完成，都以为没点过，结果插两条。<br>
+          <b>同一招在不同业务里处置不一样</b>：点赞是「状态确认」型，重复就等于目标达成，所以静默；限量发售限购是「资格获取」型，必须报「请勿重复抢购」，否则用户会以为抢到了第二件；支付单是「资源绑定」型，撞 <code>uk_order_id</code> 后回查复用，让两次请求返回同一张单。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别说「先查一下更安全」</b>——那正是错的写法。<br>
+          <b>② 被问「catch 住 DuplicateKey 事务还会回滚吗」</b>要答<b>会</b>（Spring 已标 rollbackOnly），而且结果正好是「不重复 +1」——这是加分项，不是 bug。<br>
+          <b>③ 别说「我们有一张专门的幂等表/消费日志表」</b>——项目<b>没有</b> <code>t_mq_consume_log</code> 这类表，幂等全部落在<b>业务表自身的唯一索引 + 状态机</b>上。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">手段二：状态机条件更新（CAS） <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>OrderCancelConsumer.cancelIfStillPending:67-97</code> · <code>PaymentService.handleCallback:194-213</code> · <code>OrderMapper.updateStatus</code></p>
+
+    <p><strong>一句话：</strong>所有状态流转都写成 <code>UPDATE ... WHERE status = 旧值</code>，返回影响行数：<code>rows == 0</code> = 这个状态<b>已经被别人改过了</b>（我输了竞争，什么都不做）；<code>rows == 1</code> = 我赢了，可以放心做后续动作（回补库存、关支付单）。<b>把判断塞进 SQL 的 WHERE，让数据库的行锁保证「判断与更新原子完成」。</b></p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      状态机 CAS 像<b>换乘闸机</b>：只有「手持进站票」的人才能刷开换乘通道；已经换乘过的人手里票已经变了，再刷只会被拒。它不是靠保安肉眼判断你有没有换乘过，而是<b>闸机本身只认那一种票</b>——<b>判断和放行是同一个机械动作</b>。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：三方竞争同一订单</summary>
+      <div class="lvl-body">
+        <p><b>核心 SQL 长这样：</b><code>rows == 0</code> 不是异常，是「竞争失败的正常分支」。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">OrderMapper.updateStatus（状态机 CAS 的通用形态）</span><span class="loc">闸门 = WHERE status = 旧值</span></div>
+          <pre><code>UPDATE t_order SET status = #{newStatus}, update_time = #{now}
+ WHERE id = #{id} AND status = #{expectStatus}     -- ★ 只有旧状态才能流到新状态</code></pre>
+        </div>
+        <p><b>本项目真实场景：三方竞争同一订单。</b></p>
+        <div class="flow vertical">
+          <div class="flow-node"><span class="n">线程 A · 用户手动取消</span><span class="d">PENDING_PAY → CANCELLED，<code>rows==0</code> 抛「仅待支付订单可取消」</span></div>
+          <div class="flow-node"><span class="n">线程 B · 超时延迟消息到达</span><span class="d">同样是 PENDING_PAY → CANCELLED，<code>rows==0</code> 静默 log + return false</span></div>
+          <div class="flow-node"><span class="n">线程 C · 支付回调同时到达</span><span class="d"><b>反方向</b>：PENDING_PAY → PAID，<code>orderRows==0</code> → log.error + 退款/人工兜底</span></div>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/mq/OrderCancelConsumer.java</span><span class="loc">:67-97（cancelIfStillPending）</span></div>
+          <pre><code>public boolean cancelIfStillPending(Long orderId) {
+    Order order = orderMapper.selectById(orderId);
+    if (order == null) {
+        log.warn("订单不存在，跳过超时取消 orderId={}", orderId);
+        return false;
+    }
+    if (!Order.STATUS_PENDING_PAY.equals(order.getStatus())) {
+        // 已支付/已取消：什么都不做（这是最常见的正常分支）
+        log.info("订单已非待支付，跳过超时取消 orderId={} status={}",
+                orderId, order.getStatus());
+        return false;
+    }
+
+    // 状态机 CAS：并发下只有一个线程能改成功
+    int rows = orderMapper.updateStatus(orderId,
+            Order.STATUS_PENDING_PAY, Order.STATUS_CANCELLED, LocalDateTime.now());
+    if (rows == 0) {
+        log.info("订单状态已被其他线程变更，取消跳过 orderId={}", orderId);
+        return false;
+    }
+
+    // 回补库存（下单时扣了多少就加回多少）
+    orderItemMapper.selectByOrderId(orderId)
+            .forEach(oi -&gt; skuMapper.addStock(oi.getSkuId(), oi.getQuantity()));
+
+    // 关闭支付单（避免用户之后还能对着已取消的订单付款）
+    paymentService.closeIfPaying(orderId);
+
+    log.info("订单超时未支付已自动取消并回补库存 orderId={}", orderId);
+    return true;
+}</code></pre>
+        </div>
+        <p><b>顺序至关重要：CAS 成功之后才回补库存。</b>顺序反了（先回补再 CAS）→ 输家也会回补 → <b>状态没变但库存加了 = 虚增</b>，这是真实资损。代码注释原话：「<b>只有取消成功者才回补库存——顺序错了 = 状态没变库存却加了（虚增）</b>」。</p>
+        <p><b>支付侧自己也有状态机（幂等第二道防线）：</b><code>updateToPaid(..., STATUS_PAYING, ...)</code> 返回 0 时仍返回 success——因为「别人已处理」对第三方来说<b>就是成功</b>；返回失败会让它继续重发（PaymentService.java:194-203）。</p>
+        <p><b>审核侧同一招（防线二）：</b><code>noteMapper.updateStatus(noteId, AUDITING, newStatus, reason)</code>，返回 0 行说明笔记已被别人改过，忽略（AuditServiceImpl.java:134-136）。</p>
+        <p><b>为什么状态机 CAS 天然幂等（深层理由）：</b>状态机是<b>单向的、有终态的</b>。<code>PENDING_PAY → CANCELLED</code> 一旦发生，再执行一次「把 PENDING_PAY 改成 CANCELLED」就<b>找不到 PENDING_PAY 的行</b>了 → 自然幂等。<b>「幂等」不是额外加的功能，而是「用旧状态做闸门」的副产品。</b></p>
+        <div class="callout warn">
+          <span class="ct">诚实边界（两条）</span>
+          <b>① 没有状态机引擎。</b>项目<b>没有</b> Spring StateMachine、没有 DSL，就是把 <code>WHERE status = 旧值</code> 硬编码在 Mapper XML 里。讲的时候说「<b>用条件更新实现状态机语义</b>」最准确。<br>
+          <b>② CAS 的局限：</b>它只保证「同一条记录的同一次流转」不重复，<b>不能</b>保证跨表/跨服务的原子性。<code>PaymentService.handleCallback</code> 里支付单已改 PAID 但订单流转失败（<code>orderRows==0</code>）就是这种跨表不一致——只能靠 <code>log.error</code> + 退款/人工兜底。要做强一致就得引入 TCC/Saga，本项目按业务量判断不划算。
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "所有订单/支付状态流转我都写成条件更新：<code>UPDATE ... WHERE status = 旧值</code>，靠返回的影响行数判断。行数是 1 = 我赢了，可以放心做后续动作；行数是 0 = <b>状态已经被别人改过了，我输了竞争，直接跳过</b>——<b>0 行是正常分支，不是异常</b>。<br>
+          典型场景是<b>三方竞争同一订单</b>：用户手动取消、超时延迟消息、支付回调可能同时到达。<b>A 和 B 都做 PENDING_PAY → CANCELLED，闸门只有一个，只放一个过</b>——这就避免了库存被回补两次（虚增，真实资损）。而且顺序很关键：<b>必须 CAS 成功之后才回补库存</b>，反了的话输家也会回补。<br>
+          为什么不能先 SELECT 再 UPDATE if？因为查和改之间有窗口，两个线程都读到 PENDING_PAY，都会去取消。<b>把判断塞进 WHERE，让数据库的行锁保证判断和更新原子完成。</b><br>
+          和扣库存的<code>WHERE stock &gt;= ?</code>是同一套思想——<b>谓词即闸门</b>。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别把 <code>rows==0</code> 说成「出错了」</b>——它是竞争失败的正常分支，代码里三处处置不同（抛业务错 / 静默 / 返回 success）但都不该当 bug。<br>
+          <b>② 别说「我们有一套状态机引擎」</b>——是条件更新，不是框架。<br>
+          <b>③ 扣库存的措辞要守住红线：</b>说「<b>行锁 + <code>WHERE stock&gt;=?</code> 条件更新（CAS 思想）</b>」，<b>绝不说「乐观锁」</b>——<code>t_product_sku.version</code> 是纯预留字段、从未参与比对。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">手段三：一次性 token（下单防双击） <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：<code>OrderServiceImpl.java:41-42 / :142-147 / :60-67</code> · <code>RedisOps.consumeToken:313-325</code></p>
+
+    <p><strong>一句话：</strong>支付、取消、库存回补都幂等了，唯独<b>建单</b>之前没有防线——用户双击「提交订单」就是两张单。方案是结算页加载时后端签发一次性 token（Redis 记 10 分钟），提交时带回，服务端 <code>DEL</code> 原子消费：删到了=首次放行，删不到=已用过拒绝。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      token 像<b>游乐场入口发的「一次性手环」</b>：进门前领一个，进门时工作人员把你手环剪掉；<b>剪掉的动作本身就是「核销」</b>——想再进一次，手上已经没手环了，剪不到东西自然进不去。<br>
+      不用「记住每个人的脸」来判断，而是用「<b>手上还有没有这个一次性凭证</b>」——核销与判断是同一个动作，没有窗口。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：签发 + DEL 原子消费 + 三态语义</summary>
+      <div class="lvl-body">
+        <p><b>签发侧：</b>UUID 写 Redis，key 按用户隔离（防串用别人的 token），TTL 10 分钟。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:41-42 / :137-147</span></div>
+          <pre><code>/** 下单幂等 token 的 key 前缀（按用户隔离，防串用别人的 token） */
+private static final String TOKEN_KEY_PREFIX = "aimall:order:token:";
+
+/**
+ * 签发幂等 token：uuid 写 Redis（TTL 10 分钟），提交订单时一次性消费。
+ * Redis 不可用时签发的 token 落不了 Redis，提交时 fail-open——防重失效但下单不堵。
+ */
+@Override
+public String createIdempotentToken() {
+    Long userId = StpUtil.getLoginIdAsLong();
+    String token = java.util.UUID.randomUUID().toString().replace("-", "");
+    redisOps.set(TOKEN_KEY_PREFIX + userId + ":" + token, "1", 600);   // TTL 600s = 10 分钟
+    return token;
+}</code></pre>
+        </div>
+        <p><b>消费侧：</b>下单第一步就是 token 校验，<b>注意判断写的是 <code>Boolean.FALSE.equals(consumed)</code></b>——只有明确「已用过」才拒绝。</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/service/impl/OrderServiceImpl.java</span><span class="loc">:56-67（create 的第 0 步）</span></div>
+          <pre><code>@Override
+@Transactional(rollbackFor = Exception.class)
+public OrderVO create(CreateOrderRequest req) {
+    Long userId = StpUtil.getLoginIdAsLong();
+    // 0. 幂等 token 校验（防双击重复下单）：DEL 原子消费，一次有效。
+    //    token 为空 = 调用方未接入（兼容）；Redis 不可用 = fail-open 放行。
+    if (org.springframework.util.StringUtils.hasText(req.getIdempotentToken())) {
+        Boolean consumed = redisOps.consumeToken(TOKEN_KEY_PREFIX + userId + ":" + req.getIdempotentToken());
+        if (Boolean.FALSE.equals(consumed)) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "请勿重复提交订单");
+        }
+    }</code></pre>
+        </div>
+        <p><b>为什么 <code>DEL</code> 本身就是原子的：</b>Redis 单线程执行命令，<code>DEL</code> 一条命令完成「检查存在 + 删除」，<b>没有「先 GET 判断存在再 DEL」的两步窗口</b>。<code>SET NX</code> 是「不存在才写」的原子版本，<code>DEL</code> 返回 1/0 就是「<b>存在才删</b>」的原子版本。</p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th style="width:90px">返回</th><th>含义</th><th>处理</th></tr></thead>
+            <tbody>
+              <tr><td><code>true</code></td><td>首次消费（<code>DEL</code> 真的删掉了 1 个 key）</td><td>放行</td></tr>
+              <tr><td><code>false</code></td><td>token 已用过/不存在（<code>DEL</code> 返回 0）</td><td>抛「请勿重复提交订单」</td></tr>
+              <tr><td><code>null</code></td><td><b>Redis 不可用</b></td><td><b>fail-open 放行</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b>fail-open 的论证（这条是王牌，务必讲透）：</b>① <b>防重是「优化」不是「正确性」</b>——即使 token 校验失效、用户真的重复提交，后面还有订单状态机 CAS + 唯一索引兜底，多出来那一单不会造成资损级错误；② <b>反过来（fail-close，Redis 挂了就拒绝下单）是灾难</b>——Redis 是旁路组件，它挂了却让所有人都下不了单，就是把缓存组件变成了单点故障；③ 一句话背下来：<b>「防重是优化不是正确性，别让缓存故障挡住正常下单。」</b></p>
+        <p><b>与唯一索引的分工：</b><b>token 挡在「进入下单流程之前」</b>（根本没开始建单，成本最低，连 DB 都不碰）；<b>唯一索引挡在「插入的那一刻」</b>（最后一道物理防线）。token 是第一道闸，唯一索引是最后一道闸——两者不冲突，是纵深防御。</p>
+        <p><b>诚实边界：</b>代码里 <code>hasText(...)</code> 判断意味着 <b>token 为空就跳过校验</b>（兼容老前端、Postman 调试）。这是兼容性取舍：安全上弱一点，但避免了「必须同步升级前后端」的部署僵局。<b>诚实说出来比假装没有这个缺口好。</b></p>
+        <p><b>与分布式锁的区别（可能被问）：</b>分布式锁是「同一时刻只让一个执行」（互斥），token 是「同一个请求只执行一次」（幂等）。两个客户端拿不同 token 同时下单是<b>允许</b>的（那是两笔真实订单）；锁会把第二笔挡住——<b>锁在这里是错的工具</b>。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "下单防双击我用<b>一次性 token</b>：结算页加载时后端签发一个 UUID 写进 Redis（TTL 10 分钟，key 带 userId 防串用），提交订单时带回来，服务端用 <code>DEL</code> 原子消费——<b>删到了就是首次放行，删不到就是已用过拒绝</b>。<br>
+          <b>为什么 <code>DEL</code> 能防重：</b>Redis 单线程，<code>DEL</code> 一条命令就完成「检查存在 + 删除」，返回 1 或 0，没有「先 GET 判断再 DEL」的两步窗口。<br>
+          <b>返回值是三态：<code>true</code> 放行、<code>false</code> 拒绝、<code>null</code> 放行。</b><code>null</code> 是 Redis 不可用，走 <b>fail-open</b>——<b>因为防重是优化不是正确性</b>：即使 token 失效，后面还有状态机 CAS + 唯一索引兜底；反过来 Redis 一挂就拒绝所有下单，就是把缓存组件变成了单点故障。<b>一句话：防重是优化不是正确性，别让缓存故障挡住正常下单。</b><br>
+          <b>token 和唯一索引是纵深防御：</b>token 是第一道闸、连 DB 都不碰，唯一索引是最后一道物理闸。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 判断必须写 <code>Boolean.FALSE.equals(consumed)</code>，不能写 <code>!consumed</code></b>——后者会把 <code>null</code>（Redis 挂了）也当成「已用过」，导致故障期间全员无法下单。<br>
+          <b>② 别说「FAIL-close 更安全」</b>——那是把旁路组件做成单点。<br>
+          <b>③ 别说「用分布式锁防重复下单」</b>——锁挡的是并发，会误杀「用户真的想下两单」的场景；token 挡的才是「同一个请求的重复」。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">手段四：消费端回查——消息只带 id <span class="badge badge-familiar">熟悉</span></h3>
+    <p class="card-sub">对应代码：<code>AuditConsumer.java:36-54</code> · <code>OrderDelayMessageSender.sendNow:58-68</code> · <code>DropOrderExecutor.createDropOrder:109-114</code></p>
+
+    <p><strong>一句话：</strong>消息里<b>只放 id，不放状态</b>，消费时回查 DB 最新态再决策。「<b>消息在队列里躺着的时候，世界已经变了。</b>」——一条审核消息从入队到消费可能隔几秒，一条订单超时消息<b>要在队列里躺 30 分钟</b>。这期间笔记可能已被编辑、订单可能已被支付或手动取消、商品可能已改价。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      这像<b>快递面单上只写单号、不写「客户现在在家」</b>：如果面单上写着「客户在家」就派件，等快递员到门口时客户早出门了。正确做法是拿单号去查当前状态——<b>消息传递的是「发生了什么」（一个事实），而不是「现在是什么」（一个状态）</b>。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：回查 + 用最新态做条件更新</summary>
+      <div class="lvl-body">
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/mq/AuditConsumer.java</span><span class="loc">:35-54（消息只带 noteId，消费时回查）</span></div>
+          <pre><code>@RabbitListener(queues = AuditMqConfig.AUDIT_QUEUE)
+public void onAuditMessage(AuditMessage msg,
+                           @Header(name = AmqpHeaders.RECEIVED_ROUTING_KEY, required = false) String routingKey) {
+    log.info("收到审核消息 noteId={} version={}", msg.noteId(), msg.bizVersion());
+    try {
+        // 消息只带 id：消费时回查最新内容（消息在队列里期间笔记可能已被编辑）
+        Note note = noteMapper.selectById(msg.noteId());
+        if (note == null) {
+            log.warn("笔记不存在，丢弃消息 noteId={}", msg.noteId());
+            return;   // 正常 ACK：不存在的笔记重试一万次也不存在
+        }
+        // 幂等防线在 auditOnce 内部（版本唯一键 + 状态机条件更新）
+        auditService.auditOnce(note);
+    } catch (Exception e) {
+        log.error("审核消费失败（已记流水，消息 ACK 不重试）noteId={}: {}",
+                msg.noteId(), e.getMessage(), e);
+    }
+}</code></pre>
+        </div>
+        <p><b>消息只带 id 的四个好处：</b>① <b>天然避免过期状态</b>——永远读最新值，不会拿半小时前的快照做决策；② <b>消息体小</b>——<code>convertAndSend(queue, orderId)</code> 连消息类都不用定义；③ <b>敏感数据不进 Broker</b>——笔记正文、用户地址、金额都不落到 MQ；④ <b>幂等责任归属清晰</b>——消息只是「一个提醒」，真正的幂等由消费端的唯一索引 + 状态机 CAS 保证。</p>
+        <p><b>削峰链路同理：</b><code>DropOrderExecutor.createDropOrder</code> 的金额<b>回查 DB 的 <code>act.getDropPrice()</code>，不信任消息体</b>（DropOrderExecutor.java:109-114）——消息里只带 <code>activityId / userId / quantity</code>。</p>
+        <p><b>回查 + CAS 的闭环（四种手段之间的关系）：</b><b>回查解决「读到最新态」，CAS 解决「改不重复」，二者缺一不可。</b>只回查不 CAS——两个消费者同时回查到 <code>PENDING_PAY</code>，都会去取消，库存回补两次（虚增）；只 CAS 不回查——消息里带的状态是旧的，可能拿旧值去当闸门。<b>所以最终幂等靠「回查最新态 → 用最新态做条件更新」这一对动作共同保证。</b></p>
+        <p><b>代价（诚实说）：</b>① 多一次 DB 查询——但比「审错版本 / 重复取消」便宜得多；② 实体可能已不存在——所以必须有 <code>note == null → log.warn + 正常 ACK 丢弃</code>（重试一万次也不存在，别浪费消费能力）；③ 消费逻辑依赖 DB 可用。</p>
+        <p><b>细节加分：</b><code>AuditMessage(note.getId(), 1)</code> 里的 <code>version=1</code> 是<b>审核业务版本</b>（不是并发版本号），进 <code>uk_biz(biz_type, biz_id, biz_version)</code> 用于<b>流水去重</b>——它是「防止同一版本被审两次」的钥匙，不是消息内容的一部分。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我的 MQ 消息<b>只带 id，不带内容</b>——因为<b>消息在队列里躺着的时候，世界已经变了</b>。审核消息可能等几秒，超时取消消息要在队列里躺 30 分钟，这期间笔记可能被编辑、订单可能已被支付或手动取消。所以消费端统一<b>用 id 回查 DB 最新态再决策</b>。<br>
+          四个好处：永远读最新值、消息体小、敏感数据不进 Broker、幂等责任归属清晰（消息只是提醒，幂等由消费端唯一索引 + 状态机负责）。<br>
+          <b>回查和 CAS 必须配对：</b>回查解决「读到最新态」，CAS 解决「改不重复」。只回查不 CAS，两个消费者都读到待支付就会回补两次库存；只 CAS 不回查，可能会拿消息里的旧状态当闸门。"
+        </div>
+        <div class="redline">
+          <b>本页最硬的口径红线 · 命名纪律</b><br>
+          <b>正确说法：「幂等设计（四种手段：唯一索引 / 状态机条件更新 / 一次性 token / 消费端回查）」。</b><br>
+          <b>绝对禁止说「幂等四式」</b>——那是学习者目录内部的速记叫法，属于<b>自造名词</b>，一说出口面试官就会追问「哪四式、谁定义的」，立刻露怯。<br>
+          完整口径红线见 <a href="08-面试速查与自查.html">08 页</a>。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.8 ================= -->
+  <h2><span class="h2n">5.8</span>MQ 可靠性闭环：不丢不重 <span class="badge badge-star">高频</span></h2>
+
+  <div class="card">
+    <h3 class="card-title">「重复靠幂等、丢失靠补偿」 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>MqProducerConfig:36-58</code> · <code>OrderDelayMqConfig</code> · <code>AuditMqConfig:60-66</code> · <code>OrderCancelConsumer</code> · <code>AuditConsumer</code> · <code>CompensationTask</code></p>
+
+    <p><strong>一句话：</strong>消息「不丢」不是某一个开关能保证的，而是<b>发送端 + Broker + 消费端三段的合力</b>；消息「不重」也不靠 MQ，靠<b>消费端幂等</b>。项目是三段式：<b>生产者 confirm/returns 回调 → 交换机队列持久化 → 消费端决定 ACK → 失败进死信 → 定时补偿兜底</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      这像<b>寄一份重要文件</b>：<b>confirm</b> 是快递员签收时给你的回执（证明「到了中转站」）；<b>returns</b> 是「地址写错了、退回给你」（证明「到了中转站但分不到网点」）；<b>持久化</b>是把文件放进保险柜而不是堆在门口；<b>ACK</b> 是收件人签收后你才销单；<b>死信</b>是「投递失败件」专门格口；<b>补偿任务</b>是每隔一段时间盘点一次「有没有该发没发的」。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：三段式闭环 + 回调落地（含一个真实事故）</summary>
+      <div class="lvl-body">
+        <p><b>可靠性闭环全景：</b></p>
+        <div class="flow vertical">
+          <div class="flow-node"><span class="n">① 发送端 · publisher-confirm</span><span class="d">消息<b>有没有到 Broker</b>？<code>ack=false</code>（nack）= Broker 没收到（内部错误/队列满）→ 记 ERROR</span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">② 发送端 · mandatory + returns</span><span class="d">消息<b>有没有路由到队列</b>？到了 Broker 但找不到队列（routing key 写错/队列没声明）→ 退回给生产者 → 记 ERROR</span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">③ Broker · 持久化</span><span class="d">交换机 <code>new DirectExchange(name, true, false)</code>、队列 <code>QueueBuilder.durable(...)</code>，Broker 重启消息不丢</span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">④ 消费端 · 决定 ACK</span><span class="d">AUTO 模式 + <code>default-requeue-rejected=false</code>：审核链路<b>吞异常 ACK</b>（AI 挂了重试无用），订单取消链路<b>异常冒出 → 回滚 → reject</b></span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">⑤ 失败 · 死信队列</span><span class="d">reject 且 <code>requeue=false</code> → 按队列的 <code>x-dead-letter-*</code> 进 DLQ。<b>「失败可被发现」优于「失败被无限重试」</b></span></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node"><span class="n">⑥ 兜底 · 定时补偿</span><span class="d"><code>CompensationTask</code> 周期性扫描「没走完」的链路，详见 <b>5.11</b></span></div>
+        </div>
+        <p><b>回调落地：这是本项目一个「配置写了没生效」的真实事故。</b><code>application.yml</code> 早就开了 <code>publisher-confirm-type: correlated</code> 和 <code>publisher-returns: true</code>，但<b>从不注册回调</b>——Broker 的确认/退回事件到达后被静默丢弃，<b>等于两个开关都是摆设</b>。修复是后补的 <code>MqProducerConfig</code>：</p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">config/MqProducerConfig.java</span><span class="loc">:36-58（两个回调落地）</span></div>
+          <pre><code>@Bean
+public RabbitTemplateCustomizer reliableRabbitTemplate() {
+    return template -&gt; {
+        // mandatory：路由不到队列时退回（配合 publisher-returns: true），而非静默丢
+        template.setMandatory(true);
+
+        // Broker 确认：ack=false 即消息未到达 Broker
+        template.setConfirmCallback((correlationData, ack, cause) -&gt; {
+            if (!ack) {
+                log.error("MQ 消息未到达 Broker（nack）cause={} correlationData={}",
+                        cause, correlationData);
+            }
+        });
+
+        // 路由失败退回：到得了 Broker 但找不到队列
+        template.setReturnsCallback(returned -&gt;
+                log.error("MQ 消息路由失败被退回 exchange={} routingKey={} replyText={} message={}",
+                        returned.getExchange(), returned.getRoutingKey(),
+                        returned.getReplyText(),
+                        returned.getMessage() != null
+                                ? new String(returned.getMessage().getBody())
+                                : null));
+    };
+}</code></pre>
+        </div>
+        <p><b>两个回调分别管什么（面试最易混）：</b>一句话记牢——<b>confirm 管「到没到 Broker」，returns 管「进没进队列」</b>。两者是两个阶段，不是二选一。特别注意：<b><code>ack=true</code> 只代表「Broker 收到了」，不代表「进了队列」</b>——队列不存在时 confirm 仍然 <code>ack=true</code>（Broker 确实收到了），要靠 returns 才能发现。<b>这个区分是面试官最爱追问的一刀。</b>另外 <code>mandatory=true</code> 是 returns 生效的前提：不设它，Broker 对路由不到的消息直接丢，<code>ReturnsCallback</code> 根本不会被调用。</p>
+        <p><b>为什么回调里只记 ERROR、不自动重发（主动说的取舍）：</b>本项目消息均为「<b>尽力而为 + 补偿任务兜底</b>」语义，自动重发要配幂等与退避，复杂度不划算。若某条链路升级为「必达」（如资金类），再在 <code>ConfirmCallback</code> 里做「nack → 重投/告警」。<b>可靠性等级按业务定，不吹「百分百不丢」。</b></p>
+        <div class="callout ok">
+          <span class="ct">必须出现在回答里的一句话</span>
+          <b>「重复靠幂等、丢失靠补偿」</b>——两个机制都要有。MQ 的语义是 at-least-once，「重复」是常态（先做业务后 ACK，进程在 ACK 前崩溃就会重投），所以消费端必须幂等（见 5.7）；而「丢失」永远堵不完（配置对了还有崩溃窗口），所以必须有补偿任务做最终收敛（见 5.11）。<b>只答「我们用了 confirm」是不完整的。</b>
+        </div>
+        <p><b>消费端两种相反策略（同项目里并存，最能体现「按语义选」）：</b></p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th style="width:130px">链路</th><th>失败时怎么做</th><th>为什么</th></tr></thead>
+            <tbody>
+              <tr><td><b>审核链路</b><br><code>AuditConsumer</code></td><td>主动 try-catch <b>吞掉全部异常 → 正常 ACK</b>（不重试）</td><td>AI 服务挂了重试一万次也不会成功，循环重试只会打爆日志。失败已记 ERROR 流水，笔记停留 AUDITING 等人工——<b>宁可晚审，不可误杀</b></td></tr>
+              <tr><td><b>订单取消链路</b><br><code>OrderCancelConsumer</code></td><td><b>刻意不 catch</b>，让异常从监听方法冒出 → 事务回滚 → reject → <b>进 DLQ</b></td><td>DB 异常可能是临时的；且<b>必须回滚</b>避免「状态已改、库存已回补但支付单没关」的半截事务</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b>死信触发三条件（背全）：</b>① 消息被拒绝（<code>basic.reject/nack</code> 且 <code>requeue=false</code>，本项目就是这条）；② 消息 TTL 过期（延迟消息靠这条）；③ 队列超过 <code>x-max-length</code>。<b>而且队列必须声明 <code>x-dead-letter-exchange</code>，没声明 = 死信被直接丢弃。</b>本项目有两个 DLQ：审核 <code>aimall.note.audit.dlq</code>、订单取消 <code>aimall.order.cancel.dlq</code>（后者是 P1 修复补上的——此前取消链路失败 = 消息消失）。</p>
+        <p><b>进死信不是终点（追问要有答案）：</b>① ERROR 流水留痕（审核写 <code>t_audit_record</code> 的 STATUS_ERROR，订单链路 <code>log.error</code> 带 traceId）；② 定时补偿任务收敛；③ 人工处理（DLQ 是 durable，可在 RabbitMQ 控制台观察/导出/重放）。<b>最忌答「进死信就完了」。</b>诚实边界：本项目 DLQ <b>没有自动消费者</b>、<b>没有堆积告警</b>，靠管理台 + 补偿，这是已知缺口。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我按<b>三段</b>来保证消息不丢：<b>发送端</b>开 publisher-confirm + mandatory + returns 并<b>真正注册回调</b>；<b>Broker</b> 交换机和队列都 durable；<b>消费端</b>由业务决定 ACK 语义、失败进死信。<b>不重则靠消费端幂等</b>（状态机 CAS / 唯一索引）。总结成一句话就是——<b>重复靠幂等、丢失靠补偿</b>。<br>
+          <b>confirm 和 returns 的区别要分清楚：confirm 管「消息到没到 Broker」，returns 管「进没进队列」。</b>尤其注意 <code>ack=true</code> 只说明 Broker 收到了，不代表进了队列——队列不存在时 confirm 一样是 ack。<br>
+          这里我还修过一个真实的坑：<b>配置里早就开了 confirm 和 returns，但从来没注册回调</b>，Broker 的事件到达后被静默丢弃，等于两个开关都是摆设——<b>「开启收集」不等于「使用结果」</b>。补上 <code>RabbitTemplateCustomizer</code> 才真正生效。<b>回调里我只记 ERROR 不自动重发</b>，因为项目是尽力而为 + 补偿兜底语义，资金类才需要升级成必达。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别说「我们用了手动 ACK」</b>——项目实际是 <b>AUTO 模式 + <code>default-requeue-rejected=false</code></b>，没有手写 <code>channel.basicAck</code>。被追问配置层就如实说，并讲清「为什么这样比 manual 更适合本项目」。<br>
+          <b>② 别说「消息百分百不丢」</b>——承认「尽力而为 + 补偿兜底」更可信，而且要说清 afterCommit 仍有崩溃窗口。<br>
+          <b>③ 别把两个回调说成「一回事」</b>——阶段不同，缺一不可。<br>
+          <b>④ 别说「进死信就结束了」</b>——后面还有 ERROR 流水 + 补偿 + 人工重放。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.9 ================= -->
+  <h2><span class="h2n">5.9</span>事务与 MQ：为什么不能在 <code>@Transactional</code> 里发消息</h2>
+
+  <div class="card">
+    <h3 class="card-title">事务回滚了，消息已经飞出去 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>OrderDelayMessageSender.java:42-55</code> · <code>OrderServiceImpl.create:127-132</code> · <code>DropOrderExecutor.createDropOrder:128</code></p>
+
+    <p><strong>一句话：</strong><b>MQ 不参与 DB 事务。</b>如果在 <code>@Transactional</code> 方法体里直接 <code>convertAndSend</code>，事务后面回滚了，消息却已经飞出去了——30 分钟后消费者查到的是一个<b>「幽灵订单」</b>（订单不存在或状态不对）。项目的解法是 <code>sendAfterCommit</code>：<b>把发送动作注册到事务提交之后</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      事务内发消息像<b>合同还没盖完章就先把「合同已生效」的公告发出去了</b>——万一最后一步盖章失败、合同作废，公告却已经满城皆知，所有人都来找你履约。<br>
+      <code>afterCommit</code> 是<b>等合同真正归档了，再发公告</b>：盖章失败就没有公告，不会产生「宣布了却没发生」的状态。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：反模式推演 + afterCommit 实现</summary>
+      <div class="lvl-body">
+        <div class="vs">
+          <div class="bad">
+            <h5>反模式：事务内直发</h5>
+            <p>1. 事务开始，插入订单</p>
+            <p>2. <code>convertAndSend(延迟队列, orderId)</code> —— 消息已出</p>
+            <p>3. 后续某步抛异常 → 事务回滚，<b>订单不存在了</b></p>
+            <p>4. 30 分钟后消费者收到消息，回查到 null 或状态不符 → <b>幽灵消息</b></p>
+            <p>本项目消费端有 null/状态防御所以后果较轻，但这仍是反模式——<b>正确的做法不是「消费端兜住」，而是「根本不发」</b>。</p>
+          </div>
+          <div class="good">
+            <h5>本项目：sendAfterCommit</h5>
+            <p>1. 事务内只<b>注册同步回调</b>，不发消息</p>
+            <p>2. 事务提交成功 → Spring 回调 <code>afterCommit()</code></p>
+            <p>3. 此时才 <code>sendNow(orderId)</code></p>
+            <p>4. 若事务回滚 → <code>afterCommit</code> 不执行 → <b>消息从未发出</b></p>
+            <p>代价：提交成功、发送前进程崩溃仍会丢消息 → 由补偿任务分钟级收敛兜底。</p>
+          </div>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">order/mq/OrderDelayMessageSender.java</span><span class="loc">:42-68（sendAfterCommit + sendNow）</span></div>
+          <pre><code>public void sendAfterCommit(Long orderId) {
+    if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+        // 没有事务直接发：极端场景（手动触发），比静默丢消息好
+        log.warn("sendAfterCommit 在无事务上下文调用，退化为立即发送 orderId={}", orderId);
+        sendNow(orderId);
+        return;
+    }
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+            sendNow(orderId);
+        }
+    });
+}
+
+/** 直接投递（MQ 不可用时静默降级：不投递，由补偿任务兜底） */
+public void sendNow(Long orderId) {
+    RabbitTemplate rabbit = rabbitTemplateProvider.getIfAvailable();
+    if (rabbit == null) {
+        return;
+    }
+    try {
+        rabbit.convertAndSend(OrderDelayMqConfig.DELAY_QUEUE, orderId);
+    } catch (AmqpException e) {
+        log.warn("延迟消息投递失败（不影响业务，补偿任务兜底）orderId={}: {}", orderId, e.getMessage());
+    }
+}</code></pre>
+        </div>
+        <p><b>为什么抽成唯一出口（P0-3 修复的产物）：</b>早期只有普通下单发这条消息，后来限量发售也建订单却<b>忘了发</b>——抢购单永不超时取消，限量库存被死单永久占用。根因是「建单必发延迟消息」这个约束散落在各处靠人记。抽成唯一出口后，<b>任何建单路径（普通下单 / 秒杀下单 / 将来的拼团）都调 <code>sendAfterCommit</code>——忘了发消息 = 忘了调这个方法，一眼可见。</b>类注释原话：「延迟消息唯一出口（Drop 下单也用它——『建单必发超时取消』不再靠人记）」。</p>
+        <p><b>对比其他方案，为什么本项目用 afterCommit 就够：</b></p>
+        <div class="tbl-wrap small">
+          <table>
+            <thead><tr><th style="width:150px">方案</th><th>机制</th><th>强度 / 代价</th></tr></thead>
+            <tbody>
+              <tr><td><b>afterCommit（本项目）</b></td><td>注册 <code>TransactionSynchronization</code>，提交后发送</td><td>轻量、零新增组件、代码可读；<b>残余窗口</b>：提交成功但发送前进程崩溃 → 消息丢（补偿任务收敛）</td></tr>
+              <tr><td>本地消息表</td><td>「要发的消息」与业务数据<b>同一事务</b>落库，定时任务扫描投递</td><td><b>强一致</b>，消息一定不丢；代价是双写 + 扫描 + 需要消息状态机（本项目未做）</td></tr>
+              <tr><td>事务消息（RocketMQ）</td><td>半消息 + 事务回查</td><td>由 MQ 原生支持；本项目用 RabbitMQ，<b>没有这个能力</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b>判断依据是业务语义：</b>订单超时取消是「<b>尽力而为 + 对账收敛</b>」——订单多挂 5 分钟完全可接受，不值得为它引入本地消息表；<b>资金类（如扣款通知）才需要必达</b>，那时才升级。诚实交代残余窗口：「我清楚 afterCommit 有崩溃窗口，所以这是最终一致而不是强一致。」</p>
+        <p><b>另一个同源坑（V2 踩过）：</b>发布笔记在 <code>@Transactional</code> 里调 <code>AuditService.submit</code> 发 MQ——消费者可能在事务提交前回查（查不到笔记 = 幽灵消息）。V2 的解法是把 <code>submit</code> 放在事务边界之后调用；V3 的订单延迟消息升级为 afterCommit 注册——同一问题的标准解法。</p>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "<b>不能在事务里直接发 MQ，因为 MQ 不参与 DB 事务。</b>事务后面回滚了，消息却已经飞出去——消费者过一会儿查到一个「幽灵订单」，或者查不到对应记录。<br>
+          标准解法有两档：<b>afterCommit 注册</b>（轻量，我用这个）和<b>本地消息表</b>（消息与业务数据同一事务落库，定时扫描投递，强一致场景用）。我用 <code>TransactionSynchronizationManager.registerSynchronization</code> 注册一个同步回调，<b>只在事务提交成功后才真正 <code>convertAndSend</code></b>；事务回滚的话回调根本不执行，消息从未发出。<br>
+          <b>为什么 afterCommit 就够：</b>订单超时取消是「尽力而为 + 对账收敛」语义——多挂 5 分钟可接受，再配上补偿任务兜底就闭环了；<b>资金类才需要升级到本地消息表或事务消息</b>。我也知道 afterCommit 不是 100% 安全：提交成功、发送前进程崩溃仍会丢消息——这就是为什么必须有补偿任务。<br>
+          另外这个发送逻辑我抽成了<b>唯一出口</b> <code>OrderDelayMessageSender</code>——因为早期抢购下单忘了发这条消息，抢购单永不超时、库存被死单占死。抽出来之后「建单必发」不再靠人记。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 不要说「事务里发消息也没事，消费端兜住就行」</b>——消费端防御是最后一道，不是设计依据。<br>
+          <b>② 别说「我们用了 RocketMQ 事务消息 / 本地消息表」</b>——项目<b>没有</b>这两个，用的就是 afterCommit，且 <code>framework</code> 是 RabbitMQ。<br>
+          <b>③ 别说「补偿任务保证消息一定不丢」</b>——它保证的是「最终收敛」，代价是分钟级延迟，不是零丢失。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.10 ================= -->
+  <h2><span class="h2n">5.10</span>降级体系全景 <span class="badge badge-star">本页思想层最高的一节</span></h2>
+
+  <div class="card">
+    <h3 class="card-title">降级路径与主路径同等重要 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>RedisOps</code> · <code>AuditServiceImpl.submit:68-83</code> · <code>DropService.submitBuy:110-167</code> · <code>RemoteAiService:47-70</code> · <code>StorageConfig:24-31</code> · <code>VoiceEngineImpl.synthesize:29-39</code></p>
+
+    <p><strong>一句话：</strong>这个项目有一条硬约束——<b>零依赖能启动</b>：<code>docker-compose</code> 不起、Redis / RabbitMQ / MinIO 全都没有，应用照样能跑起来、核心功能照样能用。<b>所以每一处外部依赖都必须有一条降级路径，而且降级路径要被真实测试过，不是写在文档里好看的。</b></p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      主路径像<b>高速公路</b>，降级路径像<b>国道</b>。<b>只修高速不修国道的城市，一遇大雾就全城瘫痪。</b>「降级路径与主路径同等重要」的意思不是「国道要跟高速一样快」，而是——<b>它必须真实存在、真的能走通、真的有人走过</b>。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：全部降级路径一览表</summary>
+      <div class="lvl-body">
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr><th style="width:150px">依赖</th><th style="width:170px">触发条件</th><th>降级行为</th><th>代价</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>Redis 挂</b></td>
+                <td>连接异常 / 超时（<code>RedisOps.safe()</code> 捕获）</td>
+                <td><b>走 DB</b>：缓存读变空 → 查库；计数 <code>hIncrBy</code> 返回 null → DB 直写；预减返回 null → 本地线程池 + DB CAS 兜底</td>
+                <td>变慢、并发能力下降；计数丢未落库增量；<b>功能不坏</b></td>
+              </tr>
+              <tr>
+                <td><b>MQ 挂</b></td>
+                <td>未启动 / 断连（<code>AmqpException</code> / <code>getIfAvailable()==null</code>）</td>
+                <td><b>走线程池</b>：审核改交本地有界线程池执行 <code>auditOnce</code>；抢购改本地异步建单；延迟取消消息不投递，由补偿任务兜底</td>
+                <td>没有削峰、没有重试与死信；<b>体验一致</b></td>
+              </tr>
+              <tr>
+                <td><b>AI 服务挂</b></td>
+                <td>Resilience4j <code>CircuitBreaker(name="aiService")</code> 连续失败达阈值</td>
+                <td><b>熔断 + 兜底回复</b>：<code>chatFallback</code> 返回「AI 助手正在休息中」，不再等满 120 秒超时</td>
+                <td>AI 问答不可用；<b>浏览/下单/支付完全不受影响（故障隔离）</b></td>
+              </tr>
+              <tr>
+                <td><b>AI 审核调用失败</b></td>
+                <td><code>auditAiClient.review</code> 抛异常</td>
+                <td>记 ERROR 流水，笔记<b>停留在 AUDITING 等人工，绝不动状态</b></td>
+                <td>笔记晚发布；<b>绝不误杀内容</b>（宁可不作为，不可乱作为）</td>
+              </tr>
+              <tr>
+                <td><b>对象存储不可用 / 未配</b></td>
+                <td><code>aimall.storage.type</code> 非 minio，或任何未知取值</td>
+                <td><b>走本地磁盘</b>：<code>LocalStorageService</code>，<code>/files/**</code> 映射到 <code>backend/uploads/</code></td>
+                <td>多实例部署时上传到 A 请求路由到 B 会 404；无冗余备份（刻意的阶段性选择）</td>
+              </tr>
+              <tr>
+                <td><b>语音 VITS 不可用</b></td>
+                <td>本机 VITS <code>127.0.0.1:9944</code> 不可用（缺 Python/模型/依赖）</td>
+                <td><b>回退 Edge-TTS</b>：<code>VoiceEngineImpl</code> catch <code>TtsUnavailableException</code> → <code>edgeTtsEngine.synthesize</code></td>
+                <td>音色不是派蒙（非主路径音色），但<b>功能不硬失败</b></td>
+              </tr>
+              <tr>
+                <td><b>限流组件自身</b></td>
+                <td>Redis 不可用（<code>allow</code> 内部 n==null）</td>
+                <td><b>fail-open 放行</b></td>
+                <td>限流失效、可能多花钱；<b>但不制造全站不可用</b></td>
+              </tr>
+              <tr>
+                <td><b>幂等 token 组件</b></td>
+                <td>Redis 不可用（<code>consumeToken</code> 返回 null）</td>
+                <td><b>fail-open 放行</b></td>
+                <td>防重失效、可能重复建单；<b>后面还有状态机 CAS + 唯一索引兜底</b></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b>降级链在代码里的形态（三处最典型）：</b></p>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:68-83（MQ 挂 → 线程池）</span></div>
+          <pre><code>@Override
+public void submit(Note note) {
+    AuditMessage msg = new AuditMessage(note.getId(), 1);
+    RabbitTemplate rabbit = rabbitTemplateProvider.getIfAvailable();
+    if (rabbit != null) {
+        try {
+            rabbit.convertAndSend(AuditMqConfig.EXCHANGE,
+                    AuditMqConfig.AUDIT_ROUTING_KEY, msg);
+            log.info("审核消息已入队 noteId={}", note.getId());
+            return;
+        } catch (AmqpException e) {
+            // MQ 不可用（未启动/断连）：不炸发布接口，降级本地线程池
+            log.warn("MQ 不可用，审核降级为本地线程池异步: {}", e.getMessage());
+        }
+    }
+    submitLocal(note.getId());
+}</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">ai/service/impl/RemoteAiService.java</span><span class="loc">:47-70（熔断 + 兜底文案）</span></div>
+          <pre><code>@Override
+@io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker(name = "aiService", fallbackMethod = "chatFallback")
+public String chat(String message, String imageBase64) {
+    ...
+}
+
+/** 降级方法（fallback）：签名必须与原方法一致 + 额外的 Throwable 参数。 */
+private String chatFallback(String message, String imageBase64, Throwable t) {
+    log.warn("AI 调用熔断/失败，走降级文案: {}", t.toString());
+    return "AI 助手正在休息中（服务暂时不可用），请稍后再试～";
+}</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">voice/service/impl/VoiceEngineImpl.java</span><span class="loc">:29-39（VITS 挂 → Edge-TTS）</span></div>
+          <pre><code>@Override
+public byte[] synthesize(String text) {
+    try {
+        return paimonBackendTtsClient.synthesize(text);
+    } catch (TtsUnavailableException e) {
+        log.warn("派蒙后端 VITS 不可用，回退本地 Edge-TTS（非派蒙音色）: {}", e.getMessage());
+        return edgeTtsEngine.synthesize(text);
+    }
+}</code></pre>
+        </div>
+        <p><b>熔断在这里的业务理由（不是「微服务标配所以加」）：</b>AI 调用本来就慢（秒级），超时后每个请求还要等满 120 秒才失败——请求线程被长时间占住，正是 V4 拆出 ai-service 想解决的「AI 拖垮业务线程池」问题。熔断后：连续失败达阈值 → <b>快速失败</b>（直接走 fallback，不再等超时）→ 每隔一段时间<b>半开</b>放一个请求试探 → 恢复则闭合。<b>这是「故障隔离」从架构图落到代码的最后一步。</b></p>
+        <div class="callout ok">
+          <span class="ct">核心论点（面试可以直接说）</span>
+          <b>「降级路径与主路径同等重要，都是被测试过的。」</b>具体到项目：<b>降级路径不是额外写的一份兜底代码，很多时候就是「旧的实现」</b>——计数桶的降级是 V2 的 DB 直写、缓存挂了的降级是直接查库（ProductService.detail 本来就有）。这种设计的好处是：<b>降级路径天然被长期使用过、被测试过，不是临时糊上去的。</b>
+          <br><br>
+          还有一条要主动说：<b>「零依赖能启动」是项目的硬约束</b>——<code>docker-compose</code> 不起也能跑。验收清单里专门有一条「<b>不启动 Redis/RabbitMQ 则对应功能降级——降级本身也是验收项</b>」，说明这些路径是真被人走通的。
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "这个项目有一个硬约束——<b>零依赖能启动</b>：Redis、RabbitMQ、MinIO 一个都不起，应用照样能跑、核心功能照样能用。所以每一处外部依赖都有降级路径：<br>
+          <b>Redis 挂</b> → 所有调用收口在 <code>RedisOps</code> 门面，异常打 WARN 返回兜底值，业务自然走 DB；<b>MQ 挂</b> → 审核和抢购都降级到本地有界线程池，体验一致但没有削峰与重试；<b>AI 服务挂</b> → Resilience4j 熔断 + 兜底文案，AI 问答不可用但浏览下单完全不受影响，这就是把 AI 拆出去的收益；<b>对象存储</b> → 回退本地磁盘，改一行配置切 MinIO；<b>语音 VITS 挂</b> → 回退 Edge-TTS。<br>
+          <b>最想强调的一句话是：「降级路径与主路径同等重要，而且都是被测试过的。」</b>很多降级路径其实就是旧的实现——计数桶降级回 DB 直写、缓存挂了直接查库——所以它们不是临时糊上去的，是长期在用、真的走得通的。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别把 fail-open 和 fail-close 说反。</b>限流和幂等 token 都是 <b>fail-open（放行）</b>，理由是「它们不是正确性本身，拒绝所有用户更糟」。<br>
+          <b>② 别把降级说成「先关掉功能」。</b>准确说法是「<b>换一条更慢/更弱的路径</b>，功能不坏」。<br>
+          <b>③ 别吹「全链路都有熔断」</b>——项目只有 AI 链路挂 Resilience4j，DB/Redis/MQ 靠连接池超时 + 降级门面，要主动说清这个边界。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.11 ================= -->
+  <h2><span class="h2n">5.11</span>补偿任务三合一：异步链路的最终一致性收敛</h2>
+
+  <div class="card">
+    <h3 class="card-title">主链路追求「快」，补偿任务保证「最终对」 <span class="badge badge-master">掌握</span></h3>
+    <p class="card-sub">对应代码：<code>common/job/CompensationTask.java</code>（三个 <code>@Scheduled</code> 方法）</p>
+
+    <p><strong>一句话：</strong>三条异步链路各有自己的「最优路径」，但最优路径每一环都可能掉链子——延迟消息可能丢、审核消息可能被 ACK 掉、第三方回调可能网络丢失。补偿任务做三件事，把这三种「没走完」定时收敛成「确定完成」：<b>订单超时兜底 / 审核堆积重送 / 支付查单对账</b>。</p>
+
+    <div class="callout analogy">
+      <span class="ct">打个比方</span>
+      补偿任务像<b>仓库每天下班前的盘点</b>：白天靠流程（出库单、扫码、系统自动扣减）正常走；但总会有几笔「单据说发了、系统里没扣」或者「系统说扣了、单据没归档」的账。<b>盘点不去追究哪一单出了问题，而是把「所有对不上的账」捞出来，重新走一遍正确的流程。</b><br>
+      所以它有个前提：<b>重新走一遍必须是无害的（幂等）</b>——否则盘点就变成了「每天定时把账再搞乱一次」。
+    </div>
+
+    <details class="lvl mech">
+      <summary>机制与代码：三个方法各补什么</summary>
+      <div class="lvl-body">
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr><th style="width:170px">方法</th><th style="width:200px">扫描条件</th><th>补偿动作</th><th>补的是哪条链路的什么故障</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>cancelTimeoutOrders()</code><br><span class="badge badge-gray">5min / 首延 60s</span></td>
+                <td><code>t_order</code>：<code>status='PENDING_PAY' AND created_at &lt; now-35min</code>，<code>LIMIT 100</code></td>
+                <td>逐笔调 <code>orderCancelConsumer.onCancelMessage(orderId)</code></td>
+                <td><b>延迟消息丢了/投递失败</b> → 单子永远「待支付」、库存被死单占死</td>
+              </tr>
+              <tr>
+                <td><code>retryStuckAudits()</code><br><span class="badge badge-gray">10min / 首延 90s</span></td>
+                <td><code>t_note</code>：<code>status='AUDITING' AND created_at &lt; now-10min</code>，<code>LIMIT 100</code></td>
+                <td>逐篇调 <code>auditService.auditOnce(note)</code></td>
+                <td><b>审核消息丢失 / 消费失败被 ACK</b> → 笔记永远「审核中」，作者看不见自己的内容</td>
+              </tr>
+              <tr>
+                <td><code>syncStuckPayments()</code><br><span class="badge badge-gray">10min / 首延 120s</span></td>
+                <td><code>t_payment</code>：<code>status='PAYING' AND created_at &lt; now-10min</code>，<code>LIMIT 100</code></td>
+                <td>逐笔调 <code>paymentService.sync(paymentNo)</code>（<b>主动向渠道查单</b>）</td>
+                <td><b>第三方回调网络丢失</b> → 用户付了钱、系统不知道 → <b>资损方向最严重</b></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="codeblock">
+          <div class="cb-head"><span class="fn">common/job/CompensationTask.java</span><span class="loc">:56-76（订单超时兜底，另两个方法结构完全同构）</span></div>
+          <pre><code>/**
+ * 订单超时兜底：扫描"本该被延迟消息取消却仍是待支付"的订单。
+ * 宽限 5 分钟（30 分钟 TTL + 5），避免与正常延迟消息重复劳动（重复也无害，幂等）。
+ */
+@Scheduled(fixedDelay = 5 * 60 * 1000, initialDelay = 60 * 1000)
+public void cancelTimeoutOrders() {
+    LocalDateTime before = LocalDateTime.now().minusMinutes(35);
+    List&lt;Order&gt; stale = orderMapper.selectTimeoutPending(before, 100);
+    if (stale.isEmpty()) {
+        return;
+    }
+    log.info("[补偿] 发现 {} 笔超时未取消订单，逐笔执行取消", stale.size());
+    for (Order o : stale) {
+        // 直接调消费端方法：它自带事务 + CAS + 全部取消副作用，与消息路径完全同语义
+        try {
+            orderCancelConsumer.onCancelMessage(o.getId());
+        } catch (Exception e) {
+            log.error("[补偿] 订单取消失败 orderId={}: {}", o.getId(), e.getMessage());
+        }
+    }
+}</code></pre>
+        </div>
+        <p>三个方法共享同一骨架——<b>定时扫描 → <code>LIMIT</code> 取一批 → 逐条 try-catch 调用「主链路本来就有的那个方法」→ 失败只记日志，下一轮再来</b>。日志统一带 <code>[补偿]</code> 前缀，便于线上 grep 验证。</p>
+        <p><b>为什么必须有它（异步系统的不等式）：</b>类注释画得很清楚——订单超时取消的延迟消息可能因 MQ 宕机/消息丢失/投递失败而到不了；内容审核的 MQ 消息可能丢失或被 ACK 掉；支付依赖第三方异步回调，回调可能网络丢失。<b>不追求每条消息必达，而是接受丢失率，用周期性对账收敛。代价是分钟级延迟，对这三个场景完全可接受（订单多挂 5 分钟、审核晚 10 分钟）。</b></p>
+        <p><b>关键设计细节（讲出来就显真读过代码）：</b></p>
+        <ol class="steps">
+          <li><b>为什么宽限 35 分钟而不是 30</b>：延迟消息 TTL 是 30 分钟。补偿扫描如果也卡 30 分钟，会和正常抵达的延迟消息抢同一批单——重复劳动（虽然幂等无害）。宽限 5 分钟是让常规路径先走完，补偿只处理「常规路径没走到的」。</li>
+          <li><b>为什么复用消费端方法而不是另写一套取消逻辑</b>：注释写得很直白——「它自带事务 + CAS + 全部取消副作用，<b>与消息路径完全同语义</b>」。如果补偿另写一份删除逻辑，两套逻辑会随时间漂移（回补库存少了一步、忘关支付单），那才是真正的灾难。<b>「补偿路径与主路径同语义」是这套设计最重要的一句话。</b></li>
+          <li><b>为什么只扫 <code>PAYING</code></b>：<code>PAID</code> / <code>CLOSED</code> 都是终态，扫它们没有可补偿的动作；只对「悬而未决」的状态做对账。</li>
+          <li><b>分批限量（<code>LIMIT 100</code>）</b>：让单轮工作量有上限，补偿任务不会「一次性把积压一年的数据全捞出来」拖垮自己（也拖垮 DB）。</li>
+        </ol>
+        <p><b>前提是幂等（这是能不能上生产的条件，不是加分项）：</b>三个补偿动作全部复用各自的状态机 CAS——订单取消 <code>WHERE status='PENDING_PAY'</code>、审核回写 <code>WHERE status='AUDITING'</code>、支付单 <code>WHERE status='PAYING'</code>。三处 <code>rows==0</code> 的语义都一样：<b>状态已被别人改过（正常现象），直接跳过</b>。所以类注释能写下这句话——<b>「扫 100 次和扫 1 次结果一致」</b>。</p>
+        <p><b>为什么补偿必须幂等（两个真实原因）：</b>① <b>多实例部署会重复执行</b>——<code>@Scheduled</code> 在<b>每个</b>应用实例里都会跑，部署 2 个实例 → 同一个超时订单被扫到 2 次；② <b>补偿与主链路会撞车</b>——延迟消息正常抵达的瞬间补偿恰好也扫到这一单，或用户手动取消与超时补偿同时发生。三方竞争能安全收敛，靠的就是 <code>WHERE status='PENDING_PAY'</code> 这一行。</p>
+        <div class="callout warn">
+          <span class="ct">诚实边界：@Scheduled 的局限与升级路径</span>
+          <b>① 单线程调度</b>：一个任务跑久了会拖延其他任务（类注释明确写「生产应配置独立调度线程池」，当前任务量小默认够用）；<b>② 单机执行</b>：多实例下同一任务会并发重复执行，当前靠动作幂等扛住（正确性没问题），但没有「只有一台执行」的保障。<br>
+          <b>升级路径：XXL-Job</b>（分片广播、失败重试、可视化管理）或 <b>ShedLock</b>（给任务抢一把数据库锁，最简单）。<b>为什么现在不上：</b>任务量小、幂等已保证正确性，多引一个中间件（XXL-Job 要部署调度中心）不符合「零依赖能启动」的硬约束。<b>「知道它的问题、知道升级路径、也知道现在为什么不上」——这个三段回答比背出 XXL-Job 的特性更值钱。</b>
+        </div>
+      </div>
+    </details>
+
+    <details class="lvl talk">
+      <summary>面试怎么讲</summary>
+      <div class="lvl-body">
+        <div class="callout talk">
+          <span class="ct">30 秒版本</span>
+          "我有一个补偿任务做三件事，把三条异步链路「没走完」的情况定时收敛：<b>订单超时兜底</b>——扫「本该被延迟消息取消却还是待支付」的单，宽限 35 分钟避免和正常的 30 分钟延迟消息撞车；<b>审核堆积重送</b>——扫「审核中超 10 分钟」的笔记重新送审；<b>支付查单对账</b>——扫「超时仍 PAYING」的支付单，主动向渠道查单，这是资损方向最严重的一条。<br>
+          三个方法共享同一个骨架：<b>定时扫描 → LIMIT 100 取一批 → 逐条调「主链路本来就有的那个方法」→ 失败只记日志、下轮再来</b>。<b>最关键的一点是：补偿复用消费端的方法，保证「补偿路径与主链路完全同语义」</b>——如果另写一套取消逻辑，两套会随时间漂移，那才是灾难。<br>
+          <b>而且补偿动作全部幂等</b>：都复用状态机 CAS，<code>rows==0</code> 就跳过，所以<b>「扫 100 次和扫 1 次结果一致」</b>——这是它能上生产的前提。多实例重复跑、和主链路撞车，都不会出错。"
+        </div>
+        <div class="callout warn">
+          <span class="ct">别说错</span>
+          <b>① 别说「补偿是为了保证消息不丢」</b>——它的定位是<b>最终一致性收敛</b>，接受丢失率、用对账覆盖，代价是分钟级延迟。<br>
+          <b>② 被问「为什么订单宽限 35 分钟不是 30」</b>要答得出来（让常规延迟消息先走完）。<br>
+          <b>③ 别把 <code>@Scheduled</code> 说成分布式调度</b>——它是单机单线程的，多实例会重复执行，靠幂等扛；要能说出 XXL-Job / ShedLock 的升级路径，以及<b>现在为什么不上的理由</b>。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= 5.12 ================= -->
+  <h2><span class="h2n">5.12</span>真实事故库（面试「遇到最难的问题」素材）</h2>
+
+  <p>这一节是本页最「不像八股」的部分。<b>面试官问「你项目踩过什么坑」时，这里的素材比任何背诵都真——因为每条都是「现象 → 定位 → 修复 → 加了什么防线」的完整叙事。</b>来源：README 的「可靠性大修缮（2026-09-09，P0/P1/P2 系统性修复）」+ V3 详解第 11 章评审复盘。</p>
+
+  <div class="qa">
+    <div class="q">事故 1 · 事务内吞异常，导致半截事务照样提交</div>
+    <div class="a">
+      <p><b>现象：</b>超时取消订单偶尔出现「状态已改、库存已回补，但支付单永远停在 PAYING」——用户取消的订单还能付款。</p>
+      <p><b>定位：</b><code>OrderCancelConsumer</code> 早期在 <code>@Transactional</code> 方法<b>内部</b> try-catch 把异常吞掉 → 异常不冒出 AOP 代理 → Spring 无从感知 → <b>半截事务照样提交</b>。最后一步 <code>closeIfPaying</code> 抛的异常被吞，回滚不生效。</p>
+      <p><b>修复：</b>让异常从监听方法<b>冒出</b>。链路变成——① 当前事务回滚（不留半截状态）→ ② 监听容器 reject（<code>default-requeue-rejected=false</code>，不重入队防毒消息循环）→ ③ 队列死信路由进 DLQ 等人工。</p>
+      <p><b>加的防线：</b>取消队列补上 DLX（此前失败 = 消息消失）；补偿任务作为最终兜底。代码注释现在就写着「异常必须冒出方法，不许在事务内吞掉」。</p>
+      <p><span class="tag">元教训</span><b>事务边界与异常传播是绑定的</b>——「catch 住不抛」在事务里等于「假装没发生」，而 Spring 只认抛出来的异常。</p>
+    </div>
+  </div>
+
+  <div class="qa">
+    <div class="q">事故 2 · 抢购参数裸 Map 接参，可传负数反向刷库存</div>
+    <div class="a">
+      <p><b>现象：</b>限量发售接口如果传 <code>quantity=-5</code>，库存不减反增、订单金额算出负数。</p>
+      <p><b>定位：</b>早期 <code>buy</code> 接口用裸 <code>Map</code> 接参，<code>quantity</code> 没有任何校验。负数会让 Lua 的 <code>DECRBY</code> 变成 <code>INCRBY</code>（库存反向增加），DB 侧 <code>stock = stock - (-5)</code> 同样加库存。</p>
+      <p><b>修复：</b>换成 DTO + Bean Validation 在最外层拦死（DropBuyRequest.java:16-23）：<code>@NotNull</code> + <code>@Min(1)</code> + <code>@Max(99)</code>。</p>
+      <div class="codeblock">
+        <div class="cb-head"><span class="fn">pay/dto/DropBuyRequest.java</span><span class="loc">:16-23</span></div>
+        <pre><code>@Data
+public class DropBuyRequest {
+    @NotNull(message = "quantity 不能为空")
+    @Min(value = 1, message = "购买数量至少为 1")
+    @Max(value = 99, message = "单次最多 99 件")
+    private Integer quantity;
+}</code></pre>
+      </div>
+      <p><b>加的防线：</b>代码注释写下原则——「<b>越是高并发的入口，参数校验越要在最外层拦死</b>（Bean Validation 一行顶十行防御）」。</p>
+      <p><span class="tag">元教训</span>高并发接口的第一道防线不是缓存也不是锁，是<b>参数校验</b>——它挡在一切业务逻辑之前，成本最低。</p>
+    </div>
+  </div>
+
+  <div class="qa">
+    <div class="q">事故 3 · 预热竞态：check-then-set 并发首访把已扣库存重置回全量</div>
+    <div class="a">
+      <p><b>现象：</b>极端情况下限量发售会超卖——Redis 里的库存「自己涨回去了」。</p>
+      <p><b>定位：</b>早期懒预热写的是 check-then-set（先 <code>GET</code> 判空，再 <code>SET</code> 覆盖）。并发首访时两个请求都会判「未预热」，后一个 <code>SET</code> 会把<b>已经扣减过的库存重置回全量</b>。</p>
+      <p><b>修复：</b>改用 <code>SET NX</code>（<code>setIfAbsent</code>）把「判断 + 写入」原子化，只有一个请求能真正灌入（DropService.java:88-102 的 <code>warmUpIfAbsent</code>）。<b>强制覆盖只保留在「活动开始」这个明确的开售事件上</b>（<code>warmUp</code>），懒预热一律 NX。</p>
+      <p><b>加的防线：</b>RedisOps 的类注释把这个案例写成了 <code>setIfAbsent</code> 的设计说明——「NX 语义把『判断+写入』原子化，天然幂等」。</p>
+      <p><span class="tag">元教训</span><b>check-then-act 在任何存储上都是竞态</b>——Redis 的手册里 Map 那些 <code>GET</code>/<code>SET</code> 看着像内存操作，但跨线程、跨进程时一样有窗口。</p>
+    </div>
+  </div>
+
+  <div class="qa">
+    <div class="q">事故 4 · 支付「查完再插」，并发双击产生两张 PAYING 单</div>
+    <div class="a">
+      <p><b>现象：</b>用户双击「去支付」，数据库里出现两张同订单的支付单——回调时不知道认哪一张。</p>
+      <p><b>定位：</b>早期 <code>PaymentService.create</code> 是「先查有没有 → 没有就插入」，<b>非原子</b>：两个并发请求都查到「无行」，都会插入。</p>
+      <p><b>修复：</b>Flyway <code>V4__payment_order_unique.sql</code> 给 <code>t_payment</code> 加 <code>uk_order_id(order_id)</code>，从 DB 层兜底；并发第二个插入撞索引抛 <code>DuplicateKeyException</code> → <b>捕获后回查复用</b>。支付模型随之变成「<b>一个订单的支付尝试只占一行</b>」：<code>PAYING → PAID/CLOSED</code> 之后再次发起支付，不再是插新行，而是<b>复用该行重开</b>（换 payment_no、重置金额/渠道/过期时间）；而 <code>PAID</code> 行永不可重开（由 <code>updateForRecreate</code> 的条件更新守卫）。</p>
+      <p><b>加的防线：</b>迁移脚本第一步先清理历史重复行（<code>DELETE p1 FROM t_payment p1 INNER JOIN t_payment p2 ON p1.order_id = p2.order_id AND p1.id &lt; p2.id</code>），否则唯一索引根本建不起来。<b>「先在应用层做正确的事，再用唯一索引把兜底焊死」</b>——这是项目一致的写法。</p>
+      <p><span class="tag">元教训</span>凡是「先查后写」的地方都要问一句：<b>查和写之间有没有窗口？</b>有窗口就下沉成唯一索引或条件更新。</p>
+    </div>
+  </div>
+
+  <div class="qa">
+    <div class="q">事故 5 · 热门榜 Top50 循环逐条查（N+1）</div>
+    <div class="a">
+      <p><b>现象：</b>榜单接口 Top50 要发 50 次 SQL——「与列表接口辛苦做的 5 条批量查询自相矛盾」。</p>
+      <p><b>定位：</b>早期实现是拿到 zset 的 id 列表后<b>循环 <code>selectById</code></b>，典型的 N+1。</p>
+      <p><b>修复：</b>zset 只出 id + score 保持顺序，明细用一次 <code>IN</code> 批量回查（<code>noteMapper.selectByIds</code>），在内存里用 Map 建索引，最后<b>按 zset 顺序组装</b>（NoteServiceImpl.java:406-456）。代码注释里明确记了这次 P2 修复。</p>
+      <p><b>加的防线：</b>计数增量也用同样的批量思路 <code>readDeltas</code>（<code>HMGET</code> 批量），榜单与列表页共用同一套「把 N 次往返压成 1 次」的策略。</p>
+      <p><span class="tag">元教训</span>N+1 慢的从来不是 SQL 本身，是<b>往返次数</b>；而且同样的错很容易在「新写的接口」里再犯一次——所以代码注释要写清「为什么这么写」。</p>
+    </div>
+  </div>
+
+  <div class="qa">
+    <div class="q">事故 6 · MQ 生产者确认「配了但没人消费」，两个开关都是摆设</div>
+    <div class="a">
+      <p><b>现象：</b>日志里从来没有过 MQ 投递失败的记录，看起来一切正常——但真出了路由错误也没人知道。消息可靠性「好像做了」。</p>
+      <p><b>定位：</b><code>application.yml</code> 早就开了 <code>publisher-confirm-type: correlated</code> 和 <code>publisher-returns: true</code>，但<b>从不注册回调</b>。Broker 的确认/退回事件到达后被静默丢弃——<b>等于两个开关都是摆设</b>。这是「<b>配置写了没生效</b>」的典型：<b>开启收集 ≠ 使用结果</b>。</p>
+      <p><b>修复：</b>新增 <code>MqProducerConfig</code>，用 <code>RabbitTemplateCustomizer</code> 在 Boot 自动配置的模板上追加 <code>setMandatory(true)</code> + <code>setConfirmCallback</code> + <code>setReturnsCallback</code>（MqProducerConfig.java:36-58）。用 Customizer 而不是自己 new 一个 <code>RabbitTemplate</code>，是为了不丢掉 Boot 的自动配置（如 JSON 消息转换器）。</p>
+      <p><b>加的防线：</b>除回调外，还补上了取消队列的死信（此前失败 = 消息消失）。回调内只记 ERROR 不自动重发——因为项目是「尽力而为 + 补偿兜底」语义，资金类才升级为必达。</p>
+      <p><span class="tag">元教训</span><b>评审的第一个动作是 grep 调用点</b>——「写了」不等于「生效了」。同类问题在本项目还出现过一次：缓存三兄弟的代码写得很漂亮，但 Controller 层压根没接线（V3 评审 P0 第 1 条）。</p>
+    </div>
+  </div>
+
+  <div class="callout brand">
+    <span class="ct">事故库怎么用（30 秒组织法）</span>
+    面试官问「遇到最难的问题」，<b>不要讲「我加了了个缓存」这种成功叙事，要讲「我发现什么不对 → 怎么定位 → 修了什么 → 加了什么防线」</b>。上面的六条都能套这个四段式。<br>
+    <b>首选讲事故 6（MQ 确认）或事故 1（事务边界）</b>——前者体现「配置与实现脱节也能发现」的工程嗅觉，后者把「事务」和「异常传播」绑在一起讲，技术密度高。<br>
+    <b>事故 2/3/4 一起讲更好</b>——它们都是「<b>并发下的竞态</b>」：参数没拦、预热有窗口、插入非原子。串起来说「我在高并发入口上系统性地排查了所有 check-then-act」，比单独讲一条更有分量。
+  </div>
+
+  <!-- ================= 5.13 ================= -->
+  <h2><span class="h2n">5.13</span>面试话术汇总</h2>
+
+  <p>本页的内容在面试里会收敛成四个问题。<b>下面四段建议逐字背下来，再按自己的语速改顺。</b>每段后面附「最容易说错的点」。</p>
+
+  <div class="card">
+    <h3 class="card-title">Q1 · 「缓存三兄弟怎么处理？」 <span class="badge badge-red">必考</span></h3>
+    <div class="callout talk">
+      <span class="ct">30 秒版本（逐字可用）</span>
+      "三个问题的成因完全不同，所以对策也不同。<br>
+      <b>穿透</b>是查一个 DB 里也不存在的 id，缓存永远不命中、请求全打到库。我用<b>空值缓存</b>：查不到也写标记，用独立 key 存哨兵值，<b>TTL 只给 2 分钟</b>——挡刷子够用，又不会出现「刚上架查不到」。<b>更彻底的方案是布隆过滤器</b>，但有假阳性、不支持删除、要预热重建，商品这个规模我选了成本更低的空值缓存。<br>
+      <b>击穿</b>是热点 key 恰好过期那一瞬间，几千个请求同时涌向 DB。我用 <b><code>SET NX</code> 互斥锁重建</b>：只让一个线程查库回写，其余 <code>sleep 50ms</code> 重读，<b>重读不到就直接查库兜底</b>——缓存是旁路，不能让它决定可用性。锁的 TTL 3 秒防死锁、value 用 UUID 防误删。<br>
+      <b>雪崩</b>是大量 key 同时过期。我的成因具体——<b>商品批量导入时给了同一个 TTL</b>——对策是 <b>TTL 加随机抖动</b>：30 分钟基础值 + 0~10 分钟随机。<br>
+      写路径是 <b>Cache-Aside：先更库再删缓存</b>，删除是幂等的，比更新缓存安全。<b>最后：所有 Redis 调用都收在一个可降级门面上，Redis 挂了只会变慢不会挂掉。</b>"
+    </div>
+    <div class="callout warn">
+      <span class="ct">最容易说错的点</span>
+      <b>① 最致命：「击穿和雪崩差不多」。</b>一个是单点、一个是一整面。这条说错，后面全崩。<br>
+      <b>② 别说「缓存 null 值」</b>——是独立 key + 哨兵值，且 <code>evict</code> 要两个 key 一起删。<br>
+      <b>③ 别把「多级缓存 / 熔断保护缓存」说成项目做了</b>——项目只有三兄弟 + 先更库再删缓存，其余是「知道方案没做」。<br>
+      <b>④ 别漏掉降级门面</b>——「Redis 挂了怎么办」是这题的王牌追问，答「变慢不挂掉」并把 fail-open 的理由讲出来。
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">Q2 · 「幂等怎么做的？」 <span class="badge badge-red">口径高危</span></h3>
+    <div class="callout talk">
+      <span class="ct">30 秒版本（逐字可用）</span>
+      "先说一个前提：<b>重复一定会发生</b>，来源有三个——用户双击、第三方回调重传（支付宝会重试 8 次以上）、MQ 的 at-least-once 重投。所以在资损场景里幂等是入场券。<br>
+      我做的是<b>幂等设计，用了四种手段</b>：<br>
+      <b>第一，唯一索引</b>——点赞靠 <code>uk_note_user</code>、支付单靠 <code>uk_order_id</code>、限购靠 <code>uk_activity_user</code>。代码直接 INSERT 不先查，撞键就走对应处置。<b>关键是同一招在不同业务里处置不一样</b>：点赞是「状态确认」型，重复就等于已达成，所以静默；限购是「资格获取」型，必须报「请勿重复抢购」；支付单是「资源绑定」型，撞键回查复用，两次请求返回同一张单。<br>
+      <b>第二，状态机条件更新</b>——所有状态流转都写 <code>WHERE status = 旧值</code>，<code>rows==0</code> 就是竞争失败、直接跳过。<b>0 行是正常分支不是异常。</b>典型场景是三方竞争同一订单：用户取消、超时消息、支付回调同时到达，闸门只有一个。<br>
+      <b>第三，一次性 token</b>——下单防双击：结算页签发 UUID 到 Redis，提交时 <code>DEL</code> 原子消费，删到就放行。<b>Redis 挂了 fail-open 放行——因为防重是优化不是正确性，别让缓存故障挡住正常下单。</b><br>
+      <b>第四，消费端回查</b>——消息只带 id，消费时回查最新态再决策，因为<b>消息在队列里躺着的时候世界已经变了</b>。回查解决「读到最新态」，CAS 解决「改不重复」，两者缺一不可。"
+    </div>
+    <div class="callout warn">
+      <span class="ct">最容易说错的点</span>
+      <b>① 命名纪律（必守）：说「幂等设计（四种手段）」，绝不说「幂等四式」</b>——那是自造名词，一说就被追问「哪四式、谁定义的」。<br>
+      <b>② 别说「先查再插更安全」</b>——那是 TOCTOU 竞态，错的。<br>
+      <b>③ 别只说方案不说处置差异</b>——「同一招为什么限购要报错、点赞不报错」是这题的深挖点，答出来才叫懂语义。<br>
+      <b>④ 别说「我们有一张专门的幂等表」</b>——项目没有，幂等全落在业务表自身的唯一索引 + 状态机上。
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">Q3 · 「消息不丢不重怎么保证？」 <span class="badge badge-star">高频</span></h3>
+    <div class="callout talk">
+      <span class="ct">30 秒版本（逐字可用）</span>
+      "我按<b>三段</b>答。<b>不丢</b>：<b>发送端</b>开 publisher-confirm + mandatory + returns，而且<b>真正注册了回调</b>——这里有个真实教训：配置早就开了，但从来没注册回调，Broker 的事件到达后被静默丢弃，等于两个开关都是摆设；<b>Broker</b> 交换机和队列都 durable；<b>消费端</b>由业务决定 ACK 语义，失败进死信。<br>
+      <b>不重</b>：靠消费端幂等——状态机 CAS + 唯一索引。<b>MQ 的语义是 at-least-once，重复是常态</b>：先做业务后 ACK，进程在 ACK 前崩溃就会重投。<br>
+      最后收成一句：<b>「重复靠幂等、丢失靠补偿」</b>——光有 confirm 不够，还得有补偿任务兜底。<br>
+      两个细节补上：<b>confirm 管「消息到没到 Broker」，returns 管「进没进队列」</b>，而且 <code>ack=true</code> 只说明 Broker 收到了，队列不存在时它照样是 ack，得靠 returns 才能发现。<b>消费端我还有两种相反策略</b>：审核链路AI 挂了重试无用，所以吞异常 ACK、记 ERROR 流水；订单取消链路必须回滚避免半截事务，所以让异常冒出、reject 进 DLQ。"
+    </div>
+    <div class="callout warn">
+      <span class="ct">最容易说错的点</span>
+      <b>① 别说「我们用的是手动 ACK」</b>——项目是 AUTO + <code>default-requeue-rejected=false</code>，没有手写 <code>basicAck</code>。被追问配置层要如实说，并讲清「为什么这样比 manual 更适合」——manual 还要处理「事务未提交就 ack」的坑。<br>
+      <b>② 别把 confirm 和 returns 说成一回事</b>——阶段不同，一个管到没到、一个管进没进队列。<br>
+      <b>③ 别吹「百分百不丢」</b>——承认「尽力而为 + 补偿兜底」更可信；主动说 afterCommit 还有崩溃窗口。<br>
+      <b>④ 别漏掉那句总结</b>——「重复靠幂等、丢失靠补偿」是这道题的标准收口。
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 class="card-title">Q4 · 「库存预减了但建单失败怎么办？」 <span class="badge badge-red">王牌</span></h3>
+    <div class="callout talk">
+      <span class="ct">30 秒版本（逐字可用）</span>
+      "<b>失败必须对称回补，否则就是「白吃名额」</b>——Redis 里库存少了、DB 里却没人真正买到，等于「看着抢完了实际有货」，是用户侧资损。<br>
+      <b>消费端有三类异常、三套路数</b>：<b>撞唯一索引</b>（重复投递/并发提交，说明该用户此前已建单成功）→ 回补本次预减 + 幂等跳过；<b>业务性失败</b>（库存不足、不在发售时间内）→ 回补预减 + 写失败标记，前端轮询到 FAILED，<b>消息正常 ACK 不重试</b>，因为重试也不会成功；<b>其他未知异常</b>（DB 抖动）→ <b>原样重抛 → 容器 reject → 进死信队列等人工</b>。<br>
+      <b>回补本身也是原子的</b>：库存加回和删受理标记在同一个 Lua 脚本里——拆开执行的话，两步之间用户重试提交会被删了一半的标记挡住或放过。<br>
+      <b>投递失败也要回补</b>：MQ 投递抛 <code>AmqpException</code> 时立即回补并提示用户重试，不允许「扣了名额但消息没出去」的白占坑。<br>
+      最后补一句边界：<b>预减是准入层不是真值，防超卖的底线永远是 DB 的 <code>WHERE stock &gt;= ?</code> 条件更新</b>；预减与实扣之间没有事务，所以这是最终一致——活动结束后还有对账兜底。"
+    </div>
+    <div class="callout warn">
+      <span class="ct">最容易说错的点</span>
+      <b>① 别说「失败就重试到成功」</b>——业务性失败（如库存不足）重试一万次也不会成功，只会打爆日志；重试要分类型。<br>
+      <b>② 别说「Redis 预减就是防超卖」</b>——预减是准入闸门，<b>真值在 DB</b>，正确说法是「Redis 预减挡量 + MQ 削峰摊峰 + DB CAS 保正确，三层缺一不可」。<br>
+      <b>③ 措辞红线：</b>扣库存说「<b>行锁 + <code>WHERE stock&gt;=?</code> 条件更新（CAS 思想）</b>」，<b>绝不说「乐观锁」</b>——<code>t_product_sku.version</code> 是纯预留字段、从未参与比对。<br>
+      <b>④ 别漏掉「投递失败也要回补」</b>——这是最容易只答「消费端回补」而漏掉的一半。
+    </div>
+  </div>
+
+  <div class="callout brand">
+    <span class="ct">本页速查：三句话 + 六个数字</span>
+    <b>三句话：</b>① Redis 挂了只会变慢不会挂掉——因为所有调用收在一个可降级门面；② <b>重复靠幂等、丢失靠补偿</b>——两个机制都要有；③ <b>降级路径与主路径同等重要，都是被测试过的</b>。<br>
+    <b>六个数字：</b>空值缓存 TTL <b>2 分钟</b> · 缓存 TTL <b>30 分钟 + 0~10 分钟抖动</b> · 计数落库 <b>60 秒</b>一次 · 热门榜全量重建 <b>30 分钟</b>一次 · AI 限流 <b>10 次 / 60 秒</b> · 下单幂等 token TTL <b>10 分钟</b>。<br>
+    <b>一句话世界观：</b>Redis 层永远不承诺正确性，<b>正确性永远在 DB 层</b>。
+  </div>
+
+  <div class="callout ok">
+    <span class="ct">接下来去哪</span>
+    <b>本页讲的是「机制」，机制怎么落到具体业务链路上——</b>下单/支付/限量发售的完整时序 → <a href="03-订单与交易.html">03 订单与交易</a>；笔记发布/审核/Feed 流的业务侧设计 → <a href="04-内容社区.html">04 内容社区</a>。<br>
+    <b>想看这些能力怎么被拆成服务、怎么做工程基建</b>（Flyway / traceId / 存储抽象 / 有界线程池 / Gateway / Nacos / HMAC / 熔断）→ <a href="07-工程基建与服务化.html">07 工程基建与服务化</a>。<br>
+    <b>面试前最后收口</b>（口径红线速查 + 弹药库 + 技术债清单）→ <a href="08-面试速查与自查.html">08 面试速查与自查</a>。
+  </div>
+
+  <!-- ====================================================================
+       CONTENT:END
+       ==================================================================== -->
+
+  <nav class="page-nav"></nav>
+</main>
+<script src="_assets/app.js"></script>
+</body>
+</html>
