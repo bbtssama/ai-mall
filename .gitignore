@@ -59,3 +59,6 @@ voice-tts/vits-server.log
 stage-*.png
 t15-r5-centered*.png
 *.db
+
+# ===== 文档归档区（2026-09-19 文档审计产物，保留历史但不参与主线）=====
+_archive/

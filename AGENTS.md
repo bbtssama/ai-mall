@@ -18,7 +18,7 @@
 ## 项目铁律（沿用既有约定）
 
 - **业务驱动演进，绝不塞技术**：每个技术决策都要能答出"砍掉它会怎样"。
-- **表结构唯一权威** = `backend/src/main/resources/db/migration/`（Flyway，只增不改）；`sql/init.sql` 只是便利脚本。
+- **表结构唯一权威** = `backend/src/main/resources/db/migration/`（Flyway，只增不改）。历史上曾有一份 `sql/init.sql` 便利脚本，因与 Flyway 严重脱节（只建 8/24 表、用 `DROP TABLE`、注释口径相反）已于 2026-09-19 删除。
 - **零依赖能启动是硬约束**：所有基建可降级、可插拔（storage/voice/AI 皆如此）。
 - **口径纪律**：扣库存说"行锁 + `WHERE stock>=?` 条件更新（CAS 思想）"，**不说"乐观锁"**；价格库存走 SQL，RAG 只答说明书与 UGC。
 - 本机**无 Docker**；MySQL / Nacos 在 `192.168.6.102`；Maven 可用（`D:\maven\apache-maven-3.9.14`）。

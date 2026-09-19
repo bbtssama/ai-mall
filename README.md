@@ -32,7 +32,7 @@ ai-mall/
 │       └── voice/            # 独立派蒙 TTS 引擎（可选，POST /api/v1/voice/tts）
 ├── frontend/                 # Vue3 + Vite 前端
 │   └── src/voice/            # Live2D 皮套组件 + TTS 播放队列（可选）
-├── sql/init.sql              # 手工初始化便利脚本（权威来源是 Flyway 迁移）
+├── backend/src/main/resources/db/migration/   # ★ 表结构唯一权威（Flyway V1~V4，只增不改）
 ├── docker-compose.yml        # V1.5：mysql/redis/rabbitmq/minio 一键起
 ├── .github/workflows/ci.yml  # V1.5：push 自动 build+test
 └── scripts/                  # smoke-test.ps1 冒烟测试
@@ -45,8 +45,8 @@ ai-mall/
 docker compose up -d
 
 # 1. 初始化数据库（192.168.6.102，root/root123，可改）
-#    ★ V1.5 起推荐直接启动后端：Flyway 自动建表/基线化，无需手动执行 SQL
-mysql -h192.168.6.102 -uroot -proot123 < sql/init.sql
+#    ★ 直接启动后端即可：Flyway 自动建表/基线化，无需手动执行任何 SQL
+#    （历史上曾有一个 sql/init.sql 便利脚本，因与 Flyway 严重脱节已于 2026-09-19 删除）
 
 # 2. 启动后端（8080；API Key 从环境变量读取，无默认值）
 cd backend && mvn spring-boot:run
