@@ -1,7 +1,7 @@
 # AI 种草商城（ai-mall）
 
 > 面向初级 Java 求职的核心实战项目：内容社区为流量入口、电商交易为变现主干、AI 为智能引擎。
-> 完整设计文档：`求职2026-8/项目设计文档.md`（本仓库为 `Projects/ai-mall`）。
+> 完整设计文档：`项目设计文档.md`（总纲蓝图）。各版本实现讲解见 `docs/版本详解/`。
 
 ## 技术栈（V1 → V4 全景）
 
@@ -33,10 +33,22 @@ ai-mall/
 ├── frontend/                 # Vue3 + Vite 前端
 │   └── src/voice/            # Live2D 皮套组件 + TTS 播放队列（可选）
 ├── backend/src/main/resources/db/migration/   # ★ 表结构唯一权威（Flyway V1~V4，只增不改）
+├── docs/
+│   ├── 版本详解/             # ★ 各版本工程实现讲解（V1.5~V4 详解 + 知识词典，共 8 份）
+│   ├── 归档/                 # 历史审核产出（规模借口审核 / 搜索功能梳理）
+│   ├── 00-项目文档地图与存废裁决.md  # 全项目文档怎么读、哪些过时（唯一权威索引）
+│   └── learning/             # （已归档，见 _archive/）
+├── 后端求职/                 # ★ 求职主线：八股试卷 / 面试弹药库 / 简历 C 及超链学习目录
+├── 项目设计文档.md           # 总纲蓝图（V1~V5 规划与选型理由）
+├── AI模块详解-SpringAI从零到实战.md  # AI 模块教学专题
 ├── docker-compose.yml        # V1.5：mysql/redis/rabbitmq/minio 一键起
 ├── .github/workflows/ci.yml  # V1.5：push 自动 build+test
 └── scripts/                  # smoke-test.ps1 冒烟测试
 ```
+
+> ⚠️ **文档位置约定**（2026-09-19 归类）：版本详解统一在 `docs/版本详解/`，求职材料统一在 `后端求职/`。
+> 根目录只保留 `README.md` / `AGENTS.md` / `项目设计文档.md` / `AI模块详解-SpringAI从零到实战.md` 四份。
+> 找文档先看 `docs/00-项目文档地图与存废裁决.md`。
 
 ## 快速启动
 
@@ -127,7 +139,7 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 
 ## V1.5 工程基建（已完成）
 
-> 详见 `V1.5工程基建详解.md`（讲解文档）+ `V1.5工程基建详解【知识词典】.md`（概念速查）。
+> 详见 `docs/版本详解/V1.5工程基建详解.md`（讲解）+ `V1.5工程基建详解【知识词典】.md`（速查）。
 
 | 项 | 内容 |
 |---|---|
@@ -156,7 +168,7 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 
 ## V2 内容社区 + Hybrid RAG（已完成）
 
-> 详见 `V2内容社区与RAG详解.md`（讲解文档）+ `V2内容社区与RAG详解【知识词典】.md`。
+> 详见 `docs/版本详解/V2内容社区与RAG详解.md`（讲解）+ `V2内容社区与RAG详解【知识词典】.md`。
 
 | 项 | 内容 |
 |---|---|
@@ -170,12 +182,12 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 
 - **V1.5 工程基建**：✅ 已完成（Flyway / traceId 可观测 / 对象存储抽象 / 测试 / Compose / CI，见上文）
 - **V2 内容社区+RAG**：✅ 已完成（笔记/MQ 审核异步/Hybrid RAG/AI 文案/模拟数据，见上文）
-- **V3 支付+Redis+MQ**：✅ 已完成（详见 `V3支付与Redis详解.md`）
+- **V3 支付+Redis+MQ**：✅ 已完成（详见 `docs/版本详解/V3支付与Redis详解.md`）
   - Redis：商品详情缓存三兄弟（空值缓存/互斥锁/随机TTL）、计数增量桶（HINCRBY 攒增量+定时落库）、热门榜 zset、AI 限流（Lua 原子固定窗口）
   - RabbitMQ：审核异步、订单超时取消（TTL+DLX 队列级延迟）、限量发售削峰建单；生产者 Confirm/Returns 回调落地
   - 支付闭环：验签/幂等（uk_order_id 一订单一行）/金额核对/主动查单
   - 限量发售：**Redis 预减（Lua 判重+扣减）+ MQ 异步下单削峰**，前端轮询结果
-- **V4 服务化**：✅ 已完成（详见 `V4服务化详解.md`）：仅独立 ai-service + Gateway + Nacos + Resilience4j 熔断，主体保持单体
+- **V4 服务化**：✅ 已完成（详见 `docs/版本详解/V4服务化详解.md`）：仅独立 ai-service + Gateway + Nacos + Resilience4j 熔断，主体保持单体
 - **V5**：Agent 客服（查订单/物流）、相似推荐+热门榜（ItemCF 离线对比）、受限 NL2SQL 商家看板
 
 ## 可靠性大修缮（2026-09-09，P0/P1/P2 系统性修复）
