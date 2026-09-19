@@ -1,0 +1,55 @@
+{
+  "v": 1,
+  "seq": 3,
+  "selections": [
+    {
+      "id": "sel-3",
+      "seq": 3,
+      "startLine": 19,
+      "startCol": 4,
+      "endLine": 19,
+      "endCol": 40,
+      "text": "、商品：这是缺口，不是\"合理选型\"（★ 口径已修正）\n\n`backend",
+      "createdAt": "2026-09-15T16:29:46.377Z",
+      "color": "pink",
+      "italic": false,
+      "underline": false,
+      "fetched": false,
+      "stale": false,
+      "remark": "注意：笔记检索可以理直气壮说\"方案完备、暂不上 ES\"；商品搜索不能套这套话术（那是没做）"
+    },
+    {
+      "id": "sel-2",
+      "seq": 2,
+      "startLine": 20,
+      "startCol": 0,
+      "endLine": 20,
+      "endCol": 8,
+      "text": "\n`backen",
+      "createdAt": "2026-09-15T16:29:46.362Z",
+      "color": "green",
+      "italic": false,
+      "underline": false,
+      "fetched": false,
+      "stale": false,
+      "remark": "修正后的统一口径：是\"还没做成熟方案 + 触发条件明确\"，不是\"数据少所以不需要\""
+    },
+    {
+      "id": "sel-1",
+      "seq": 1,
+      "startLine": 37,
+      "startCol": 0,
+      "endLine": 38,
+      "endCol": 60,
+      "text": "1. **它是规模借口，不是工程理由。** 面试官一句\"那你有 50 万商品怎么办\"就把它问死了——因为你手里只有\"现在少\"，没有答案。\n2. **它等于主动承认项目是玩具。** \"才几百条\"这种回答，是在告诉面试官\"我没见过真实规模\"。**规模小是事实，但",
+      "createdAt": "2026-09-15T16:29:42.233Z",
+      "color": "yellow",
+      "italic": false,
+      "underline": false,
+      "fetched": false,
+      "stale": false,
+      "remark": "你指出的核心问题：把\"数据少\"当设计理由 = 规模借口 + 自贬项目"
+    }
+  ],
+  "updatedAt": "2026-09-15T16:29:46.377Z"
+}

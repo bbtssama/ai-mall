@@ -49,6 +49,12 @@ voice-tts/paimon6k.json
 voice-tts/MoeGoe/
 voice-tts/vits-server.log
 
+# ===== DSH agent 长期记忆（含个人隐私：电话/邮箱/生日，禁止提交/外泄）=====
+后端求职/dsh.memory
+
+# ===== 求职简历（含手机号/邮箱，禁止提交/外泄）=====
+后端求职/简历/
+
 # ===== 本地测试截图 / 临时文件 =====
 stage-*.png
 t15-r5-centered*.png
