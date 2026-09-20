@@ -51,12 +51,17 @@
             <el-input-number v-model="quantity" :min="1" :max="selectedSku?.stock || 99" size="default" />
           </div>
         </div>
-        <div class="action-row">
+        <div class="action-row" v-if="isLoggedIn">
           <el-button type="warning" size="large" class="btn-add" :disabled="!selectedSku || selectedSku.stock <= 0"
                      @click="addCart">加入购物车</el-button>
           <el-button type="danger" size="large" class="btn-buy" :disabled="!selectedSku || selectedSku.stock <= 0"
                      @click="buyNow">立即购买</el-button>
           <el-button size="large" class="btn-ai" @click="$router.push('/chat')">🤖 问 AI</el-button>
+        </div>
+        <!-- 匿名用户：不下单、不发请求，就地给出登录引导 -->
+        <div v-else class="login-hint">
+          <span>登录后即可加入购物车 / 立即购买</span>
+          <el-button type="primary" @click="goLogin">去登录</el-button>
         </div>
         <div class="sold">已售 {{ soldTotal }} 件 · 支持 7 天无理由退换</div>
       </div>
@@ -90,10 +95,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { productApi, cartApi } from '../api'
 import { useCartStore } from '../stores/cart'
+import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
 const router = useRouter()
 const cartStore = useCartStore()
+const auth = useAuthStore()
+
+// 匿名可浏览本页；加购/购买这类写操作必须登录（未登录时不发请求，直接引导登录）
+const isLoggedIn = computed(() => !!auth.token)
 
 const product = ref(null)
 const loading = ref(false)
@@ -136,13 +146,27 @@ async function load() {
   }
 }
 
+function goLogin() {
+  // 带上当前页路径，登录后回到这个商品详情
+  router.push({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+}
+
+/** 未登录守卫：提示 + 引导登录，绝不发请求（否则 401） */
+function requireLogin() {
+  ElMessage.warning('该操作需要登录')
+  goLogin()
+  return false
+}
+
 async function addCart() {
+  if (!isLoggedIn.value) return requireLogin()
   await cartApi.add({ skuId: selectedSku.value.id, quantity: quantity.value })
   cartStore.refresh()
   ElMessage.success('已加入购物车')
 }
 
 async function buyNow() {
+  if (!isLoggedIn.value) return requireLogin()
   // 立即购买 = 加入购物车并直达购物车结算（复用完整的地址簿/库存校验流程）
   await cartApi.add({ skuId: selectedSku.value.id, quantity: quantity.value })
   cartStore.refresh()
@@ -218,4 +242,43 @@ onMounted(load)
 .meta-item { display: flex; flex-direction: column; gap: 4px; }
 .meta-item .k { color: var(--clr-text-3); font-size: 13px; }
 .meta-item .v { color: var(--clr-text); font-size: 14px; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   策略：左图右信息 → 单列堆叠（图在上、信息在下）；
+        规格卡片换行并加大点击区；操作按钮改为两行铺满便于点按。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .crumb { font-size: 12px; margin-bottom: 10px; }
+
+  .detail-wrap { flex-direction: column; gap: 14px; padding: 12px; }
+  .gallery { flex: 0 0 auto; width: 100%; }
+  .thumb-strip { -webkit-overflow-scrolling: touch; }
+  .thumb-item { flex: 0 0 56px; width: 56px; height: 56px; }
+
+  .name { font-size: 18px; }
+  .sub { margin-bottom: 10px; }
+
+  .price-box { padding: 12px; margin-bottom: 14px; }
+  .price { font-size: 24px; }
+
+  .sku-section { margin-bottom: 14px; }
+  .sku-list { gap: 8px; }
+  /* 允许换行：每行两张，点击区域明显变大 */
+  .sku-card { flex: 1 1 44%; min-width: 0; padding: 10px 12px; }
+
+  .action-row { gap: 8px; margin-bottom: 10px; }
+  .btn-add, .btn-buy { flex: 1 1 calc(50% - 4px); min-width: 0; }
+  .btn-ai { flex: 1 1 100%; }
+
+  /* 登录引导块：窄屏竖排居中，占满整行 */
+  .buy-panel > .login-hint { flex-direction: column; text-align: center; padding: 14px 12px; }
+
+  .detail-section { margin-top: 14px; padding: 4px 12px; }
+  .meta-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+}
+
+@media (max-width: 480px) {
+  .meta-grid { grid-template-columns: 1fr; }
+}
 </style>

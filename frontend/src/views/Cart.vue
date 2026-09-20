@@ -423,4 +423,90 @@ onMounted(() => {
 .addr-phone { color: var(--clr-text-2); font-size: 13px; }
 .addr-detail { color: var(--clr-text-3); font-size: 13px; }
 .addr-form { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--clr-border); }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   桌面端商品行是「勾选/图/名称/单价/数量/小计/删除」横向 7 列并排一行，
+   窄屏无法容纳，降级为电商 App 通用的两行商品卡：
+     行 1：[勾选] [图]  商品名 / 规格 / 库存            [删除]
+     行 2：单价            数量步进器              小计
+   实现要点：商品名 flex-basis:100% 占满首行剩余空间，迫使后面的
+   单价/数量/小计自动换到第二行——纯样式实现，DOM 顺序与桌面端完全一致。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .cart-head { margin-bottom: 10px; }
+  .page-title { font-size: 18px; }
+
+  .item-list, .blocked-group { gap: 12px; }
+
+  .cart-item {
+    position: relative;              /* 供右上角「删除」定位 */
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 12px;
+    column-gap: 10px; row-gap: 10px;
+  }
+
+  /* 勾选框：EP 默认 height:32px + margin-right:30px。
+     窄屏改为 40px 高（触摸目标）并收回那 30px 间距，把宽度让给商品名。
+     用 height 而非 padding —— EP 的 height 是显式的，加竖向 padding 会撑开内容盒。 */
+  .ck { height: 40px; min-height: 40px; padding: 0 4px; margin: 0 -4px; }
+
+  .thumb { width: 56px; height: 56px; }
+
+  /* 首行信息区：占满剩余宽度并强制换行；右侧留出「删除」的位置 */
+  .goods-info { flex: 1 1 100%; padding-right: 48px; }
+  .goods-name { font-size: 14px; line-height: 1.35; }
+
+  /* 第二行：单价 / 数量 / 小计 */
+  .col-price { width: auto; flex: 0 0 auto; text-align: left; font-size: 13px; }
+  .col-qty { width: auto; flex: 0 0 auto; margin-left: auto; }
+  .col-subtotal { width: auto; flex: 0 0 auto; font-size: 15px; }
+
+  /* 删除挪到卡片右上角，把第二行留给价格/数量/小计，避免窄屏硬挤溢出 */
+  .del { position: absolute; top: 8px; right: 6px; margin: 0; padding: 0 8px; }
+
+  /* 数量步进器：全局已抬高内部输入框，这里补齐根节点高度与宽度 */
+  .col-qty :deep(.el-input-number) { width: 108px; height: 40px; }
+  .col-qty :deep(.el-input-number .el-input) { height: 100%; }
+
+  /* 结算栏吸底：贴在底部标签栏之上。
+     用 sticky 而非 fixed —— 吸底期间不遮挡列表最后一条，
+     滚到底时回到文档流末尾，也不会盖住页脚。 */
+  .settle-bar {
+    position: sticky;
+    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px; row-gap: 6px;
+    padding: 10px 12px;
+    box-shadow: var(--shadow-md);
+  }
+  .settle-tip { grid-column: 1 / -1; grid-row: 1; }
+  .settle-tip:empty { display: none; }          /* 无失效商品时不占行 */
+  .settle-bar > .el-checkbox { grid-column: 1; grid-row: 2; min-height: 40px; margin: 0; }
+  .settle-total { grid-column: 2; grid-row: 2; text-align: right; font-size: 13px; }
+  .settle-bar > .el-button { grid-column: 3; grid-row: 2; margin: 0; }
+  .total-price { font-size: 18px; }
+  .empty-check { font-size: 12px; }
+
+  /* 结算弹窗：清单/地址簿限高，窄屏不至于把弹窗撑到视口外 */
+  .checkout-list { max-height: 30vh; }
+  .checkout-row { font-size: 13px; }
+  .addr-list { max-height: 38vh; }
+  .addr-card { padding: 12px; }
+  .addr-main { flex-wrap: wrap; gap: 6px 8px; }
+
+  /* 弹窗内的新增地址表单：label 上移、控件全宽（纯 CSS，桌面端 prop 不变）。
+     EP 的 .el-form-item 默认 display:flex，必须显式改 block 才能让 label 独占一行。 */
+  .addr-form { margin-top: 10px; padding-top: 10px; }
+  .addr-form :deep(.el-form-item) { display: block; margin-bottom: 14px; }
+  .addr-form :deep(.el-form-item__label) {
+    display: block; width: auto !important; height: auto; line-height: 1.4;
+    text-align: left; padding: 0 0 6px; font-size: 13px;
+  }
+  .addr-form :deep(.el-form-item__content) { display: block; margin-left: 0 !important; }
+  .addr-form .el-button { width: 100%; }
+}
 </style>

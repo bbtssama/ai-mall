@@ -821,4 +821,17 @@ export default {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-7px); }
 }
+
+/* 移动端：舞台常被压缩成窄条（见 Chat.vue），收紧提示/角标，
+   保证不溢出舞台、不撑破父容器、不产生横向滚动条（Live2D 逻辑不变） */
+@media (max-width: 768px) {
+  .hint { padding: 12px; gap: 6px; }
+  .hint p { font-size: 12px; line-height: 1.5; max-width: 100%; }
+  .hint-icon { font-size: 26px; }
+  .badge {
+    bottom: 6px; max-width: calc(100% - 16px);
+    font-size: 11px; padding: 3px 10px; box-sizing: border-box;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+}
 </style>

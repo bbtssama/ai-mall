@@ -11,7 +11,7 @@
         <el-radio-button value="hot">热门</el-radio-button>
         <el-radio-button value="newest">最新</el-radio-button>
       </el-radio-group>
-      <el-button type="primary" @click="$router.push('/notes/create')">
+      <el-button type="primary" @click="goCreate">
         <el-icon style="margin-right:4px"><EditPen /></el-icon>发笔记
       </el-button>
     </div>
@@ -53,10 +53,13 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { noteApi } from '../api'
+import { useAuthStore } from '../stores/auth'
 import { Search, EditPen, Pointer, Star } from '@element-plus/icons-vue'
 
 const router = useRouter()
+const auth = useAuthStore()
 const notes = ref([])
 const keyword = ref('')
 const orderBy = ref('hot')
@@ -93,6 +96,15 @@ function reload () { cursor.value = { id: null, hot: null }; fetchPage(true) }
 function loadMore () { loadingMore.value = true; fetchPage(false).finally(() => (loadingMore.value = false)) }
 function open (id) { router.push(`/notes/${id}`) }
 
+/** 发笔记需要登录：未登录只提示并引导登录，不直接跳受守卫保护的 /notes/create */
+function goCreate () {
+  if (!auth.token) {
+    ElMessage.warning('该操作需要登录')
+    return router.push({ path: '/login', query: { redirect: '/notes/create' } })
+  }
+  router.push('/notes/create')
+}
+
 onMounted(async () => {
   loading.value = true
   try { await fetchPage(true) } finally { loading.value = false }
@@ -120,4 +132,29 @@ onMounted(async () => {
 .meta { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 12px; color: var(--el-text-color-secondary); }
 .stats { display: inline-flex; align-items: center; gap: 3px; }
 .tags { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   策略：顶栏折成两行（搜索 / 排序 + 发布）；瀑布流降为 2 列，极窄屏 1 列；
+        页面自身 padding 归零，交给全局 .container 的 12px 边距。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .notes-page { padding: 0; }
+  .topbar { flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .search { flex: 1 1 100%; }
+  .topbar :deep(.el-radio-button__inner) { padding: 9px 16px; }
+
+  .masonry { column-count: 2; column-gap: 10px; }
+  .card { margin-bottom: 10px; }
+  .body { padding: 8px 10px 10px; }
+  .title { font-size: 13px; margin-bottom: 4px; }
+  .summary { -webkit-line-clamp: 2; }
+  .meta { margin-top: 6px; font-size: 11px; }
+
+  .loading, .empty, .more { padding: 24px 0; }
+}
+
+@media (max-width: 480px) {
+  .masonry { column-count: 1; }
+}
 </style>

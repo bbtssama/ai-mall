@@ -29,7 +29,7 @@
 
     <!-- 新增/编辑地址弹窗 -->
     <el-dialog v-model="formVisible" :title="form.id ? '编辑地址' : '新增地址'" width="480px">
-      <el-form label-width="70px" size="default">
+      <el-form class="addr-form" label-width="70px" size="default">
         <el-form-item label="收货人"><el-input v-model="form.receiver" placeholder="收货人" /></el-form-item>
         <el-form-item label="电话"><el-input v-model="form.phone" placeholder="手机号" /></el-form-item>
         <el-form-item label="省"><el-input v-model="form.province" placeholder="省" /></el-form-item>
@@ -118,4 +118,43 @@ onMounted(load)
 .addr-phone { color: var(--clr-text-2); font-size: 14px; }
 .addr-detail { color: var(--clr-text-3); font-size: 14px; margin-bottom: 8px; }
 .addr-ops { position: absolute; right: 16px; bottom: 10px; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   地址卡单列紧凑排版；编辑/删除由「右下角绝对定位」改为卡片底部一行，
+   避免窄屏与地址文字重叠；弹窗表单 label 上移、控件全宽（纯 CSS，
+   桌面端 label-width prop 保持不变）。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .addr-page { max-width: none; }
+  .page-head { margin-bottom: 12px; gap: 8px; }
+  .page-head h2 { font-size: 18px; }
+
+  .addr-list { gap: 10px; }
+  .addr-item { padding: 12px 14px; }
+
+  .addr-head { flex-wrap: wrap; gap: 4px 8px; margin-bottom: 4px; }
+  .addr-receiver { font-size: 15px; }
+  .addr-phone { font-size: 13px; }
+  .addr-detail { font-size: 13px; line-height: 1.5; margin-bottom: 0; }
+  .addr-head .el-button { min-height: 40px; margin: 0; padding: 0 6px; }
+
+  /* 操作区回到文档流：卡片底部一行，按钮触摸目标 ≥40px */
+  .addr-ops {
+    position: static;
+    display: flex; justify-content: flex-end; gap: 4px;
+    margin-top: 8px; padding-top: 6px;
+    border-top: 1px solid var(--clr-border-light);
+  }
+  .addr-ops .el-button { min-height: 40px; margin: 0; padding: 0 12px; }
+
+  /* 弹窗表单：label 上移独占一行、控件全宽。
+     EP 的 .el-form-item 默认 display:flex，必须显式改 block 才能让 label 换行。 */
+  .addr-form :deep(.el-form-item) { display: block; margin-bottom: 14px; }
+  .addr-form :deep(.el-form-item__label) {
+    display: block; width: auto !important; height: auto; line-height: 1.4;
+    text-align: left; padding: 0 0 6px; font-size: 13px;
+  }
+  .addr-form :deep(.el-form-item__content) { display: block; margin-left: 0 !important; }
+}
 </style>

@@ -85,4 +85,28 @@ onUnmounted(() => clearInterval(timer))
 .pay-btn { width: 100%; margin-top: 20px; }
 .tip { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.7; margin-top: 12px; }
 .back { text-align: center; margin-top: 8px; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   收银台缩为「单列 + 全宽」卡片：金额字号略降仍突出重点，单号可折行不溢出，
+   确认支付按钮全宽抬高到 48px 便于拇指点按。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .cashier { min-height: auto; padding: 12px 0 16px; align-items: stretch; }
+  .card { width: 100%; padding: 16px; border-radius: var(--radius-lg); }
+
+  .badge { font-size: 15px; }
+  .sub { line-height: 1.5; }
+
+  .amount { font-size: 28px; margin: 10px 0 14px; }
+
+  /* 支付单号/订单号较长：给 b 留出收缩空间并允许折行，避免撑破卡片 */
+  .row { gap: 12px; padding: 8px 0; }
+  .row b { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  .cd { font-size: 15px; font-variant-numeric: tabular-nums; }
+
+  .pay-btn { min-height: 48px; font-size: 16px; margin-top: 16px; }
+  .tip { line-height: 1.6; }
+  .back .el-button { width: 100%; min-height: 40px; }
+}
 </style>

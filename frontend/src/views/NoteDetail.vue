@@ -1,5 +1,8 @@
 <template>
-  <div class="note-detail" v-if="note">
+  <!-- 加载中先占位，避免首屏空白（匿名进入同样适用） -->
+  <el-skeleton v-if="loading" class="note-detail" :rows="6" animated />
+  <el-empty v-else-if="!note" class="note-detail" description="笔记不存在或已下架" />
+  <div class="note-detail" v-else>
     <!-- 驳回提示（作者本人可见） -->
     <el-alert v-if="note.mine && note.status === 'REJECTED'" type="error" :closable="false" class="reject-tip"
       :title="`审核未通过：${note.auditResult || '内容包含违规风险'}`">
@@ -62,24 +65,41 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { noteApi } from '../api'
+import { useAuthStore } from '../stores/auth'
 import { Pointer, Star, View } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 const note = ref(null)
+const loading = ref(false)
 const submitting = ref(false)
 
 async function load () {
-  note.value = await noteApi.detail(route.params.id)
+  loading.value = true
+  try {
+    note.value = await noteApi.detail(route.params.id)
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 未登录守卫：点赞/收藏等写操作只提示并引导登录，绝不发请求（否则 401） */
+function requireLogin () {
+  ElMessage.warning('该操作需要登录')
+  router.push({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+  return false
 }
 
 async function toggleLike () {
+  if (!auth.token) return requireLogin()
   await noteApi.like(note.value.id, !note.value.liked)
   note.value.liked = !note.value.liked
   note.value.likeCount += note.value.liked ? 1 : -1
 }
 
 async function toggleCollect () {
+  if (!auth.token) return requireLogin()
   await noteApi.collect(note.value.id, !note.value.collected)
   note.value.collected = !note.value.collected
   note.value.collectCount += note.value.collected ? 1 : -1
@@ -130,4 +150,39 @@ onMounted(load)
 .p-name { font-size: 13px; font-weight: 500; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-remark { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 6px; }
 @media (max-width: 900px) { .layout { flex-direction: column; } .side { width: 100%; position: static; } }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   策略：布局已由 900px 断点降为单列，这里只做正文可读性 + 元素缩放的收口；
+        页面自身 padding 归零，交给全局 .container 的 12px 边距。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .note-detail { padding: 0; }
+  .reject-tip { margin-bottom: 10px; }
+
+  .main { padding: 14px; }
+  .title { font-size: 18px; margin-bottom: 10px; }
+  .author-bar { margin-bottom: 12px; }
+  .author { font-size: 13px; }
+  .time { font-size: 11px; }
+
+  /* 正文：字号与行高按阅读场景收紧，左右留白由 .main 的 14px 提供 */
+  .hero { margin-bottom: 12px; }
+  .content { font-size: 15px; line-height: 1.9; }
+  .imgs { grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 12px; }
+
+  .actions { flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 12px; }
+  .views { font-size: 12px; }
+
+  /* 文中好物：单列铺满，商品行紧凑排列 */
+  .side { width: 100%; position: static; padding: 12px; }
+  .side-title { margin-bottom: 8px; }
+  .product-card { padding: 8px; gap: 8px; }
+  .product-card img { width: 56px; height: 56px; }
+  .p-name { font-size: 13px; }
+}
+
+@media (max-width: 480px) {
+  .imgs { grid-template-columns: 1fr; }
+}
 </style>

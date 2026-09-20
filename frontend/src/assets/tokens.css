@@ -76,3 +76,48 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
 }
+
+/* ============================================================
+   移动端基础适配（全局共用，2026-09-20）
+   —— 各视图只负责自己的「业务布局」响应式；
+      基础字号 / 容器边距 / 触摸目标 / 弹窗宽度 这些共性问题在这里一次性解决。
+   ============================================================ */
+@media (max-width: 768px) {
+  body { font-size: 14px; }
+  .container { padding: 0 12px; }
+
+  /* 触摸目标：Element Plus 默认控件在手机上偏小，统一抬高到 ≥40px 便于点按 */
+  .el-button { min-height: 40px; padding-left: 16px; padding-right: 16px; }
+  .el-button--small { min-height: 34px; }
+  .el-input__wrapper { min-height: 40px; }
+  /* 表格在窄屏字号降一档，配合外层横滑容器 */
+  .el-table { font-size: 13px; }
+  /* 浮层留边，避免贴边/超出视口 */
+  .el-dialog { width: 92% !important; margin-top: 8vh; }
+  .el-message-box { width: 88% !important; }
+  .el-drawer { width: 86% !important; }
+  /* 提示消息在窄屏占满宽度更好读 */
+  .el-message { min-width: 0; width: 88%; }
+}
+
+/* 通用显隐工具类 */
+.mobile-only { display: none; }
+.desktop-only { display: block; }
+@media (max-width: 768px) {
+  .mobile-only { display: block; }
+  .mobile-hide { display: none !important; }
+  .desktop-only { display: none !important; }
+}
+
+/*
+  匿名用户的「登录引导」占位块。
+  用途：商品详情的加购按钮、笔记详情的点赞/收藏等需要登录的操作，
+       在未登录时替换为这个提示块，而不是让用户点了才报 401。
+*/
+.login-hint {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  flex-wrap: wrap;
+  padding: 14px 16px; border-radius: var(--radius-md);
+  background: var(--clr-primary-bg); color: var(--clr-text-2); font-size: 14px;
+}
+.login-hint .el-button { flex-shrink: 0; }

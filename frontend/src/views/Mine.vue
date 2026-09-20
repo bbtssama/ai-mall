@@ -87,4 +87,28 @@ async function logout() {
 .entry-arrow { color: var(--clr-text-4); font-size: 20px; }
 
 .logout-btn { width: 100%; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   个人卡由「左头像 + 右信息」压成居中纵向；功能入口本就是列表形态，
+   窄屏保持全宽列表并抬高行高到 ≥52px，退出登录按钮加高便于点按。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .mine-page { max-width: none; }
+
+  .user-card {
+    flex-direction: column; text-align: center; gap: 10px;
+    padding: 20px 16px; margin-bottom: 12px;
+  }
+  .avatar { width: 56px; height: 56px; font-size: 24px; }
+  .nickname { font-size: 17px; }
+  .username { margin-top: 2px; }
+
+  .entry-card { margin-bottom: 16px; }
+  .entry-row { min-height: 52px; padding: 12px 16px; gap: 10px; }
+  .entry-icon { font-size: 18px; }
+  .entry-label { font-size: 15px; }
+
+  .logout-btn { min-height: 44px; }
+}
 </style>

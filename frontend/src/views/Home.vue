@@ -205,4 +205,41 @@ function onImgError(e) { e.target.src = 'https://picsum.photos/seed/fallback/480
 .start { color: var(--clr-text-4); font-size: 12px; margin-left: 2px; }
 
 .pager { display: flex; justify-content: center; margin-top: 20px; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   策略：Banner 整体压低一档、分类条横滑保留、单列信息密度收紧；
+        桌面端（>768px）不受影响。
+   ===================================================================== */
+@media (max-width: 768px) {
+  /* 分类条：横滑 + 触摸惯性 */
+  .cat-bar {
+    padding: 8px 12px; margin-bottom: 12px; gap: 2px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .cat-bar::-webkit-scrollbar { display: none; }
+  .cat-item { padding: 6px 14px; font-size: 13px; }
+
+  .search-head { padding: 10px 12px; margin-bottom: 12px; font-size: 13px; }
+
+  /* Banner：高度由内联 style 给定，用 :deep 覆盖；文字/插画同步缩一档 */
+  .banner { margin-bottom: 14px; }
+  .banner :deep(.el-carousel__container) { height: 148px !important; }
+  .banner-item { padding: 0 16px; }
+  .banner-title { font-size: 18px; margin-bottom: 4px; }
+  .banner-sub { font-size: 12px; }
+  .banner-emoji { font-size: 40px; }
+
+  .section-title { font-size: 16px; margin-bottom: 10px; padding-left: 8px; border-left-width: 3px; }
+
+  /* 商品卡片：栅格已由 el-col 的 xs/sm/md 控制，这里只收内边距与字号 */
+  .card-col { margin-bottom: 10px; }
+  .info { padding: 10px 10px 12px; }
+  .name { font-size: 14px; }
+  .sub { margin-bottom: 6px; }
+  .price { font-size: 17px; }
+
+  .pager { margin-top: 14px; }
+}
 </style>

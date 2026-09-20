@@ -139,4 +139,38 @@ onMounted(async () => {
 .label { width: 40px; font-size: 14px; color: var(--el-text-color-regular); flex-shrink: 0; }
 .submit-row { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
 .submit-hint { font-size: 12px; color: var(--el-text-color-secondary); }
+
+/* =====================================================================
+   移动端适配（≤ 768px）—— 桌面端（>768px）样式完全不受影响
+   ===================================================================== */
+@media (max-width: 768px) {
+  .note-create { max-width: 100%; padding: 12px; }
+  .editor { padding: 14px; border-radius: 10px; }
+
+  /* AI 起草：三件套改为单列堆叠、全宽（内联 width:220px 需 !important 覆盖） */
+  .ai-row { flex-direction: column; gap: 8px; }
+  .ai-row :deep(.el-input),
+  .ai-row :deep(.el-select) { width: 100% !important; }
+  .ai-row :deep(.el-button) { width: 100%; }
+
+  /* 图片网格：固定 90px 换行 → 3 列等宽方格，触摸目标更大 */
+  .imgs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .imgs :deep(.el-upload) { width: 100%; }
+  .img-item { width: 100%; height: auto; aspect-ratio: 1 / 1; }
+  .upload-btn { width: 100%; height: auto; aspect-ratio: 1 / 1; font-size: 26px; }
+  .del { right: 2px; top: 2px; font-size: 18px; background: #fff; border-radius: 50%; }
+
+  /* 标签 / 好物：label 顶部对齐 + 选择器全宽（内联 flex:1 需 !important 覆盖） */
+  .row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .label { width: auto; }
+  .row :deep(.el-select) { flex: none !important; width: 100%; }
+
+  /* 提交区：按钮全宽 */
+  .submit-row { flex-direction: column; align-items: stretch; gap: 8px; margin-top: 16px; }
+  .submit-row :deep(.el-button) { width: 100%; }
+
+  /* 正文 textarea：≥16px 防 iOS 聚焦缩放，高度自适应 */
+  .content-input :deep(.el-textarea__inner) { font-size: 16px; line-height: 1.7; min-height: 200px; }
+  .note-create :deep(.el-input__inner) { font-size: 16px; }
+}
 </style>

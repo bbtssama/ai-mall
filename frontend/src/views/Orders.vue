@@ -202,4 +202,43 @@ onMounted(load)
 .item-right { text-align: right; }
 .item-price { color: var(--clr-danger); font-weight: 600; }
 .item-qty { color: var(--clr-text-3); font-size: 12px; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）
+   订单卡重排为「订单号一行 / 时间+状态一行 / 金额+收货人两行 / 操作按钮一行」；
+   状态 tab 横向可滑，操作按钮等分整行并把触摸目标抬到 40px。
+   ===================================================================== */
+@media (max-width: 768px) {
+  .page-title { font-size: 18px; margin-bottom: 10px; }
+
+  /* 状态 tab：横向滑动（隐藏滚动条，保留桌面端视觉） */
+  .tabs-wrap {
+    padding: 8px 12px; margin-bottom: 12px; gap: 2px;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  }
+  .tabs-wrap::-webkit-scrollbar { display: none; }
+  .tab { padding: 8px 14px; font-size: 13px; }
+
+  .order-card { padding: 12px; margin-bottom: 10px; }
+
+  /* 行 1：订单号独立一行；行 2：时间（左）+ 状态标签（右） */
+  .order-head { flex-wrap: wrap; gap: 4px 8px; }
+  .order-no { flex: 1 1 100%; font-size: 12px; }
+  .order-time { flex: 1; font-size: 12px; }
+
+  /* 金额与收货人由并排改为上下堆叠，窄屏不挤压 */
+  .order-body { flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 0 8px; }
+  .amount { margin-right: 0; font-size: 20px; }
+  .receiver { font-size: 12px; }
+
+  /* 操作按钮：等分一行（放不下时自动换行），触摸目标 ≥40px */
+  .order-foot { flex-wrap: wrap; gap: 8px; }
+  .order-foot .el-button { flex: 1 1 0; min-width: 0; min-height: 40px; margin: 0; padding: 0 8px; }
+
+  /* 分页器：仅 prev/pager/next，窄屏放大触摸目标，必要时横向滑动而不是撑破视口 */
+  .pager { margin-top: 12px; padding-bottom: 2px; overflow-x: auto; }
+  .pager :deep(.el-pagination) { flex-wrap: nowrap; }
+  .pager :deep(.el-pagination > button),
+  .pager :deep(.el-pagination .el-pager li) { min-width: 36px; height: 36px; line-height: 36px; }
+}
 </style>

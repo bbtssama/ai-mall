@@ -37,10 +37,11 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
 
 const mode = ref('login')
@@ -64,12 +65,18 @@ const regRules = {
   ]
 }
 
+/** 登录成功后的落点：路由守卫会带 ?redirect=/原路径；只接受站内相对路径（挡掉 //evil.com 这类开放重定向） */
+function afterLoginTarget() {
+  const r = route.query.redirect
+  return typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') ? r : '/'
+}
+
 async function doLogin() {
   loading.value = true
   try {
     await auth.login(loginForm)
     ElMessage.success('登录成功')
-    router.push('/')
+    router.push(afterLoginTarget())
   } catch (e) { /* 拦截器已提示 */ } finally {
     loading.value = false
   }
@@ -94,4 +101,19 @@ async function doRegister() {
 .login-card { width: 420px; padding: 10px 20px 20px; }
 .title { text-align: center; }
 .slogan { text-align: center; color: #999; font-size: 13px; margin-bottom: 16px; }
+
+/* =====================================================================
+   移动端适配（≤ 768px）—— 桌面端（>768px）样式完全不受影响
+   ===================================================================== */
+@media (max-width: 768px) {
+  /* 不再是 80vh 垂直居中：内容贴顶，宽度自适应铺满 */
+  .login-wrap { min-height: 0; padding: 12px 0 20px; }
+  .login-card { width: 100%; max-width: 100%; padding: 6px 12px 16px; }
+  .title { font-size: 20px; }
+  .slogan { font-size: 12px; margin-bottom: 12px; }
+  /* ≥16px：避免 iOS Safari 聚焦输入框时放大页面 */
+  .login-card :deep(.el-input__inner) { font-size: 16px; }
+  /* 登录 / 注册 标签触摸目标抬高 */
+  .login-card :deep(.el-tabs__item) { height: 44px; line-height: 44px; font-size: 15px; }
+}
 </style>

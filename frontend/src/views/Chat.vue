@@ -370,4 +370,75 @@ onMounted(async () => {
   .voice-stage-side { width: 100%; max-width: 100%; height: 280px; min-height: 240px; }
   .chat-card { height: auto; min-height: 70vh; }
 }
+
+/* =====================================================================
+   移动端适配（≤ 768px）—— 桌面端（>768px）样式完全不受影响
+   ===================================================================== */
+@media (max-width: 768px) {
+  .chat-layout { gap: 10px; }
+
+  /* 皮套降级为窄条：只压缩展示尺寸（Live2D/口型/TTS 逻辑与调用方式不变），
+     把纵向空间还给聊天区；canvas 为 100% 宽高，不产生横向滚动条 */
+  .voice-stage-side {
+    width: 100%; max-width: 100%; min-width: 0;
+    height: 140px; min-height: 0;
+  }
+
+  /* 卡片自适应高度；放开 overflow 才能让输入区 sticky 吸到视口底部 */
+  .chat-card { height: auto; min-height: 62vh; overflow: visible; }
+
+  .chat-toolbar { padding: 8px 12px; gap: 8px; border-radius: 12px 12px 0 0; }
+  .toolbar-title { font-size: 14px; }
+  .drawer-toggle { min-width: 0; }
+
+  /* 会话列表：左侧竖列 → 顶部横向滚动条（不挤占聊天区宽度） */
+  .chat-body { flex-direction: column; min-height: 0; }
+  .conv-list {
+    width: 100%; flex: 0 0 auto; display: flex; gap: 8px;
+    overflow-x: auto; overflow-y: hidden;
+    border-right: none; border-bottom: 1px solid #eee;
+    padding: 8px 12px; -webkit-overflow-scrolling: touch;
+  }
+  .conv-head { display: none; }
+  .conv-item {
+    flex: 0 0 auto; max-width: 56vw; margin-bottom: 0; padding: 8px 14px;
+    min-height: 36px; display: flex; align-items: center;
+    background: #f5f5f5; border-radius: 999px; font-size: 12px;
+  }
+  .conv-item.active { background: #fdeee9; }
+
+  /* 消息气泡：占比放宽到 85%，左右内边距收窄；长串/图片不横向溢出 */
+  .msg-area { padding: 12px; gap: 10px; }
+  .bubble { max-width: 85%; padding: 9px 12px; overflow-wrap: anywhere; }
+  .msg-img { max-width: 100%; max-height: 200px; }
+  .empty-tip { margin: 24px auto; }
+
+  /* 输入区吸底：避让 App.vue 的固定底部标签栏（56px）+ iOS 安全区 */
+  .input-area {
+    position: sticky;
+    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    z-index: 20;
+    flex-direction: column; align-items: stretch; gap: 8px;
+    padding: 10px 12px;
+    border-radius: 0 0 12px 12px;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, .06);
+  }
+  .input-box { width: 100%; }
+  /* 输入框 + 发送同处一行操作条：输入框整行，按钮组单行右对齐 */
+  .input-actions {
+    flex-direction: row; flex-wrap: wrap; align-items: center;
+    justify-content: flex-end; gap: 8px; width: 100%;
+  }
+  .toggle-row { margin-right: auto; }
+  .input-actions .el-button { min-height: 40px; }
+  .img-preview { width: 60px; height: 60px; }
+  /* ≥16px：避免 iOS Safari 聚焦时缩放页面 */
+  .input-box :deep(.el-textarea__inner) { font-size: 16px; }
+}
+
+@media (max-width: 480px) {
+  /* 更窄的屏幕：皮套再收一档，保证聊天区足够 */
+  .voice-stage-side { height: 110px; }
+  .bubble { max-width: 88%; }
+}
 </style>
