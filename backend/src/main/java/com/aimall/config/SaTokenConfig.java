@@ -116,18 +116,25 @@ public class SaTokenConfig implements WebMvcConfigurer {
         if (req == null || !"GET".equalsIgnoreCase(req.getMethod())) {
             return false;
         }
-        String path = req.getRequestPath();
-        if (path == null) {
+        String rawPath = req.getRequestPath();
+        if (rawPath == null) {
             return false;
         }
-        // 归一化尾部斜杠：/api/v1/products/ 与 /api/v1/products 视为同一路径
-        if (path.length() > 1 && path.endsWith("/")) {
-            path = path.substring(0, path.length() - 1);
-        }
+        // 归一化尾部斜杠：/api/v1/products/ 与 /api/v1/products 视为同一路径。
+        // ⚠️ 用新变量 `path` 而不是复用 rawPath：rawPath 之后若再被赋值就不再是
+        //    "实际上的最终变量"，无法在 lambda 中引用（曾因此导致 CI 编译失败）。
+        final String path = (rawPath.length() > 1 && rawPath.endsWith("/"))
+                ? rawPath.substring(0, rawPath.length() - 1)
+                : rawPath;
         if (PUBLIC_READ_EXACT.contains(path)) {
             return true;
         }
-        return PUBLIC_READ_DETAIL_PREFIXES.stream().anyMatch(prefix -> isNumericDetail(path, prefix));
+        for (String prefix : PUBLIC_READ_DETAIL_PREFIXES) {
+            if (isNumericDetail(path, prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 形态校验：{@code path == prefix + 纯数字} */

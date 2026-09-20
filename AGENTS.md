@@ -46,4 +46,11 @@
 - **表结构唯一权威** = `backend/src/main/resources/db/migration/`（Flyway，只增不改）。历史上曾有一份 `sql/init.sql` 便利脚本，因与 Flyway 严重脱节（只建 8/24 表、用 `DROP TABLE`、注释口径相反）已于 2026-09-19 删除。
 - **零依赖能启动是硬约束**：所有基建可降级、可插拔（storage/voice/AI 皆如此）。
 - **口径纪律**：扣库存说"行锁 + `WHERE stock>=?` 条件更新（CAS 思想）"，**不说"乐观锁"**；价格库存走 SQL，RAG 只答说明书与 UGC。
-- 本机**无 Docker**；MySQL / Nacos 在 `192.168.6.102`；Maven 可用（`D:\maven\apache-maven-3.9.14`）。
+- ⚠️ **验证编译必须带 `clean`**：本机的 `mvn test` / `mvn compile` 会打印
+  `Nothing to compile - all classes are up to date.` 并**静默跳过编译**（增量编译判定不可靠），
+  于是改动过的源码根本没被编译却报 BUILD SUCCESS —— **假绿**。
+  这条曾导致一个真实的编译错误（lambda 引用非 final 变量）骗过本地验证、只在 CI 上暴露。
+  **验收命令统一用** `mvn -B clean verify`（与 `.github/workflows/ci.yml` 完全一致），
+  或先 `rm -rf backend/target`。看到 `Compiling N source files` 才算真的编译过。
+- 本机**无 Docker**；MySQL / Nacos 在 `192.168.6.102`；Maven 可用（`D:\maven\apache-maven-3.9.14`，
+  JDK17 在 `D:\JetBrains\JDK\JDK17`）。
