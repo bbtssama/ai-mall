@@ -56,7 +56,7 @@ public class AuditConsumer {
                         msg.noteId(), msg.bizVersion(), currentVersion);
                 return;   // 正常 ACK：过期消息重试一万次也还是过期
             }
-            // 幂等防线在 auditOnce 内部（版本唯一键 + 状态机条件更新）
+            // 幂等防线在 auditOnce 内部（先「状态机 CAS 抢结论权」、再「流水唯一键兜底」）
             // ★ 版本号必须从消息带下去，不能硬编码：它决定「重复投递」与「新一次审核」的区分
             auditService.auditOnce(note, msg.bizVersion());
         } catch (Exception e) {
