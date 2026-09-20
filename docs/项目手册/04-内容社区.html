@@ -758,6 +758,22 @@ private void submitLocal(Long noteId) {
             </tbody>
           </table>
         </div>
+
+        <div class="callout danger">
+          <span class="ct">已知缺陷（2026-09-20 代码复核发现，别把它当成完美设计）</span>
+          第 ① 与第 ③ 条组合起来<b>有个洞</b>：<code>uk_biz</code> 的唯一键是
+          <code>(biz_type, biz_id, biz_version)</code>，而 <b>biz_version 永远是 1</b>
+          （<code>AuditMessage</code> 声明了这个字段但消费端<code>只打日志不传递</code>，
+          <code>auditOnce</code> 内部写死 1，项目也没有"编辑笔记"接口去 +1）。于是：<br>
+          · 一次 <code>ERROR</code> 流水、或一次 <code>REJECT</code> 判定，就<b>永久占用</b>了这篇笔记的幂等额度；<br>
+          · 之后任何重审（定时补偿 / <code>/resubmit</code>）走到 <code>INSERT IGNORE</code> 都返回 0 →
+          <code>return</code> → <b>状态永不流转</b>，日志只有一行 <code>INFO 重复审核消息（幂等跳过）</code>，看不出是故障；<br>
+          · <code>/resubmit</code> 还要求 <code>status == REJECTED</code>，而此时笔记是 <code>AUDITING</code>，<b>接口层面也救不了</b>。<br>
+          <b>结果</b>：被驳回或报错过的笔记会<b>永久卡在 AUDITING</b>，只能手工删审核流水。
+          所以被问到"AI 审核失败怎么办"时，<b>不要只答"停 AUDITING 等人工"就收尾</b>——
+          主动补一句"这个补偿通道我复盘时发现被幂等键挡住了，是个待修缺陷"，反而是加分。
+          完整复核见 <code>docs/复核-审核MQ竞态-20260920.md</code>。
+        </div>
         <div class="codeblock">
           <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:121-137（防线 ① 与 ②）</span></div>
           <pre><code>// 幂等第一道防线：INSERT IGNORE 撞 uk(biz,biz,version) 返回 0 → 已处理过，直接返回
