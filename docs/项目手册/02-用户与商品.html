@@ -227,25 +227,58 @@ userMapper.insert(user);</code></pre>
     <h3 class="card-title">SaInterceptor：默认全拦，显式放行 <span class="badge badge-master">掌握</span></h3>
     <p class="card-sub">对应代码：SaTokenConfig.java</p>
 
-    <p><strong>一句话：</strong><code>/api/**</code> 默认<b>全部需要登录</b>，只有白名单里的路径例外。这道闸门装在 Spring MVC 的拦截器层，登录校验、放行都在这里一次性决定。</p>
+    <p><strong>一句话：</strong><code>/api/**</code> 默认<b>全部需要登录</b>，例外只有两类——<b>完全公开</b>（登录注册、支付回调、<code>/internal/**</code>、<code>/error</code>）与<b>匿名只读</b>（商品/笔记的 GET 列表与详情）。这道闸门装在 Spring MVC 的拦截器层，登录校验、放行都在这里一次性决定。</p>
 
     <p><strong>为什么需要它：</strong>如果每个接口自己写"判断有没有登录"，漏掉一个就是裸奔。正确的姿态是 <b>fail-closed（默认拒绝 + 显式放行）</b>，而不是 fail-open（默认放行 + 逐个加保护）。代码全文很短，但每一条放行都有理由：</p>
 
     <div class="codeblock">
-      <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/config/SaTokenConfig.java</span><span class="loc">:16-33</span></div>
-      <pre><code>registry.addInterceptor(new SaInterceptor())
-        .addPathPatterns("/api/**")
-        .excludePathPatterns(
-                "/api/v1/auth/login",
-                "/api/v1/auth/register",
-                // V3：支付回调——第三方（支付宝服务器）不可能持有我们用户的 token。
-                // 回调接口的"身份"由【验签】保证，而不是 token：
-                //   业务接口靠"你是谁"（认证），回调接口靠"消息是谁发的、有没有被改"（完整性）。
-                // 若这里不放行，回调会被 401 拦掉，订单永远无法变为已支付。
-                "/api/v1/payments/callback/**",
-                "/internal/**",
-                "/error"
-        );</code></pre>
+      <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/config/SaTokenConfig.java</span><span class="loc">:47-89（两类例外的名单）</span></div>
+      <pre><code>/** 完全公开：身份不由用户 token 保证 */
+private static final List&lt;String&gt; ALWAYS_PUBLIC = List.of(
+        "/api/v1/auth/login",
+        "/api/v1/auth/register",
+        // V3：支付回调——第三方（支付宝服务器）不可能持有我们用户的 token，
+        // 身份由【验签】保证。若不放行，回调会被 401 拦掉，订单永远无法变为已支付。
+        "/api/v1/payments/callback/**",
+        // V4：服务间内部接口——调用方是 ai-service，身份由【内部 HMAC 签名】保证。
+        // 放行 ≠ 裸奔：这些端点仍需校验 X-Internal-Sign。
+        "/internal/**",
+        "/error");
+
+/** 匿名只读：列表 / 榜单——GET 且路径完全等于其中之一 */
+private static final List&lt;String&gt; PUBLIC_READ_EXACT = List.of(
+        "/api/v1/products", "/api/v1/notes", "/api/v1/notes/hot");
+
+/** 匿名只读：详情——前缀之后必须紧跟【纯数字 id】 */
+private static final List&lt;String&gt; PUBLIC_READ_DETAIL_PREFIXES = List.of(
+        "/api/v1/products/", "/api/v1/notes/");</code></pre>
+    </div>
+
+    <div class="codeblock">
+      <div class="cb-head"><span class="fn">backend/src/main/java/com/aimall/config/SaTokenConfig.java</span><span class="loc">:91-102（拦截器注册）</span></div>
+      <pre><code>@Override
+public void addInterceptors(InterceptorRegistry registry) {
+    registry.addInterceptor(new SaInterceptor(handle -&gt; SaRouter
+                    .match("/api/**")
+                    .notMatch(ALWAYS_PUBLIC)                 // ① 完全公开
+                    .notMatch(r -&gt; isAnonymousReadable())    // ② 匿名只读（GET 才认）
+                    .check(r -&gt; StpUtil.checkLogin())))      // ③ 其余一律校验登录
+            .addPathPatterns("/api/**");
+}</code></pre>
+    </div>
+
+    <div class="callout ok">
+      <span class="ct">★ 这里修过一个"看着拦了、其实没拦"的坑（面试很值得讲）</span>
+      原实现是 <code>new SaInterceptor()</code> <b>无参构造</b> + <code>excludePathPatterns(...)</code> 白名单。
+      看起来拦了 <code>/api/**</code>，但<b>无参构造的认证体是空的</b>——它只做 <code>@SaCheck*</code> 注解校验，
+      而项目里一个这类注解都没有。也就是说 <code>/api/**</code> 当时<b>没有任何服务端鉴权</b>：
+      写接口之所以还会 401，是因为 Service 层调了 <code>StpUtil.getLoginIdAsLong()</code> 抛 <code>NotLoginException</code>；
+      不碰登录态的读接口（如商品列表）则完全裸奔。<b>这是"意外形成的保护"，不是设计，而且不一致。</b><br>
+      现在的写法是给 <code>SaInterceptor</code> 传一个显式的认证函数（<code>SaRouter.match(…).check(r -&gt; StpUtil.checkLogin())</code>），
+      并且<b>按 HTTP 方法区分匿名只读</b>——因为同一个 <code>/api/v1/notes</code> 前缀下，GET 是公开的 Feed 流、POST 是必须登录的发布，
+      而 Spring MVC 的 <code>excludePathPatterns</code> 无法按方法区分，所以改用 <code>.notMatch(判断函数)</code>。
+      详情路径还要求"前缀 + 纯数字 id"，顺带堵住了 <code>/api/v1/notes/../orders</code> 这类路径穿越被误判为"匿名可读"。<br>
+      面试可以这样收尾：<b>"配置写了不等于生效——我后来是拿一个不带 token 的请求真的打了一遍才发现的。安全相关的配置必须用请求验证，不能读代码想当然。"</b>
     </div>
 
     <div class="callout warn">
@@ -278,7 +311,8 @@ userMapper.insert(user);</code></pre>
       <div class="lvl-body">
         <div class="callout talk">
           <span class="ct">30 秒版本</span>
-          "鉴权用 Sa-Token 拦截器做，<code>/api/**</code> 默认全部要登录，只放行三类：登录注册、支付回调、<code>/internal/**</code> 内部接口。姿态是 fail-closed——默认拒绝、显式放行，避免漏掉某个接口裸奔。"<br>
+          "鉴权用 Sa-Token 拦截器做，<code>/api/**</code> 默认全部要登录。例外分两类：<b>完全公开</b>的是登录注册、支付回调、<code>/internal/**</code> 内部接口和 <code>/error</code>；<b>匿名只读</b>的是商品与笔记的 GET（列表/榜单精确匹配，详情要求前缀 + 纯数字 id）。姿态是 fail-closed——默认拒绝、显式放行，避免漏掉某个接口裸奔。<br>
+          <b>这里我修过一个真实的坑：</b>"原来那个拦截器写的是无参 <code>new SaInterceptor()</code>，它的认证体是空的，只认 <code>@SaCheck*</code> 注解，而项目里没有这类注解——所以看着拦了 <code>/api/**</code>，其实服务端根本没鉴权。现在换成显式的 <code>SaRouter.match(...).check(r -&gt; StpUtil.checkLogin())</code>，并按 HTTP 方法开匿名只读。"<br>
           <b>被问"支付回调放行安全吗"：</b>"安全。回调是支付宝服务器发的，它没有我们的用户 Token，身份由验签保证。Token 保证认证、验签保证完整性，是两码事。"<br>
           <b>被问三者区别：</b>"Filter → Interceptor → AOP 依次在容器级、MVC 级、方法级；登录校验必须在 MVC 入口做，所以用 Interceptor。"
         </div>
@@ -626,7 +660,7 @@ public void setDefault(Long id) {
 
   <div class="callout talk">
     <span class="ct">30 秒版本 · "用户鉴权怎么做的"</span>
-    "认证我用 Sa-Token。注册时密码用 BCrypt 加密存哈希，不是明文；登录校验通过后 <code>StpUtil.login(userId)</code> 签发 Token，前端放 <code>Authorization</code> 头，后端的 Sa-Token 拦截器对 <code>/api/**</code> 默认全部拦截，只放行登录注册、支付回调、内部接口三类——这是 fail-closed 的姿态，避免漏接口。<br>
+    "认证我用 Sa-Token。注册时密码用 BCrypt 加密存哈希，不是明文；登录校验通过后 <code>StpUtil.login(userId)</code> 签发 Token，前端放 <code>Authorization</code> 头，后端的 Sa-Token 拦截器对 <code>/api/**</code> 默认全部拦截，例外只有两类：<b>完全公开</b>（登录注册、支付回调、<code>/internal/**</code>、<code>/error</code>）与<b>匿名只读</b>（商品与笔记的 GET，浏览橱窗不该强制先注册）——这是 fail-closed 的姿态，避免漏接口。<br>
     业务代码不解析 Token，要当前用户就调 <code>StpUtil.getLoginIdAsLong()</code>。选无状态 Token 是因为集群部署不用做会话粘滞；选 Sa-Token 而不是 JWT，是因为它服务端有映射，<b>可以主动踢人</b>。所有涉及用户数据的操作，归属校验都带 <code>AND user_id = ?</code>，越权返回 404 而不是 403。"
   </div>
 

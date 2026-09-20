@@ -19,7 +19,7 @@
 8. **游标分页与排序键必须配套**——按热度排时游标是 `(hot_score, id)` [二元组](V2内容社区与RAG详解【知识词典】.md#二元组游标)，只用 id 会漏数据。
 9. **MySQL 中文全文检索必须 `WITH PARSER ngram`**——默认解析器按空格分词，中文整句是一个词，检索全失效（[ngram](V2内容社区与RAG详解【知识词典】.md#ngram-解析器)）。
 10. **AI 文案只出草稿绝不自动发布**——"AI 不直写业务数据"是项目红线；未经审核的 AI 内容直接公开是 UGC 平台事故（[AI 不直写](V2内容社区与RAG详解【知识词典】.md#ai-不直写业务数据)）。
-11. **审核幂等三防线**——流水表版本唯一键 + INSERT IGNORE / 笔记状态机条件更新 / AI 失败只记 ERROR 不误杀（[消费端幂等](V2内容社区与RAG详解【知识词典】.md#消费端幂等)）。
+11. **审核幂等三防线**——流水表唯一键（V5 起为 `uk(biz_type, biz_id, biz_version, status)`）+ INSERT IGNORE / 笔记状态机条件更新 / AI 失败只记 ERROR 不误杀；前提是**版本号会随重新送审递增**（`t_note.audit_version`），（[消费端幂等](V2内容社区与RAG详解【知识词典】.md#消费端幂等)）。
 12. **embedding 默认 local 哈希是诚实降级**——它只能捕获字面重叠捕获不了语义（"续航久"≠"电池耐用"），价值是零依赖跑通全链路；接真实模型后质量升级（[EmbeddingClient](V2内容社区与RAG详解【知识词典】.md#embeddingclient)）。
 13. **双工具分流不写 if-else**——searchProduct/searchDocs 的分流由模型读工具 description 自选，代码零意图判断（[双工具路由](V2内容社区与RAG详解【知识词典】.md#双工具路由)）。
 
@@ -126,7 +126,7 @@ V2 一句话：**把"种草"变成数据库里的表、页面上的流、AI 嘴�
 
 ## 本章动手作业
 
-1. 打开 `V2__content_and_rag.sql`，对照 1.1 的图找到每张表，说出三张唯一索引各自的幂等语义（uk_note_user / uk(biz_type,biz_id,biz_version) / uk(source_type,ref_id)）。
+1. 打开 `V2__content_and_rag.sql`，对照 1.1 的图找到每张表，说出三张唯一索引各自的幂等语义（uk_note_user / uk(biz_type,biz_id,biz_version) / uk(source_type,ref_id)）。**注意**：审核流水这张的唯一键后来被 `V5__note_audit_version.sql` 改成了 4 列 `uk(biz_type, biz_id, biz_version, status)`——以迁移目录为准。
 2. 思考：标签为什么独立建表而不是在 t_note 加个 JSON 列？（答：可索引（按标签筛选走索引）、可聚合（热门话题榜）、可加约束——JSON 列三样都弱。）
 3. t_user_follow 建了表却不建接口，算不算过度设计？（答：不算——表是数据结构（迁移只增不改，早建晚建成本一样），接口是行为（V3 关注流需要时再加）。边界感。）
 
@@ -716,17 +716,27 @@ WHERE id = #{id} AND status = #{expectStatus}    -- ★ 只有 AUDITING 才能�
 
 | 防线 | 机制 | 挡什么 |
 |---|---|---|
-| ① 流水表 uk(biz_type,biz_id,biz_version) + INSERT IGNORE | 重复消息第二次插入返回 0 行 → 直接跳过 | MQ 重投（最常见） |
+| ① 流水表 uk(biz_type,biz_id,biz_version,**status**) + INSERT IGNORE | 重复消息第二次插入返回 0 行 → 直接跳过 | MQ 重投（最常见） |
 | ② 笔记状态机条件更新（WHERE status='AUDITING'） | 返回 0 行=状态已被别人改过 → 忽略 | 并发审核/编辑后重审 |
-| ③ AI 失败只记 ERROR 不动笔记 | 笔记停留 AUDITING 等人工 | **不误杀**（宁可晚发布，不能错杀正常用户） |
+| ③ AI 失败只记 ERROR 不动笔记 | 笔记停留 AUDITING，由补偿任务重审 | **不误杀**（宁可晚发布，不能错杀正常用户） |
+
+> **★ 防线①的两个前提（V5 修复后才完整）**：幂等键保护的是「**同一次审核的 MQ 重投**」，
+> 而不是「这篇内容一生只能被审一次」。所以
+> ① 版本号必须**真的会变**——`t_note.audit_version`（发布=1）由 `resubmit()` / `updateContent` 递增，
+> `auditOnce(Note, int version)` 参数化，不再硬编码 1；
+> ② 唯一键必须**含 status**——`ERROR` 表示"这次没审成"、不是审核结论，
+> 旧键（3 列）下它会永久占用终态幂等位，导致 AI 超时一次就再也补审不回来。
+> 详见 `db/migration/V5__note_audit_version.sql` 与 `docs/复核-审核MQ竞态-20260920.md` 文末「后续：已修复」。
 
 **防线③是价值观**：审核系统**宁可不作为，不可乱作为**——误杀正常用户的伤害（体验/流失）远大于晚发布几分钟。这一条讲出来，面试官知道你想过审核系统的本质。
 
-**毒消息防护**：消费端 catch 全部异常、不重入队（`default-requeue-rejected: false`）。必然失败的消息（AI 服务挂了）重试一万次也不会成功，只会打爆日志。兜底 = ERROR 流水 + DLQ 收容 + 未来的补偿任务。"失败可发现"优于"失败无限重试"。
+**毒消息防护**：消费端 catch 全部异常、不重入队（`default-requeue-rejected: false`）。必然失败的消息（AI 服务挂了）重试一万次也不会成功，只会打爆日志。兜底 = ERROR 流水 + DLQ 收容 + **补偿任务**（V3 落地：每 10 分钟扫 `AUDITING` 超时的笔记重审）。"失败可发现"优于"失败无限重试"。
 
 ## 9.4 事务外发消息：V2 踩过的坑
 
-发布在 `@Transactional` 里，审核 submit 发 MQ——**消费者可能在事务提交前回查**（查不到笔记 = 幽灵消息）。本项目把 submit 放在事务边界后调用（Controller 层）；V3 的订单延迟消息升级为 `afterCommit` 注册（同一问题的标准解法，见 [V3 详解 8.6](V3支付与Redis详解.md)）。通用原则：**MQ 不参与 DB 事务，事务内发消息永远有"回滚但消息已飞"的窗口**（[事务外发消息](V2内容社区与RAG详解【知识词典】.md#事务外发消息)）。
+发布在 `@Transactional` 里，审核 submit 发 MQ——**消费者可能在事务提交前回查**（查不到笔记 = 幽灵消息）。早期版本的注释写着"submit 放在事务边界后（Controller 层）"，但 Controller 层**根本没有事务**，实际仍在事务内直发（日志实据：10 次发布有 9 次被丢弃）。
+
+**现在的实现**：`AuditServiceImpl.submit()` 调 `AfterCommitExecutor.run(what, action)`——把投递注册到**当前事务提交之后**；订单延迟消息也用同一个出口（见 [V3 详解 8.6](V3支付与Redis详解.md)）。通用原则不变：**MQ 不参与 DB 事务，事务内发消息永远有"回滚但消息已飞"的窗口**（[事务外发消息](V2内容社区与RAG详解【知识词典】.md#事务外发消息)）。
 
 ## 9.5 审核提示词：三个温度的第三副面孔
 
@@ -877,7 +887,7 @@ String system = "你是小红书风格的种草笔记写手。写作要求：\n"
 | 症状 | 原因 | 处置 |
 |---|---|---|
 | 搜索任何词都 0 结果 | 建表没带 WITH PARSER ngram（旧表结构） | 检查 `SHOW CREATE TABLE t_note`；重建索引 |
-| 笔记发布后一直"审核中" | MQ 未起且线程池降级失败 / AI key 失效 | 看日志"MQ 不可用"与 AI 调用错误；查 t_audit_record 是否 ERROR 流水 |
+| 笔记发布后一直"审核中" | MQ 未起且线程池降级失败 / AI key 失效 | 看日志"MQ 不可用"与 AI 调用错误；查 t_audit_record 是否 ERROR 流水。**V5 之后**：`ERROR` 不再占用终态幂等位，补偿任务（10 分钟一轮）能把这类笔记救回；若仍卡住才需人工介入 |
 | AI 永远不走 searchDocs | 索引是空的（index-all 没跑） | `SELECT COUNT(*) FROM t_knowledge_chunk`；重跑 index-all |
 | 重复点赞报 500 而非静默 | DuplicateKey 捕获位置不对/事务回滚 | 检查 try 块范围是否覆盖 insert+incr |
 | Feed 翻页后出现重复笔记 | 热度排序游标只传了 id（漏 hotScore） | 检查前端 cursor 状态两个字段都带 |

@@ -12,7 +12,7 @@
 | 层 | 技术 |
 |---|---|
 | 后端 | Spring Boot 3.4.5 · Java 17 · MyBatis（XML 手写 SQL）· Sa-Token（无状态 Token） |
-| 数据 | MySQL 8（192.168.6.102:3306 / ai_mall）· **Flyway 版本管理**（V1.5，迁移至 V4） |
+| 数据 | MySQL 8（192.168.6.102:3306 / ai_mall）· **Flyway 版本管理**（V1.5，迁移至 V5） |
 | 缓存/中间件 | Redis（缓存三兄弟/计数增量桶/排行榜 zset/分布式锁/限流）· RabbitMQ（审核异步/延迟取消/削峰建单） |
 | AI | Spring AI 1.0 + 官方 DeepSeek（OpenAI 兼容，`application.yml` 当前模型 `deepseek-v4-flash-vision-exp`；可切换 OpenCode Go 中转，该 base-url 在配置中已注释备用） |
 | 服务化（V4） | Nacos 注册发现 + Spring Cloud Gateway + Resilience4j 熔断（仅 AI 独立成服务，主体保持单体） |
@@ -36,7 +36,7 @@ ai-mall/
 │       └── voice/            # 独立派蒙 TTS 引擎（可选，POST /api/v1/voice/tts）
 ├── frontend/                 # Vue3 + Vite 前端
 │   └── src/voice/            # Live2D 皮套组件 + TTS 播放队列（可选）
-├── backend/src/main/resources/db/migration/   # ★ 表结构唯一权威（Flyway V1~V4，只增不改）
+├── backend/src/main/resources/db/migration/   # ★ 表结构唯一权威（Flyway V1~V5，只增不改）
 ├── docs/
 │   ├── 项目手册/             # ★★ 多页面开发说明手册（index.html 入口，9 页 + _assets/）
 │   ├── 版本详解/             # ★ 各版本工程实现讲解（V1.5~V4 详解 + 知识词典，共 8 份）
@@ -76,7 +76,7 @@ cd frontend && npm install && npm run dev
 cd backend && mvn test
 ```
 
-打开 http://localhost:5173 ，注册/登录后体验完整闭环。
+打开 http://localhost:5173 —— **商品与种草社区可直接匿名浏览**（未登录只读），注册/登录后体验交易完整闭环；窄屏（≤768px）自动切换为底部标签栏的移动端布局。
 
 ## 派蒙语音动效助手（可选，依赖受限第三方资产）
 
@@ -166,7 +166,7 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 - 下单防超卖：`UPDATE t_product_sku SET stock=stock-? , sales=sales+? WHERE id=? AND stock>=?`
   —— 靠 **InnoDB 行排他锁 + `WHERE stock>=?` 的 CAS 式条件扣减**（原子、无超卖）。
   ⚠️ 注意：`t_product_sku.version` 目前**只是预留字段、并未用作乐观锁**（代码注释已注明），面试请讲"行锁 CAS"，不要讲"乐观锁"
-- Sa-Token 无状态 Token + 拦截器白名单
+- Sa-Token 无状态 Token + 拦截器白名单（**`/api/**` 默认要求登录**；白名单与「商品/笔记 GET 匿名只读」都是显式放行，`fail-closed`）
 - Spring AI 流式响应（SSE text/event-stream，前端 fetch 逐块渲染）
 - **Agent Function Calling**：AI 不确定商品时按需调 `searchProduct` 工具（复用业务 Service，与前端搜索同源），不编造
 - **多模态图片识别**：canvas 压缩 → base64 → `UserMessage.builder().media()` → 视觉模型
@@ -216,3 +216,18 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 
 > ⚠️ `application.yml` 的 AI 中转 Key 已改为**环境变量注入**（`${DEEPSEEK_API_KEY:}`，无默认值）；本地运行请先设置该环境变量，勿把真实 Key 提交入库。
 > ⚠️ V4 迁移改了 `t_payment` 唯一索引、取消队列加了 DLX 参数：旧环境需先 `rabbitmqadmin delete queue name=aimall.order.cancel.queue` 再启动（队列参数不可变）。
+
+## 审核链路一致性修复 + 鉴权做实（2026-09-20）
+
+一次针对「审核异步链路 + 鉴权」的复核修复（后端 `df788fb` / 前端 `235c116` 两个 commit）。
+
+| 修复 | 内容 |
+|---|---|
+| **幂等键版本号递增** | 审核幂等键 `biz_version` 此前在代码里恒为 1 → 幂等键退化成 `(NOTE, noteId)` 常量，第一次 REJECT 占键后「重新送审」永久卡死（笔记停在 AUDITING）→ `t_note` 加 **`audit_version`**（发布=1，每次重送/编辑后重审 +1），随消息传递并做过期消息校验 |
+| **ERROR 不占终态幂等位** | `t_audit_record` 唯一键由 `uk_biz(biz_type, biz_id, biz_version)` 改为 **含 `status`** —— 一次 AI 超时写下的 ERROR 不再堵死后续补审，同结论重投仍被挡住 |
+| **消息在事务提交后投递** | 审核消息此前在 `@Transactional` 内投递，消费端（另一条连接）回查不到未提交的笔记 → 丢弃（实测 10 次发布 9 次被丢）→ 新增 `common/tx/AfterCommitExecutor`：全项目唯一的「事务提交后执行副作用」出口，订单延迟消息也重构为复用它 |
+| **鉴权真正生效** | `SaTokenConfig` 此前用 `new SaInterceptor()` 无参构造 ⇒ 认证体是**空的**，加上项目没有任何 `@SaCheck*` 注解 ⇒ **`/api/**` 实际没有服务端鉴权**（写接口靠 Service 层 `StpUtil` 抛异常"意外"被保护，读接口完全裸奔）→ 改为 `/api/**` 默认校验登录 + 白名单 + 商品/笔记 GET 匿名只读 |
+| **匿名浏览 + 移动端** | 前端 `meta.public` 路由标记 + 移动端底部标签栏 + 12 个视图移动端适配；商品与种草社区不登录可浏览，交易/账户/创作类仍需登录 |
+
+> ⚠️ 迁移总数由 4 个变 **5 个**（`V5__note_audit_version.sql` 只 ALTER，**表数量不变**，仍 24 张）。
+> ⚠️ **规划中的 V5 功能（Agent 客服 / 相似推荐 / NL2SQL 看板）仍未开始**——这里的 V5 只是审核一致性补丁，别与演进路线里的 V5 混淆。

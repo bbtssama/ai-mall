@@ -21,7 +21,7 @@
     <div class="head-meta">
       <span class="badge badge-ver">阅读约 25 分钟</span>
       <span class="badge badge-star">面试权重 ★★★</span>
-      <span class="badge badge-gray">24 张表 / 191 个 Java 类 / 14 个 Controller</span>
+      <span class="badge badge-gray">24 张表 / 192 个 Java 类 / 14 个 Controller</span>
     </div>
   </header>
 
@@ -231,7 +231,7 @@
     <div class="tl-item">
       <div class="tl-v">V5 · 可选加分 <span class="badge badge-gray">未开始</span></div>
       <div class="tl-d">Agent 客服查订单、相似推荐 + ItemCF 离线对比、受限 NL2SQL 商家看板。<b>项目已停止演进，面试一律说"规划中"</b>，不要含糊其辞。</div>
-      <div class="tl-k">—— 无对应代码，无对应迁移脚本 ——</div>
+      <div class="tl-k">—— 产品 V5 无对应代码；迁移目录里的 <code>V5__note_audit_version.sql</code> 是审核链路缺陷修复，不是本行功能 ——</div>
     </div>
   </div>
 
@@ -246,12 +246,12 @@
 
   <div class="card">
     <h3 class="card-title">四块工程 + 按业务域分包 <span class="badge badge-familiar">熟悉</span></h3>
-    <p class="card-sub">核实命令：find backend ai-service gateway -name "*.java" | wc -l → 191</p>
+    <p class="card-sub">核实命令：find backend ai-service gateway -name "*.java" | wc -l → 192</p>
 
-    <p><strong>一句话：</strong>仓库由 <b>backend（主单体 176 类）、ai-service（唯一独立服务 13 类）、gateway（网关 2 类）、frontend（Vue3）</b> 四块组成；主单体内部<b>按业务域</b>分包，而不是按 controller/service/mapper 横切分层。</p>
+    <p><strong>一句话：</strong>仓库由 <b>backend（主单体 177 类）、ai-service（唯一独立服务 13 类）、gateway（网关 2 类）、frontend（Vue3）</b> 四块组成；主单体内部<b>按业务域</b>分包，而不是按 controller/service/mapper 横切分层。</p>
 
     <pre class="tree">ai-mall/
-├── <span class="h">backend/</span>                          <span class="c"># 主单体 · Spring Boot 3.4.5 · 176 个 Java 类</span>
+├── <span class="h">backend/</span>                          <span class="c"># 主单体 · Spring Boot 3.4.5 · 177 个 Java 类</span>
 │   └── src/main/java/com/aimall/
 │       ├── <span class="s">user/</span>                     <span class="c"># 用户域：注册/登录/当前用户/地址簿</span>
 │       ├── <span class="s">goods/</span>                    <span class="c"># 商品域：商品列表/详情/SKU/图集/购物车/详情缓存</span>
@@ -264,7 +264,7 @@
 │       └── config/                     <span class="c"># 装配层：Sa-Token / CORS / BCrypt / MQ / 线程池 / 调度</span>
 │   └── src/main/resources/
 │       ├── mapper/                     <span class="c"># 18 个手写 MyBatis XML（SQL 全在这里，可见可控）</span>
-│       └── <span class="h">db/migration/</span>              <span class="c"># ★ 表结构唯一权威：V1~V4 共 4 个 Flyway 脚本</span>
+│       └── <span class="h">db/migration/</span>              <span class="c"># ★ 表结构唯一权威：V1~V5 共 5 个 Flyway 脚本</span>
 ├── <span class="h">ai-service/</span>                        <span class="c"># ★ 唯一拆出去的服务：13 个 Java 类</span>
 │   └── src/main/java/com/aimall/ai/
 │       ├── rag/                        <span class="c"># HybridRagService（BM25 + 向量 + RRF 融合）</span>
@@ -434,7 +434,7 @@ public class AimallApplication {
           <tr><td><b>浏览器 / Vite</b></td><td>axios 拦截器统一挂 <code>sa-token</code> 头；Vite 把 <code>/api</code> 代理到网关 9000。<b>前端只认一个入口，不感知后端拆了几个服务。</b></td></tr>
           <tr><td><b>网关 9000</b></td><td><code>TraceIdGlobalFilter</code>（<code>@Order(-1)</code>，最先执行）生成或沿用 <code>X-Trace-Id</code>，加进下游请求头并回写响应头；按 <code>mall_api</code> 路由把 <code>/api/**</code> 转发到 <code>lb://mall-app</code>。<b>顺带把 <code>/internal/**</code> 一律返回 404</b>（内部接口不对公网暴露）。</td></tr>
           <tr><td><b>Servlet Filter</b></td><td><code>TraceIdFilter</code>（<code>HIGHEST_PRECEDENCE</code>）把 traceId 放进 <b>MDC</b>，让本进程所有日志都带上它；<code>finally</code> 里必须 <code>clear()</code>——线程池复用不清会串号。</td></tr>
-          <tr><td><b>Sa-Token 拦截器</b></td><td><code>SaInterceptor</code> 拦 <code>/api/**</code>，<b>默认全部需要登录</b>，只放行登录/注册/支付回调/内部接口。未登录抛 <code>NotLoginException</code> → 全局异常 → <code>R.fail(401)</code>。<b>放行 ≠ 裸奔</b>：回调靠验签、内部接口靠 HMAC 签名。</td></tr>
+          <tr><td><b>Sa-Token 拦截器</b></td><td><code>SaInterceptor</code> 拦 <code>/api/**</code>，<b>默认全部需要登录</b>，例外有三类：<b>完全公开</b>（登录/注册、支付回调、<code>/internal/**</code>、<code>/error</code>）、<b>匿名只读</b>（商品与笔记的 GET：列表/榜单精确匹配，详情要求前缀 + 纯数字 id）、其余一律校验登录。未登录抛 <code>NotLoginException</code> → 全局异常 → <code>R.fail(401)</code>。<b>放行 ≠ 裸奔</b>：回调靠验签、内部接口靠 HMAC 签名。</td></tr>
           <tr><td><b>Controller</b></td><td>薄薄一层：接 DTO（<code>@Valid</code> 校验）、取当前用户、调 Service、包 <code>R.ok(...)</code>。<b>不写业务逻辑。</b></td></tr>
           <tr><td><b>Service</b></td><td>业务的真正所在：<code>@Transactional</code> 事务边界 + 幂等 token 消费 + 逐项校验 + 行锁 CAS 扣库存 + 落单 + 发延迟消息（<b>afterCommit</b>）。</td></tr>
           <tr><td><b>Mapper → MySQL</b></td><td>XML 里手写 SQL；<code>UPDATE … WHERE id=? AND stock>=?</code> 由 InnoDB <b>行排他锁 + 条件更新</b>保证原子，返回 0 即库存不足。</td></tr>
@@ -503,9 +503,9 @@ public OrderVO create(CreateOrderRequest req) {
 
   <div class="card">
     <h3 class="card-title">24 张表 = V1:10 + V2:10 + V3:4 <span class="badge badge-familiar">熟悉</span></h3>
-    <p class="card-sub">核实：backend/src/main/resources/db/migration/ 下 V1~V4 各文件 CREATE TABLE 计数</p>
+    <p class="card-sub">核实：backend/src/main/resources/db/migration/ 下 V1~V5 各文件 CREATE TABLE 计数（V4 / V5 都不建表）</p>
 
-    <p><strong>一句话：</strong>表结构<b>只增不改</b>，由 Flyway 4 个迁移脚本管理；<code>V4</code> 不加表，只给 <code>t_payment</code> 加唯一索引 <code>uk_order_id</code>。<code>db/migration/</code> 是<b>唯一权威</b>，任何文档与它冲突以它为准。</p>
+    <p><strong>一句话：</strong>表结构<b>只增不改</b>，由 Flyway 5 个迁移脚本管理；<code>V4</code> 不加表，只给 <code>t_payment</code> 加唯一索引 <code>uk_order_id</code>；<code>V5</code> 也不加表，只给 <code>t_note</code> 加 <code>audit_version</code>、把 <code>t_audit_record</code> 的唯一键改成 4 列。<code>db/migration/</code> 是<b>唯一权威</b>，任何文档与它冲突以它为准。</p>
 
     <h4>用户域（2 张）</h4>
     <div class="tbl-wrap small">
@@ -534,12 +534,12 @@ public OrderVO create(CreateOrderRequest req) {
       <table>
         <thead><tr><th style="width:190px">表</th><th>一句话职责</th><th style="width:110px">来源</th></tr></thead>
         <tbody>
-          <tr><td><code>t_note</code></td><td>种草笔记主表（正文/状态/审核结果/热度分与各类计数）。</td><td>V2</td></tr>
+          <tr><td><code>t_note</code></td><td>种草笔记主表（正文/状态/审核结果/热度分与各类计数）；<code>audit_version</code> 审核版本号由 V5 迁移新增，发布=1、重新送审 +1。</td><td>V2 / V5</td></tr>
           <tr><td><code>t_note_image</code> / <code>t_note_tag</code></td><td>笔记的图片列表与标签。</td><td>V2</td></tr>
           <tr><td><code>t_note_product</code></td><td><b>种草关联商品</b>——内容域与商品域的衔接点（"笔记详情页去购买"靠它）。</td><td>V2</td></tr>
           <tr><td><code>t_note_like</code> / <code>t_note_collect</code></td><td>点赞 / 收藏；<code>uk(note_id,user_id)</code> 联合唯一索引<b>天然幂等</b>，物理拒绝重复。</td><td>V2</td></tr>
           <tr><td><code>t_user_follow</code> <span class="badge badge-red">零代码使用</span></td><td><b>关注关系表——建了但从未使用。</b>关注流从未实现，属 V5 规划。被问到要诚实说"预留表，关注流没做"。</td><td>V2</td></tr>
-          <tr><td><code>t_audit_record</code></td><td>审核流水，配合 MQ 异步审核写回结果。</td><td>V2</td></tr>
+          <tr><td><code>t_audit_record</code></td><td>审核流水，配合 MQ 异步审核写回结果；唯一键 <code>uk_biz(biz_type, biz_id, biz_version, status)</code>（V5 把 <code>status</code> 纳入，使 <code>ERROR</code> 不占用终态幂等位）。</td><td>V2 / V5</td></tr>
           <tr><td><code>t_knowledge_doc</code> / <code>t_knowledge_chunk</code></td><td>RAG 语料：文档与其分块（含 embedding），来源是商品说明书 + 种草笔记。</td><td>V2</td></tr>
         </tbody>
       </table>
@@ -578,10 +578,11 @@ public OrderVO create(CreateOrderRequest req) {
     </div>
 
     <div class="redline">
-      <b>三条必须记住的诚实边界：</b>
+      <b>四条必须记住的诚实边界：</b>
       ① <code>t_user_follow</code> <b>表存在但零代码使用</b>（<code>grep t_user_follow</code> 无任何 Java/XML 引用）；
       ② <code>t_product_sku.version</code> 与 <code>t_order.version</code> 都是<b>预留字段、从未参与比对</b>；
-      ③ <code>V4</code> 迁移<b>不加表</b>，只删历史重复支付单 + 加唯一索引。
+      ③ <code>V4</code> 迁移<b>不加表</b>，只删历史重复支付单 + 加唯一索引；
+      ④ <code>V5</code> 迁移也<b>不加表</b>，只做 ALTER（加 <code>t_note.audit_version</code> + 改 <code>t_audit_record</code> 唯一键）——所以表数仍是 24。
     </div>
     <details class="lvl mech">
       <summary>机制与代码：为什么"只增不改"</summary>
@@ -594,7 +595,7 @@ public OrderVO create(CreateOrderRequest req) {
 --      要改表结构请新增 V2__xxx.sql、V3__xxx.sql……
 --   3. 不使用 DROP TABLE —— 迁移脚本必须是"向前"的，删表另写迁移。</code></pre>
         </div>
-        <p>V4 正是这条约定的样板：它不建表，只做一次"清理 + 加索引"，把并发双击产生的重复支付单收拾干净后建立 <code>uk_order_id</code>。</p>
+        <p>V4 与 V5 正是这条约定的样板：两者都不建表，只做一次"清理或调整"——V4 把并发双击产生的重复支付单收拾干净后建立 <code>uk_order_id</code>；V5 给 <code>t_note</code> 加审核版本号、并把 <code>t_audit_record</code> 的唯一键从 3 列扩成 4 列（列变多只会更宽松，不会让存量数据违例）。</p>
       </div>
     </details>
     <details class="lvl talk">
@@ -602,7 +603,7 @@ public OrderVO create(CreateOrderRequest req) {
       <div class="lvl-body">
         <div class="callout talk">
           <span class="ct">30 秒版本</span>
-          "数据库一共 <b>24 张表</b>，由 Flyway 的 <b>4 个迁移脚本</b>管理：V1 十张打底（用户/商品/订单/会话），V2 十张做内容社区和 RAG 语料，V3 四张做支付和限量发售，V4 不加表、只加了一个唯一索引兜支付幂等。
+          "数据库一共 <b>24 张表</b>，由 Flyway 的 <b>5 个迁移脚本</b>管理：V1 十张打底（用户/商品/订单/会话），V2 十张做内容社区和 RAG 语料，V3 四张做支付和限量发售，V4 不加表、只加了一个唯一索引兜支付幂等，V5 也不加表——它给笔记加了审核版本号、并把审核流水的唯一键扩成四列，修掉一个幂等键退化导致的确定性缺陷。
           我在设计上坚持<b>表结构只增不改</b>，因为 Flyway 会校验 checksum，改历史脚本等于让所有人启动失败——这也是为什么我特意保留了 <code>version</code> 这种'当前没用到'的字段：它是我明确标注过的预留，不是我忘了删。"
         </div>
         <div class="callout warn">

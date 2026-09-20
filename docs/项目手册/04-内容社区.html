@@ -44,14 +44,14 @@
         <tr><th style="width:170px">表名</th><th>一句话职责</th><th style="width:250px">关键约束 / 索引</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>t_note</code></td><td><b>笔记主表</b>：标题/正文/状态机 + 三个冗余计数 + 中文全文索引</td><td>PK <code>id</code> · <code>idx(status, created_at)</code> · <code>idx(hot_score)</code> · <code>FULLTEXT(title, content) ngram</code></td></tr>
+        <tr><td><code>t_note</code></td><td><b>笔记主表</b>：标题/正文/状态机（含 <code>audit_version</code> 审核版本号，V5 迁移新增）+ 三个冗余计数 + 中文全文索引</td><td>PK <code>id</code> · <code>idx(status, created_at)</code> · <code>idx(hot_score)</code> · <code>FULLTEXT(title, content) ngram</code></td></tr>
         <tr><td><code>t_note_image</code></td><td>图集：一篇最多 9 张，<code>sort</code> 小的在前；列表页的封面 = 最小的那张</td><td><code>idx_note(note_id)</code></td></tr>
         <tr><td><code>t_note_tag</code></td><td>标签：独立表，不是主表加一个 JSON 列</td><td><code>idx_note</code> · <code>idx_tag</code></td></tr>
         <tr><td><code>t_note_product</code></td><td><b>种草清单</b>：笔记 ↔ 商品的关联表，还带一句推荐语</td><td><code>idx_note</code> · <code>idx_product</code></td></tr>
         <tr><td><code>t_note_like</code></td><td>点赞关系（谁赞了哪篇）</td><td><b>UNIQUE <code>uk_note_user(note_id, user_id)</code></b></td></tr>
         <tr><td><code>t_note_collect</code></td><td>收藏关系，与点赞表同构</td><td><b>UNIQUE <code>uk_note_user(note_id, user_id)</code></b></td></tr>
         <tr><td><code>t_user_follow</code></td><td>关注关系。<b>表已建、零代码使用</b>——关注流属于 V5 规划</td><td>UNIQUE <code>uk_user_follow(user_id, follow_user_id)</code></td></tr>
-        <tr><td><code>t_audit_record</code></td><td><b>审核流水</b>：AI 原始返回留痕（可翻案、可人工复核）</td><td><b>UNIQUE <code>uk_biz(biz_type, biz_id, biz_version)</code></b></td></tr>
+        <tr><td><code>t_audit_record</code></td><td><b>审核流水</b>：AI 原始返回留痕（可翻案、可人工复核）</td><td><b>UNIQUE <code>uk_biz(biz_type, biz_id, biz_version, status)</code></b>（<code>status</code> 是 V5 加进去的，见 4.9）</td></tr>
         <tr><td><code>t_knowledge_doc</code></td><td>RAG 文档头：一份说明书 / 一篇笔记对应一行</td><td>UNIQUE <code>uk_source(source_type, ref_id)</code></td></tr>
         <tr><td><code>t_knowledge_chunk</code></td><td>RAG 切片：正文切成小段 + 向量（JSON 数组）</td><td><code>idx_doc</code> · <code>FULLTEXT(content) ngram</code></td></tr>
       </tbody>
@@ -717,30 +717,40 @@ public Queue auditQueue() {
           <div class="flow-node"><span class="n">3</span><span class="d">AI 调用失败 → 记 ERROR 流水，笔记停留 AUDITING 等人工，绝不误杀内容。</span></div>
         </div>
         <div class="codeblock">
-          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:67-100（submit 与本地降级）</span></div>
+          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:93-142（submit → afterCommit → 本地降级）</span></div>
           <pre><code>@Override
 public void submit(Note note) {
-    AuditMessage msg = new AuditMessage(note.getId(), 1);
+    Long noteId = note.getId();
+    int version = versionOf(note);   // 版本号来自 t_note.audit_version，绝不硬编码
+    // ★ 事务提交后再投递：交给全项目唯一的 afterCommit 出口
+    AfterCommitExecutor.run("审核消息 noteId=" + noteId, () -&gt; doSubmit(noteId, version));
+}
+
+/** 真正的投递（已处于事务提交后）：优先 MQ，不可用降级本地线程池 */
+private void doSubmit(Long noteId, int version) {
+    AuditMessage msg = new AuditMessage(noteId, version);
     RabbitTemplate rabbit = rabbitTemplateProvider.getIfAvailable();
     if (rabbit != null) {
         try {
-            rabbit.convertAndSend(AuditMqConfig.EXCHANGE,
-                    AuditMqConfig.AUDIT_ROUTING_KEY, msg);
-            log.info("审核消息已入队 noteId={}", note.getId());
+            rabbit.convertAndSend(AuditMqConfig.EXCHANGE, AuditMqConfig.AUDIT_ROUTING_KEY, msg);
             return;
         } catch (AmqpException e) {
-            // MQ 不可用（未启动/断连）：不炸发布接口，降级本地线程池
             log.warn("MQ 不可用，审核降级为本地线程池异步: {}", e.getMessage());
         }
     }
-    submitLocal(note.getId());
+    submitLocal(noteId, version);
 }
+
 /** 本地降级路径：手动提交（不用 @Async，因为类内自调用不走代理、注解会失效） */
-private void submitLocal(Long noteId) {
+private void submitLocal(Long noteId, int version) {
     taskExecutor.execute(() -&gt; {
         try {
             Note note = noteMapper.selectById(noteId);
-            if (note != null) { auditOnce(note); }
+            if (note == null) {
+                log.warn("本地异步审核跳过：笔记已不存在 noteId={}", noteId);   // 修复前这一步是静默的
+                return;
+            }
+            auditOnce(note, version);
         } catch (Exception e) {
             log.error("本地异步审核失败 noteId={}: {}", noteId, e.getMessage(), e);
         }
@@ -752,42 +762,68 @@ private void submitLocal(Long noteId) {
           <table>
             <thead><tr><th style="width:80px">防线</th><th>机制（真实代码）</th><th>挡什么</th></tr></thead>
             <tbody>
-              <tr><td><b>①</b></td><td>流水表 <code>uk(biz_type, biz_id, biz_version)</code> + <code>INSERT IGNORE</code> 返回 0 行 → 直接返回</td><td>MQ 重复投递（最常见）</td></tr>
+              <tr><td><b>①</b></td><td>流水表 <code>uk(biz_type, biz_id, biz_version, status)</code> + <code>INSERT IGNORE</code> 返回 0 行 → 直接返回</td><td>MQ 重复投递（最常见）</td></tr>
               <tr><td><b>②</b></td><td>笔记状态机条件更新：<code>WHERE id=? AND status='AUDITING'</code>，返回 0 行说明已被别人改过 → 忽略</td><td>并发审核 / 编辑后重审</td></tr>
-              <tr><td><b>③</b></td><td>AI 失败只记 <code>ERROR</code> 流水、<b>不动笔记状态</b>，停 <code>AUDITING</code> 等人工</td><td><b>不误杀</b>——宁可不作为，不可乱作为</td></tr>
+              <tr><td><b>③</b></td><td>AI 失败只记 <code>ERROR</code> 流水、<b>不动笔记状态</b>，停 <code>AUDITING</code> 等补偿任务重试</td><td><b>不误杀</b>——宁可不作为，不可乱作为</td></tr>
             </tbody>
           </table>
         </div>
 
-        <div class="callout danger">
-          <span class="ct">已知缺陷（2026-09-20 代码复核发现，别把它当成完美设计）</span>
-          第 ① 与第 ③ 条组合起来<b>有个洞</b>：<code>uk_biz</code> 的唯一键是
-          <code>(biz_type, biz_id, biz_version)</code>，而 <b>biz_version 永远是 1</b>
-          （<code>AuditMessage</code> 声明了这个字段但消费端<code>只打日志不传递</code>，
-          <code>auditOnce</code> 内部写死 1，项目也没有"编辑笔记"接口去 +1）。于是：<br>
-          · 一次 <code>ERROR</code> 流水、或一次 <code>REJECT</code> 判定，就<b>永久占用</b>了这篇笔记的幂等额度；<br>
-          · 之后任何重审（定时补偿 / <code>/resubmit</code>）走到 <code>INSERT IGNORE</code> 都返回 0 →
-          <code>return</code> → <b>状态永不流转</b>，日志只有一行 <code>INFO 重复审核消息（幂等跳过）</code>，看不出是故障；<br>
-          · <code>/resubmit</code> 还要求 <code>status == REJECTED</code>，而此时笔记是 <code>AUDITING</code>，<b>接口层面也救不了</b>。<br>
-          <b>结果</b>：被驳回或报错过的笔记会<b>永久卡在 AUDITING</b>，只能手工删审核流水。
-          所以被问到"AI 审核失败怎么办"时，<b>不要只答"停 AUDITING 等人工"就收尾</b>——
-          主动补一句"这个补偿通道我复盘时发现被幂等键挡住了，是个待修缺陷"，反而是加分。
-          完整复核见 <code>docs/复核-审核MQ竞态-20260920.md</code>。
+        <div class="callout ok">
+          <span class="ct">已修复（2026-09-20 复核发现的问题，已随 V5 迁移 + 审核链路改造修完）</span>
+          复核发现第 ① 与第 ③ 条组合起来<b>曾有一个洞</b>：<code>uk_biz</code> 当时是
+          <code>(biz_type, biz_id, biz_version)</code>，而 <b>biz_version 恒为 1</b>
+          （<code>AuditMessage</code> 声明了该字段却没往下传，<code>auditOnce</code> 内部写死 1）。
+          于是一次 <code>ERROR</code> 流水或一次 <code>REJECT</code> 判定，就<b>永久占用</b>了这篇笔记的幂等额度；
+          之后任何重审（定时补偿 / <code>/resubmit</code>）走到 <code>INSERT IGNORE</code> 都返回 0 →
+          <code>return</code> → 状态永不流转，被驳回或报错过的笔记会卡在 <code>AUDITING</code>。<br>
+          <b>三处修复（即上面这段代码现在的样子）：</b>
+          <b>①</b> <code>t_note</code> 新增 <code>audit_version</code>（发布=1，每次重新送审 +1）并随消息传递，
+          <code>auditOnce(Note note, int version)</code> 参数化——幂等键不再退化成常量；
+          <b>②</b> 唯一键纳入 <code>status</code>，即 <code>uk_biz(biz_type, biz_id, biz_version, status)</code>——
+          <code>ERROR</code> 不算审核结论，不再占用终态幂等位（<code>V5__note_audit_version.sql</code>）；
+          <b>③</b> <code>submit()</code> 改由 <code>AfterCommitExecutor</code> 在<b>事务提交后</b>投递，
+          消费端回查不会再读到"还没提交的笔记"。<br>
+          <b>面试可以这样讲：</b>"我的审核幂等键是 <code>(biz_type, biz_id, biz_version, status)</code>。
+          版本号来自 <code>t_note.audit_version</code>：发布=1，每次重新送审 +1。
+          所以它区分的是『同一次审核的 MQ 重投』和『用户改完内容后的新一次审核』——前者应该被幂等挡掉，后者必须真正执行。
+          把 <code>status</code> 也放进键里，是因为 <code>ERROR</code> 只表示『这次没审成』，
+          它不该消耗掉这篇内容的审核额度。"<br>
+          这样答既讲了幂等设计，也讲了"我知道这个键保护的到底是什么语义"。
+          完整复核过程（修复前的原始结论）见 <code>docs/复核-审核MQ竞态-20260920.md</code>，该文末尾已追加修复对照。
         </div>
         <div class="codeblock">
-          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:121-137（防线 ① 与 ②）</span></div>
-          <pre><code>// 幂等第一道防线：INSERT IGNORE 撞 uk(biz,biz,version) 返回 0 → 已处理过，直接返回
-int rows = saveRecord(note.getId(), 1,
-        verdict.pass() ? AuditRecord.STATUS_PASS : AuditRecord.STATUS_REJECT, ...);
-if (rows == 0) {
-    log.info("重复审核消息（幂等跳过）noteId={}", note.getId());
-    return;
-}
-// 幂等第二道防线：状态机条件更新（WHERE status='AUDITING'）
-// 重试/重投时笔记可能已流转，返回 0 行属正常
-String newStatus = verdict.pass() ? Note.STATUS_PUBLISHED : Note.STATUS_REJECTED;
-int updated = noteMapper.updateStatus(note.getId(),
-        Note.STATUS_AUDITING, newStatus, verdict.reason());</code></pre>
+          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:159-209（防线 ① 与 ②，含 version 参数）</span></div>
+          <pre><code>@Override
+public void auditOnce(Note note, int version) {
+    String input = note.getTitle() + "\n" + note.getContent();
+    AuditAiClient.AuditVerdict verdict;
+    try {
+        verdict = auditAiClient.review(input);
+    } catch (Exception e) {
+        // AI 挂了：记 ERROR 流水、笔记停留 AUDITING 等补偿重试，绝不误杀内容。
+        // ERROR 与终态结论同版本但 status 不同，不会占用终态幂等位（V5 修复）
+        log.error("AI 审核调用失败 noteId={} version={}: {}", note.getId(), version, e.getMessage());
+        if (Note.STATUS_AUDITING.equals(note.getStatus())) {
+            saveRecord(note.getId(), version, AuditRecord.STATUS_ERROR,
+                    Map.of("error", String.valueOf(e.getMessage())));
+        }
+        return;
+    }
+    // 幂等第一道防线：INSERT IGNORE 撞 uk(biz,biz_id,biz_version,status) 返回 0
+    // → 该版本、该结论已落过流水，属重复投递，直接返回
+    int rows = saveRecord(note.getId(), version,
+            verdict.pass() ? AuditRecord.STATUS_PASS : AuditRecord.STATUS_REJECT, ...);
+    if (rows == 0) {
+        log.info("重复审核消息（幂等跳过）noteId={} version={}", note.getId(), version);
+        return;
+    }
+    // 幂等第二道防线：状态机条件更新（WHERE status='AUDITING'）
+    // 重试/重投时笔记可能已流转，返回 0 行属正常
+    String newStatus = verdict.pass() ? Note.STATUS_PUBLISHED : Note.STATUS_REJECTED;
+    int updated = noteMapper.updateStatus(note.getId(),
+            Note.STATUS_AUDITING, newStatus, verdict.reason());
+}</code></pre>
         </div>
         <p>审核通过后还有一步「进语料」：<code>ragIndexService.index(SOURCE_NOTE, ...)</code> 把这篇笔记送进 RAG 知识库，失败只打 WARN 不影响发布（索引可补建）——这就是内容社区「用户内容养 AI」的那条飞轮的接线处。</p>
       </div>
@@ -797,13 +833,13 @@ int updated = noteMapper.updateStatus(note.getId(),
       <div class="lvl-body">
         <div class="callout talk">
           <span class="ct">30 秒版本</span>
-          "笔记发布我做成了<b>发布秒回 + 异步审核</b>。AI 审核一次要 3~10 秒，如果同步做，用户点发布要挂 10 秒，体验直接崩。我的做法是：发布接口只把笔记落库成 <code>AUDITING</code> 就立刻返回，审核走 RabbitMQ 异步。<b>MQ 拓扑是 DirectExchange + 一个 durable 队列 + 一个死信队列，路由键 <code>note.audit</code>；用 Direct 是因为当前只有一种消息，按需演进不预支复杂度</b>。消费端有三道幂等防线：流水表的版本唯一键 <code>INSERT IGNORE</code> 挡 MQ 重投，笔记状态机的条件更新挡并发，AI 失败只记 ERROR 流水、让笔记停在审核中不误杀。<b>MQ 不可用时会自动降级到本地线程池，发布照常秒回</b>——这是项目『零依赖能启动』的硬约束。"
+          "笔记发布我做成了<b>发布秒回 + 异步审核</b>。AI 审核一次要 3~10 秒，如果同步做，用户点发布要挂 10 秒，体验直接崩。我的做法是：发布接口只把笔记落库成 <code>AUDITING</code> 就立刻返回，审核走 RabbitMQ 异步，且<b>消息在事务提交之后才投递</b>（<code>AfterCommitExecutor</code> 统一出口）——否则消费者会先于事务提交去回查，读不到那行笔记就判定"不存在"把消息丢掉。<b>MQ 拓扑是 DirectExchange + 一个 durable 队列 + 一个死信队列，路由键 <code>note.audit</code>；用 Direct 是因为当前只有一种消息，按需演进不预支复杂度</b>。消费端有三道幂等防线：流水表的唯一键 <code>uk(biz_type, biz_id, biz_version, status)</code> + <code>INSERT IGNORE</code> 挡 MQ 重投（版本号来自 <code>t_note.audit_version</code>，发布=1、<b>重新送审 +1</b>，所以"同一次重投"被挡、"新一次审核"能执行），笔记状态机的条件更新挡并发，AI 失败只记 ERROR 流水、让笔记停在审核中不误杀（<b><code>ERROR</code> 不在终态幂等位上，补偿任务能救回来</b>）。<b>MQ 不可用时会自动降级到本地线程池，发布照常秒回</b>——这是项目『零依赖能启动』的硬约束。"
         </div>
         <div class="callout warn">
           <span class="ct">别说错</span>
           <b>① 不要说「用 MQ 是因为它快」</b>——MQ 不减少总耗时，它换的是<b>让用户不必等</b>，并把失败重试的能力带上。说清「异步解耦 + 失败可重试」。<br>
           <b>② 不要说「审核失败会一直重试直到成功」</b>——本项目消费端<b>吞异常 ACK、不重入队</b>，因为 AI 服务挂掉时重试一万次也不会成功，只会打爆日志；兜底是 ERROR 流水 + 死信队列。这条口径必须与 05 页一致。<br>
-          <b>③ 不要吹「事务里发消息保证一致」</b>——MQ 不参与 DB 事务，事务内发消息永远有「回滚了但消息已飞」的窗口。本项目把 <code>submit</code> 放在事务边界之后调用，正是为了避开「消费者先于事务提交读到空笔记」的竞态。<br>
+          <b>③ 不要吹「事务里发消息保证一致」</b>——MQ 不参与 DB 事务，事务内发消息永远有「回滚了但消息已飞」的窗口。笔记发布这条链路<b>已经真的改成了 afterCommit 投递</b>（<code>AfterCommitExecutor</code>，全项目唯一出口），正是为了避开「消费者先于事务提交读到空笔记」的竞态——这一点可以主动讲，但要<b>说清它仍是"尽力而为 + 补偿兜底"，不是强一致</b>。<br>
           <b>④ 分布式/可靠性细节不要在本页硬答</b>——被追问 confirm/returns、死信重投、补偿任务，直接说「这部分在可靠性设计里我按发送端/Broker/消费端三段做」，然后展开到 05 页那套内容。
         </div>
       </div>

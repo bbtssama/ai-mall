@@ -439,15 +439,15 @@
         <tr><th style="width:200px">指标</th><th style="width:120px">数字</th><th>口径说明（被追问时补）</th></tr>
       </thead>
       <tbody>
-        <tr><td>Java 文件</td><td><b>191 个</b></td><td>backend 176 + ai-service 13 + gateway 2</td></tr>
+        <tr><td>Java 文件</td><td><b>192 个</b></td><td>backend 177 + ai-service 13 + gateway 2</td></tr>
         <tr><td>Controller</td><td><b>14 个</b></td><td>backend 13 + ai-service 1</td></tr>
-        <tr><td>数据库表</td><td><b>24 张</b></td><td>V1 十张 + V2 十张 + V3 四张，V4 只加唯一索引</td></tr>
-        <tr><td>Flyway 迁移</td><td><b>4 个</b></td><td>V1__init / V2__content_and_rag / V3__pay_and_drop / V4__payment_order_unique</td></tr>
+        <tr><td>数据库表</td><td><b>24 张</b></td><td>V1 十张 + V2 十张 + V3 四张，V4 只加唯一索引，V5 只 ALTER（都不建表）</td></tr>
+        <tr><td>Flyway 迁移</td><td><b>5 个</b></td><td>V1__init / V2__content_and_rag / V3__pay_and_drop / V4__payment_order_unique / V5__note_audit_version</td></tr>
         <tr><td>单元测试</td><td><b>26 个用例 / 6 个测试类</b></td><td>全 mock、纯内存、毫秒级，CI 不连库</td></tr>
         <tr><td>网关路由</td><td><b>4 条</b></td><td>mall_api / mall_files / mall_actuator / deny_internal（<b>无 ai-service 路由</b>）</td></tr>
         <tr><td>MQ 队列</td><td><b>3 组交换机 · 7 个队列</b></td><td>3 业务队列 + 3 死信队列 + 1 延迟转运队列</td></tr>
         <tr><td>业务域</td><td><b>6 个</b></td><td>user / goods / content / order / pay / voice</td></tr>
-        <tr><td>版本状态</td><td><b>V1~V4 全部落地</b></td><td>V5 未开始，面试一律说"规划中"</td></tr>
+        <tr><td>版本状态</td><td><b>V1~V4 全部落地</b></td><td>V5（关注流等）未开始，面试一律说"规划中"；注意迁移目录里的 <code>V5__note_audit_version</code> 是审核缺陷修复，不是产品 V5</td></tr>
       </tbody>
     </table>
   </div>

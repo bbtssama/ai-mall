@@ -20,7 +20,7 @@
     <div class="head-meta">
       <span class="badge badge-ver">阅读约 25 分钟</span>
       <span class="badge badge-star">面试权重 ★★</span>
-      <span class="badge badge-gray">4 个迁移 / 6 个测试类 / 网关 4 条路由</span>
+      <span class="badge badge-gray">5 个迁移 / 6 个测试类 / 网关 4 条路由</span>
     </div>
   </header>
 
@@ -57,7 +57,8 @@
               <tr><td><code>V1__init.sql</code></td><td>V1 的 10 张表初始结构（文件头写着"本文件是数据库结构的唯一权威来源"）</td></tr>
               <tr><td><code>V2__content_and_rag.sql</code></td><td>内容社区 + 审核流水 + RAG 知识库（含 ngram 全文索引）</td></tr>
               <tr><td><code>V3__pay_and_drop.sql</code></td><td>支付 + 限量发售</td></tr>
-              <tr><td><code>V4__payment_order_unique.sql</code></td><td>给 <code>t_payment.order_id</code> 加唯一索引（"一订单一活单"）</td></tr>
+              <tr><td><code>V4__payment_order_unique.sql</code></td><td>给 <code>t_payment.order_id</code> 加唯一索引（"一订单一活单"）——只 ALTER 不建表</td></tr>
+              <tr><td><code>V5__note_audit_version.sql</code></td><td>审核链路一致性修复：给 <code>t_note</code> 加 <code>audit_version</code>，并把 <code>t_audit_record</code> 的唯一键改成 <code>(biz_type, biz_id, biz_version, status)</code>——同样只 ALTER 不建表（所以表数仍 24）</td></tr>
             </tbody>
           </table>
         </div>

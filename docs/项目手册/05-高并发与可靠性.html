@@ -920,7 +920,7 @@ public void like(Long noteId, boolean liked) {
     return toVO(p, router.resolve(channel));
 }</code></pre>
         </div>
-        <p><b>③ INSERT IGNORE（审核流水去重）：</b><code>t_audit_record</code> 的 <code>uk_biz(biz_type, biz_id, biz_version)</code> + <code>INSERT IGNORE</code>，第二次插返回 0 行 → 直接跳过（AuditServiceImpl.java:121-130）。</p>
+        <p><b>③ INSERT IGNORE（审核流水去重）：</b><code>t_audit_record</code> 的 <code>uk_biz(biz_type, biz_id, biz_version, status)</code> + <code>INSERT IGNORE</code>，第二次插返回 0 行 → 直接跳过（AuditServiceImpl.java:180-190）。注意键里含 <code>status</code>：<code>ERROR</code> 与终态结论不共用幂等位，否则一次 AI 超时就会永久堵死这篇笔记的重审（V5 迁移修掉的就是这个）。</p>
         <div class="callout ok">
           <span class="ct">金句：同一招（撞唯一键），四种处置方式按业务语义选</span>
           <b>点赞/收藏</b>（<b>状态确认</b>型）→ <b>静默幂等</b>：重复 = 目标状态已达成，报错反而让前端红心变脏。<br>
@@ -1147,7 +1147,7 @@ public OrderVO create(CreateOrderRequest req) {
       <summary>机制与代码：回查 + 用最新态做条件更新</summary>
       <div class="lvl-body">
         <div class="codeblock">
-          <div class="cb-head"><span class="fn">content/mq/AuditConsumer.java</span><span class="loc">:35-54（消息只带 noteId，消费时回查）</span></div>
+          <div class="cb-head"><span class="fn">content/mq/AuditConsumer.java</span><span class="loc">:35-68（消息只带 noteId，消费时回查）</span></div>
           <pre><code>@RabbitListener(queues = AuditMqConfig.AUDIT_QUEUE)
 public void onAuditMessage(AuditMessage msg,
                            @Header(name = AmqpHeaders.RECEIVED_ROUTING_KEY, required = false) String routingKey) {
@@ -1156,11 +1156,21 @@ public void onAuditMessage(AuditMessage msg,
         // 消息只带 id：消费时回查最新内容（消息在队列里期间笔记可能已被编辑）
         Note note = noteMapper.selectById(msg.noteId());
         if (note == null) {
-            log.warn("笔记不存在，丢弃消息 noteId={}", msg.noteId());
+            log.warn("笔记不存在，丢弃消息 noteId={} version={}（发送侧已 afterCommit，出现即代表异常）",
+                    msg.noteId(), msg.bizVersion());
             return;   // 正常 ACK：不存在的笔记重试一万次也不存在
         }
+        // ★ 版本校验：消息可能是"过期消息"——ACK 丢失被 Broker 重投，而用户期间已重新送审。
+        //   不校验就会用【旧版本号】去审【最新内容】，把结论记到错误的版本上。
+        int currentVersion = note.getAuditVersion() == null ? 1 : note.getAuditVersion();
+        if (msg.bizVersion() != currentVersion) {
+            log.info("过期审核消息，丢弃 noteId={} msgVersion={} currentVersion={}",
+                    msg.noteId(), msg.bizVersion(), currentVersion);
+            return;
+        }
         // 幂等防线在 auditOnce 内部（版本唯一键 + 状态机条件更新）
-        auditService.auditOnce(note);
+        // ★ 版本号必须从消息带下去，不能硬编码
+        auditService.auditOnce(note, msg.bizVersion());
     } catch (Exception e) {
         log.error("审核消费失败（已记流水，消息 ACK 不重试）noteId={}: {}",
                 msg.noteId(), e.getMessage(), e);
@@ -1171,7 +1181,7 @@ public void onAuditMessage(AuditMessage msg,
         <p><b>削峰链路同理：</b><code>DropOrderExecutor.createDropOrder</code> 的金额<b>回查 DB 的 <code>act.getDropPrice()</code>，不信任消息体</b>（DropOrderExecutor.java:109-114）——消息里只带 <code>activityId / userId / quantity</code>。</p>
         <p><b>回查 + CAS 的闭环（四种手段之间的关系）：</b><b>回查解决「读到最新态」，CAS 解决「改不重复」，二者缺一不可。</b>只回查不 CAS——两个消费者同时回查到 <code>PENDING_PAY</code>，都会去取消，库存回补两次（虚增）；只 CAS 不回查——消息里带的状态是旧的，可能拿旧值去当闸门。<b>所以最终幂等靠「回查最新态 → 用最新态做条件更新」这一对动作共同保证。</b></p>
         <p><b>代价（诚实说）：</b>① 多一次 DB 查询——但比「审错版本 / 重复取消」便宜得多；② 实体可能已不存在——所以必须有 <code>note == null → log.warn + 正常 ACK 丢弃</code>（重试一万次也不存在，别浪费消费能力）；③ 消费逻辑依赖 DB 可用。</p>
-        <p><b>细节加分：</b><code>AuditMessage(note.getId(), 1)</code> 里的 <code>version=1</code> 是<b>审核业务版本</b>（不是并发版本号），进 <code>uk_biz(biz_type, biz_id, biz_version)</code> 用于<b>流水去重</b>——它是「防止同一版本被审两次」的钥匙，不是消息内容的一部分。</p>
+        <p><b>细节加分：</b>消息里的 <code>bizVersion</code> 是<b>审核业务版本</b>（不是并发版本号），来自 <code>t_note.audit_version</code>（发布=1，每次重新送审 +1），进 <code>uk_biz(biz_type, biz_id, biz_version, status)</code> 用于<b>流水去重</b>——它是「区分『同一次审核的 MQ 重投』与『改完内容后的新一次审核』」的钥匙。消费端还会先比对消息版本与笔记当前版本，<b>过期消息直接丢弃</b>，避免用旧版本号去审新内容。</p>
       </div>
     </details>
 
@@ -1299,9 +1309,9 @@ public RabbitTemplateCustomizer reliableRabbitTemplate() {
 
   <div class="card">
     <h3 class="card-title">事务回滚了，消息已经飞出去 <span class="badge badge-master">掌握</span></h3>
-    <p class="card-sub">对应代码：<code>OrderDelayMessageSender.java:42-55</code> · <code>OrderServiceImpl.create:127-132</code> · <code>DropOrderExecutor.createDropOrder:128</code></p>
+    <p class="card-sub">对应代码：<code>common/tx/AfterCommitExecutor.java</code> · <code>order/mq/OrderDelayMessageSender.java:42-55</code> · <code>OrderServiceImpl.create:127-132</code> · <code>DropOrderExecutor.createDropOrder:128</code> · <code>AuditServiceImpl.submit:93-121</code></p>
 
-    <p><strong>一句话：</strong><b>MQ 不参与 DB 事务。</b>如果在 <code>@Transactional</code> 方法体里直接 <code>convertAndSend</code>，事务后面回滚了，消息却已经飞出去了——30 分钟后消费者查到的是一个<b>「幽灵订单」</b>（订单不存在或状态不对）。项目的解法是 <code>sendAfterCommit</code>：<b>把发送动作注册到事务提交之后</b>。</p>
+    <p><strong>一句话：</strong><b>MQ 不参与 DB 事务。</b>如果在 <code>@Transactional</code> 方法体里直接 <code>convertAndSend</code>，事务后面回滚了，消息却已经飞出去了——30 分钟后消费者查到的是一个<b>「幽灵订单」</b>（订单不存在或状态不对）。项目的解法是 <b>afterCommit 注册</b>：<b>把发送动作注册到事务提交之后</b>。这条链路现在收敛成<b>全项目唯一的出口</b> <code>AfterCommitExecutor.run(what, action)</code>（<code>common/tx/</code>），订单延迟消息与<span>内容审核消息都走它</span>。</p>
 
     <div class="callout analogy">
       <span class="ct">打个比方</span>
@@ -1322,10 +1332,10 @@ public RabbitTemplateCustomizer reliableRabbitTemplate() {
             <p>本项目消费端有 null/状态防御所以后果较轻，但这仍是反模式——<b>正确的做法不是「消费端兜住」，而是「根本不发」</b>。</p>
           </div>
           <div class="good">
-            <h5>本项目：sendAfterCommit</h5>
+            <h5>本项目：afterCommit 注册（统一出口 <code>AfterCommitExecutor</code>）</h5>
             <p>1. 事务内只<b>注册同步回调</b>，不发消息</p>
             <p>2. 事务提交成功 → Spring 回调 <code>afterCommit()</code></p>
-            <p>3. 此时才 <code>sendNow(orderId)</code></p>
+            <p>3. 此时才真正投递（审核链路是 <code>doSubmit()</code>，订单链路是 <code>sendNow()</code>）</p>
             <p>4. 若事务回滚 → <code>afterCommit</code> 不执行 → <b>消息从未发出</b></p>
             <p>代价：提交成功、发送前进程崩溃仍会丢消息 → 由补偿任务分钟级收敛兜底。</p>
           </div>
@@ -1373,7 +1383,8 @@ public void sendNow(Long orderId) {
           </table>
         </div>
         <p><b>判断依据是业务语义：</b>订单超时取消是「<b>尽力而为 + 对账收敛</b>」——订单多挂 5 分钟完全可接受，不值得为它引入本地消息表；<b>资金类（如扣款通知）才需要必达</b>，那时才升级。诚实交代残余窗口：「我清楚 afterCommit 有崩溃窗口，所以这是最终一致而不是强一致。」</p>
-        <p><b>另一个同源坑（V2 踩过）：</b>发布笔记在 <code>@Transactional</code> 里调 <code>AuditService.submit</code> 发 MQ——消费者可能在事务提交前回查（查不到笔记 = 幽灵消息）。V2 的解法是把 <code>submit</code> 放在事务边界之后调用；V3 的订单延迟消息升级为 afterCommit 注册——同一问题的标准解法。</p>
+        <p><b>另一个同源坑（V2 审核链路，已升级为同一出口）：</b>发布笔记在 <code>@Transactional</code> 里调 <code>AuditService.submit</code> 发 MQ——早期注释写着"事务提交后发"，但 Controller 层<b>根本没有事务</b>，实际仍在事务内直发，消费者回查不到未提交的笔记就丢弃消息。<b>现在 <code>submit()</code> 已改为调 <code>AfterCommitExecutor.run(...)</code></b>：订单延迟消息与审核消息共用同一个 afterCommit 出口，不再各自写一遍。这也是"同一个问题在两处犯了、最后收敛成一个组件"的典型。</p>
+        <p><b>这个类的三个约定（面试可以主动讲）：</b>① <b>异常必须在这里吞掉</b>——commit 之后再抛异常无法回滚，只会让调用方看到"下单失败"而数据其实成功了；② <b>无事务上下文时退化为立即执行并记 WARN</b>，而不是静默跳过（"宁可早发，不可不发"，早发的后果由消费端 null 防御兜住）；③ <b>传入的动作自身不要再往外抛</b>，因为这里已经是最外层防线。</p>
       </div>
     </details>
 
@@ -1385,7 +1396,7 @@ public void sendNow(Long orderId) {
           "<b>不能在事务里直接发 MQ，因为 MQ 不参与 DB 事务。</b>事务后面回滚了，消息却已经飞出去——消费者过一会儿查到一个「幽灵订单」，或者查不到对应记录。<br>
           标准解法有两档：<b>afterCommit 注册</b>（轻量，我用这个）和<b>本地消息表</b>（消息与业务数据同一事务落库，定时扫描投递，强一致场景用）。我用 <code>TransactionSynchronizationManager.registerSynchronization</code> 注册一个同步回调，<b>只在事务提交成功后才真正 <code>convertAndSend</code></b>；事务回滚的话回调根本不执行，消息从未发出。<br>
           <b>为什么 afterCommit 就够：</b>订单超时取消是「尽力而为 + 对账收敛」语义——多挂 5 分钟可接受，再配上补偿任务兜底就闭环了；<b>资金类才需要升级到本地消息表或事务消息</b>。我也知道 afterCommit 不是 100% 安全：提交成功、发送前进程崩溃仍会丢消息——这就是为什么必须有补偿任务。<br>
-          另外这个发送逻辑我抽成了<b>唯一出口</b> <code>OrderDelayMessageSender</code>——因为早期抢购下单忘了发这条消息，抢购单永不超时、库存被死单占死。抽出来之后「建单必发」不再靠人记。"
+          另外这类"事务提交后再发消息"的代码我抽成了<b>全项目唯一出口</b> <code>AfterCommitExecutor</code>，订单延迟消息和内容审核消息<b>都走它</b>——早期抢购下单漏发过这条消息（抢购单永不超时、库存被死单占死），根因就是"建单必发"这个约束散落各处靠人记；抽成唯一出口后，漏发 = 漏调方法，一眼可见。这个类还有两个约定值得说：<b>提交后抛的异常必须在里面吞掉</b>（事务已提交、回滚不了，往外抛只会制造假故障），<b>没有事务上下文时退化为立即执行并记 WARN</b>（宁可早发、不可不发）。"
         </div>
         <div class="callout warn">
           <span class="ct">别说错</span>
@@ -1402,7 +1413,7 @@ public void sendNow(Long orderId) {
 
   <div class="card">
     <h3 class="card-title">降级路径与主路径同等重要 <span class="badge badge-master">掌握</span></h3>
-    <p class="card-sub">对应代码：<code>RedisOps</code> · <code>AuditServiceImpl.submit:68-83</code> · <code>DropService.submitBuy:110-167</code> · <code>RemoteAiService:47-70</code> · <code>StorageConfig:24-31</code> · <code>VoiceEngineImpl.synthesize:29-39</code></p>
+    <p class="card-sub">对应代码：<code>RedisOps</code> · <code>AuditServiceImpl.submit:93-121</code> · <code>DropService.submitBuy:110-167</code> · <code>RemoteAiService:47-70</code> · <code>StorageConfig:24-31</code> · <code>VoiceEngineImpl.synthesize:29-39</code></p>
 
     <p><strong>一句话：</strong>这个项目有一条硬约束——<b>零依赖能启动</b>：<code>docker-compose</code> 不起、Redis / RabbitMQ / MinIO 全都没有，应用照样能跑起来、核心功能照样能用。<b>所以每一处外部依赖都必须有一条降级路径，而且降级路径要被真实测试过，不是写在文档里好看的。</b></p>
 
@@ -1441,7 +1452,7 @@ public void sendNow(Long orderId) {
               <tr>
                 <td><b>AI 审核调用失败</b></td>
                 <td><code>auditAiClient.review</code> 抛异常</td>
-                <td>记 ERROR 流水，笔记<b>停留在 AUDITING 等人工，绝不动状态</b></td>
+                <td>记 ERROR 流水，笔记<b>停留在 AUDITING 等补偿任务重试，绝不动状态</b></td>
                 <td>笔记晚发布；<b>绝不误杀内容</b>（宁可不作为，不可乱作为）</td>
               </tr>
               <tr>
@@ -1473,23 +1484,29 @@ public void sendNow(Long orderId) {
         </div>
         <p><b>降级链在代码里的形态（三处最典型）：</b></p>
         <div class="codeblock">
-          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:68-83（MQ 挂 → 线程池）</span></div>
+          <div class="cb-head"><span class="fn">content/service/impl/AuditServiceImpl.java</span><span class="loc">:93-121（afterCommit 投递 + MQ 挂 → 线程池）</span></div>
           <pre><code>@Override
 public void submit(Note note) {
-    AuditMessage msg = new AuditMessage(note.getId(), 1);
+    Long noteId = note.getId();
+    int version = versionOf(note);
+    // ★ 先注册到「事务提交后」再投递：否则消费端可能比提交先跑，回查不到笔记而丢弃消息
+    AfterCommitExecutor.run("审核消息 noteId=" + noteId, () -&gt; doSubmit(noteId, version));
+}
+
+private void doSubmit(Long noteId, int version) {
+    AuditMessage msg = new AuditMessage(noteId, version);
     RabbitTemplate rabbit = rabbitTemplateProvider.getIfAvailable();
     if (rabbit != null) {
         try {
-            rabbit.convertAndSend(AuditMqConfig.EXCHANGE,
-                    AuditMqConfig.AUDIT_ROUTING_KEY, msg);
-            log.info("审核消息已入队 noteId={}", note.getId());
+            rabbit.convertAndSend(AuditMqConfig.EXCHANGE, AuditMqConfig.AUDIT_ROUTING_KEY, msg);
+            log.info("审核消息已入队 noteId={} version={}", noteId, version);
             return;
         } catch (AmqpException e) {
             // MQ 不可用（未启动/断连）：不炸发布接口，降级本地线程池
             log.warn("MQ 不可用，审核降级为本地线程池异步: {}", e.getMessage());
         }
     }
-    submitLocal(note.getId());
+    submitLocal(noteId, version);
 }</code></pre>
         </div>
         <div class="codeblock">
@@ -1580,7 +1597,7 @@ public byte[] synthesize(String text) {
               <tr>
                 <td><code>retryStuckAudits()</code><br><span class="badge badge-gray">10min / 首延 90s</span></td>
                 <td><code>t_note</code>：<code>status='AUDITING' AND created_at &lt; now-10min</code>，<code>LIMIT 100</code></td>
-                <td>逐篇调 <code>auditService.auditOnce(note)</code></td>
+                <td>逐篇调 <code>auditService.auditOnce(note, note.getAuditVersion())</code>（<b>同一版本重审，幂等键正好保护这个场景</b>）</td>
                 <td><b>审核消息丢失 / 消费失败被 ACK</b> → 笔记永远「审核中」，作者看不见自己的内容</td>
               </tr>
               <tr>
@@ -1624,6 +1641,7 @@ public void cancelTimeoutOrders() {
           <li><b>为什么复用消费端方法而不是另写一套取消逻辑</b>：注释写得很直白——「它自带事务 + CAS + 全部取消副作用，<b>与消息路径完全同语义</b>」。如果补偿另写一份删除逻辑，两套逻辑会随时间漂移（回补库存少了一步、忘关支付单），那才是真正的灾难。<b>「补偿路径与主路径同语义」是这套设计最重要的一句话。</b></li>
           <li><b>为什么只扫 <code>PAYING</code></b>：<code>PAID</code> / <code>CLOSED</code> 都是终态，扫它们没有可补偿的动作；只对「悬而未决」的状态做对账。</li>
           <li><b>分批限量（<code>LIMIT 100</code>）</b>：让单轮工作量有上限，补偿任务不会「一次性把积压一年的数据全捞出来」拖垮自己（也拖垮 DB）。</li>
+          <li><b>审核这条补偿为什么现在真的能救回</b>：重审用的是<b>同一个版本号</b>（<code>t_note.audit_version</code> 未变），属于「同一次审核的重复执行」；而 <code>t_audit_record</code> 的唯一键含 <code>status</code>，AI 失败留下的 <code>ERROR</code> 流水<b>不占用终态幂等位</b>，所以补审拿到 PASS/REJECT 时能正常落库并流转。<b>修复前唯一键不含 <code>status</code>，一次 <code>ERROR</code> 会把后续所有补审挡在 <code>INSERT IGNORE</code> 之外——那才是「永久卡在 AUDITING」的真正成因（V5 迁移修掉）。</b></li>
         </ol>
         <p><b>前提是幂等（这是能不能上生产的条件，不是加分项）：</b>三个补偿动作全部复用各自的状态机 CAS——订单取消 <code>WHERE status='PENDING_PAY'</code>、审核回写 <code>WHERE status='AUDITING'</code>、支付单 <code>WHERE status='PAYING'</code>。三处 <code>rows==0</code> 的语义都一样：<b>状态已被别人改过（正常现象），直接跳过</b>。所以类注释能写下这句话——<b>「扫 100 次和扫 1 次结果一致」</b>。</p>
         <p><b>为什么补偿必须幂等（两个真实原因）：</b>① <b>多实例部署会重复执行</b>——<code>@Scheduled</code> 在<b>每个</b>应用实例里都会跑，部署 2 个实例 → 同一个超时订单被扫到 2 次；② <b>补偿与主链路会撞车</b>——延迟消息正常抵达的瞬间补偿恰好也扫到这一单，或用户手动取消与超时补偿同时发生。三方竞争能安全收敛，靠的就是 <code>WHERE status='PENDING_PAY'</code> 这一行。</p>
@@ -1642,7 +1660,8 @@ public void cancelTimeoutOrders() {
           <span class="ct">30 秒版本</span>
           "我有一个补偿任务做三件事，把三条异步链路「没走完」的情况定时收敛：<b>订单超时兜底</b>——扫「本该被延迟消息取消却还是待支付」的单，宽限 35 分钟避免和正常的 30 分钟延迟消息撞车；<b>审核堆积重送</b>——扫「审核中超 10 分钟」的笔记重新送审；<b>支付查单对账</b>——扫「超时仍 PAYING」的支付单，主动向渠道查单，这是资损方向最严重的一条。<br>
           三个方法共享同一个骨架：<b>定时扫描 → LIMIT 100 取一批 → 逐条调「主链路本来就有的那个方法」→ 失败只记日志、下轮再来</b>。<b>最关键的一点是：补偿复用消费端的方法，保证「补偿路径与主链路完全同语义」</b>——如果另写一套取消逻辑，两套会随时间漂移，那才是灾难。<br>
-          <b>而且补偿动作全部幂等</b>：都复用状态机 CAS，<code>rows==0</code> 就跳过，所以<b>「扫 100 次和扫 1 次结果一致」</b>——这是它能上生产的前提。多实例重复跑、和主链路撞车，都不会出错。"
+          <b>而且补偿动作全部幂等</b>：都复用状态机 CAS，<code>rows==0</code> 就跳过，所以<b>「扫 100 次和扫 1 次结果一致」</b>——这是它能上生产的前提。多实例重复跑、和主链路撞车，都不会出错。<br>
+          审核这条还依赖幂等键的语义：版本号不变、键里含 <code>status</code>，所以「同一次审核重复跑」仍被挡住，而 AI 失败留下的 <code>ERROR</code> 不会堵住后续补审——补审能把「AI 报错过」的笔记救回来。"
         </div>
         <div class="callout warn">
           <span class="ct">别说错</span>
