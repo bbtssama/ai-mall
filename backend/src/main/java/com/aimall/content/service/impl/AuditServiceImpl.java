@@ -144,14 +144,27 @@ public class AuditServiceImpl implements AuditService {
     /**
      * 执行一次审核（MQ 消费者与本地降级路径共用）。
      *
-     * <p>幂等保障三层：</p>
+     * <p><b>幂等保障三层 —— 注意顺序：先抢「结论权」，再落流水</b></p>
      * <ol>
-     *   <li>t_audit_record 的 {@code uk(biz_type,biz_id,biz_version,status)}——
-     *       终态流水（PASS/REJECT）撞键返回 0 直接跳过。注意 status 也在键里：
-     *       ERROR 不算结论，不会占用终态幂等位。</li>
-     *   <li>t_note.updateStatus 带 {@code WHERE status='AUDITING'}——重复回写自然失效；</li>
-     *   <li>审核失败(ERROR)不改动笔记状态——笔记停在 AUDITING，由补偿任务重试，不误杀内容。</li>
+     *   <li><b>状态机条件更新（CAS）先抢结论权</b>：{@code UPDATE ... WHERE status='AUDITING'}。
+     *       只有抢到的那一次才继续落流水 —— 它同时挡住「MQ 重复投递」与「并发审核」。
+     *       抢不到说明本次审核已有结论、或状态已被别的路径流转，直接返回。</li>
+     *   <li><b>流水唯一键兜底</b>：{@code uk(biz_type,biz_id,biz_version,status)} + INSERT IGNORE。
+     *       作为第二道防线，防止将来出现「状态被意外重置回 AUDITING」的新路径而重复落流水。
+     *       键里含 {@code status}，因此 ERROR（审核没得出结论）不占用终态幂等位。</li>
+     *   <li><b>AI 失败（ERROR）不改状态、不占终态位</b>：笔记停在 AUDITING 等补偿任务重试，绝不误杀内容。</li>
      * </ol>
+     *
+     * <p>★ <b>为什么必须"先 CAS 再落流水"</b>（2026-09-20 修复）
+     * 反过来（先落流水、再 CAS）时：两个并发执行会各自写下 PASS 与 REJECT
+     * —— 因为 STATUS 不同、唯一键不同，**两条都能插入成功**；
+     * 而状态流转只有一个赢家 —— 结果审计轨迹里出现两条互相矛盾的终态结论。
+     * 把 CAS 提前后，**只有抢到结论权的那一次才被允许落流水**，从机制上杜绝该情况。</p>
+     *
+     * <p>代价（诚实说明）：状态与流水不在同一事务。若 CAS 成功而流水写入失败，
+     * <b>笔记状态仍然正确</b>（状态才是唯一真相；驳回原因也随 updateStatus 写进了
+     * {@code t_note.audit_result}），只是审核轨迹少一条记录 —— 该情况会记 ERROR/WARN 日志便于发现。
+     * 之所以不把两者放进同一个事务：AI 调用耗时较长，若与写库同事务会长时间占用数据库连接。</p>
      *
      * @param version 本次审核的版本号（来自消息 / 降级路径传入），不可硬编码
      */
@@ -177,25 +190,34 @@ public class AuditServiceImpl implements AuditService {
             return;
         }
 
-        // 幂等第一道防线：INSERT IGNORE 撞 uk(biz,biz_id,biz_version,status) 返回 0
-        // → 该版本、该结论已经落过流水，属于重复投递，直接返回
-        int rows = saveRecord(note.getId(), version,
-                verdict.pass() ? AuditRecord.STATUS_PASS : AuditRecord.STATUS_REJECT,
+        String newStatus = verdict.pass() ? Note.STATUS_PUBLISHED : Note.STATUS_REJECTED;
+        String recordStatus = verdict.pass() ? AuditRecord.STATUS_PASS : AuditRecord.STATUS_REJECT;
+
+        // ── 幂等第一道防线：CAS 先抢「结论权」──────────────────────────────
+        // WHERE status='AUDITING' —— 返回 0 行 = 本次审核已有结论（重复投递）
+        // 或状态已被别的路径流转（用户下架/并发审核），此时不再落流水，直接返回。
+        int updated = noteMapper.updateStatus(note.getId(),
+                Note.STATUS_AUDITING, newStatus, verdict.reason());
+        if (updated == 0) {
+            log.info("审核结论已被占用（重复投递或并发审核），跳过 noteId={} version={}",
+                    note.getId(), version);
+            return;
+        }
+
+        // ── 幂等第二道防线：只有抢到结论权的那一次才落流水 ──────────────────
+        // 撞 uk(biz,biz_id,biz_version,status) 返回 0 = 同版本同结论已落过流水。
+        // 在同一版本内这不该发生（回到 AUDITING 的路径都会递增 audit_version），
+        // 属于"状态被重置但版本号没递增"的异常信号，记 WARN 便于发现回归。
+        int rows = saveRecord(note.getId(), version, recordStatus,
                 Map.of("pass", verdict.pass(),
                         "reason", verdict.reason(),
                         "categories", verdict.categories()));
         if (rows == 0) {
-            log.info("重复审核消息（幂等跳过）noteId={} version={}", note.getId(), version);
-            return;
+            log.warn("状态已流转但流水已存在（版本号未递增？）noteId={} version={} status={}",
+                    note.getId(), version, recordStatus);
         }
 
-        // 幂等第二道防线：状态机条件更新（WHERE status='AUDITING'）
-        // 重试/重投时笔记可能已流转，返回 0 行属正常
-        String newStatus = verdict.pass() ? Note.STATUS_PUBLISHED : Note.STATUS_REJECTED;
-        int updated = noteMapper.updateStatus(note.getId(),
-                Note.STATUS_AUDITING, newStatus, verdict.reason());
-
-        if (updated > 0 && verdict.pass()) {
+        if (verdict.pass()) {
             // 审核通过 → 入 RAG 索引（UGC 语料），失败不影响发布（索引可补建）
             try {
                 ragIndexService.index(KnowledgeDoc.SOURCE_NOTE,

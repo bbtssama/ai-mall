@@ -33,12 +33,15 @@ public interface AuditService {
     /**
      * 执行一次 AI 审核（MQ 消费者与降级路径共同调用）。
      *
-     * <p>幂等保障三层：</p>
+     * <p><b>幂等保障三层 —— 顺序是「先抢结论权，再落流水」</b></p>
      * <ol>
-     *   <li>t_audit_record 的 {@code uk(biz_type,biz_id,biz_version,status)}——INSERT IGNORE 撞键返回 0 直接跳过；
-     *       键里含 status，因此 ERROR（审核没得出结论）不会占用终态幂等位；</li>
-     *   <li>t_note.updateStatus 带 WHERE status='AUDITING'——重复回写自然失效；</li>
-     *   <li>审核失败(ERROR)不改动笔记状态——笔记停在 AUDITING，由补偿任务重试，人工兜底。</li>
+     *   <li><b>状态机条件更新（CAS）先抢结论权</b>：{@code WHERE status='AUDITING'}，
+     *       抢不到就直接返回、不落流水。它同时挡住 MQ 重复投递与并发审核，
+     *       并保证「同一版本最多只有一条终态流水」；</li>
+     *   <li><b>流水唯一键兜底</b>：{@code uk(biz_type,biz_id,biz_version,status)} + INSERT IGNORE，
+     *       防止将来出现"状态被重置回 AUDITING 但版本号未递增"的新路径；</li>
+     *   <li>审核失败（ERROR）不改动笔记状态、不占终态幂等位 —— 笔记停在 AUDITING，
+     *       由补偿任务重试，人工兜底。</li>
      * </ol>
      *
      * @param version 本次审核的版本号（来自 {@code t_note.audit_version}，随消息传递）。

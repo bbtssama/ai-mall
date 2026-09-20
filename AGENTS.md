@@ -46,6 +46,9 @@
 - **表结构唯一权威** = `backend/src/main/resources/db/migration/`（Flyway，只增不改）。历史上曾有一份 `sql/init.sql` 便利脚本，因与 Flyway 严重脱节（只建 8/24 表、用 `DROP TABLE`、注释口径相反）已于 2026-09-19 删除。
 - **零依赖能启动是硬约束**：所有基建可降级、可插拔（storage/voice/AI 皆如此）。
 - **口径纪律**：扣库存说"行锁 + `WHERE stock>=?` 条件更新（CAS 思想）"，**不说"乐观锁"**；价格库存走 SQL，RAG 只答说明书与 UGC。
+- **审核链路幂等防线顺序不可对调**：`AuditServiceImpl.auditOnce` 必须**先 `updateStatus(AUDITING → x)` CAS 抢「结论权」（0 行即 return、不落流水），再 `INSERT IGNORE` 落流水**。
+  反过来时两个并发执行会各自写下 PASS 与 REJECT（`status` 不同 ⇒ 唯一键不同 ⇒ 两条都插得进），而状态流转只有一个赢家 ⇒ 审计轨迹出现两条矛盾终态。
+  （2026-09-20 修复，原缺陷记在 `后端求职/03-现存退化方案与技术债清单.md` #17。代价：状态与流水不同事务——AI 调用慢，同事务会长时间占用连接；状态才是唯一真相。）
 - ⚠️ **验证编译必须带 `clean`**：本机的 `mvn test` / `mvn compile` 会打印
   `Nothing to compile - all classes are up to date.` 并**静默跳过编译**（增量编译判定不可靠），
   于是改动过的源码根本没被编译却报 BUILD SUCCESS —— **假绿**。

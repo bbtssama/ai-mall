@@ -920,7 +920,7 @@ public void like(Long noteId, boolean liked) {
     return toVO(p, router.resolve(channel));
 }</code></pre>
         </div>
-        <p><b>③ INSERT IGNORE（审核流水去重）：</b><code>t_audit_record</code> 的 <code>uk_biz(biz_type, biz_id, biz_version, status)</code> + <code>INSERT IGNORE</code>，第二次插返回 0 行 → 直接跳过（AuditServiceImpl.java:180-190）。注意键里含 <code>status</code>：<code>ERROR</code> 与终态结论不共用幂等位，否则一次 AI 超时就会永久堵死这篇笔记的重审（V5 迁移修掉的就是这个）。</p>
+        <p><b>③ INSERT IGNORE（审核流水去重）：</b><code>t_audit_record</code> 的 <code>uk_biz(biz_type, biz_id, biz_version, status)</code> + <code>INSERT IGNORE</code>——注意它已<b>不是审核链路的第一道防线</b>：现在是<b>状态机 CAS 先抢「结论权」</b>，抢不到就不落流水，所以只有抢到结论权的那一次才会走到这里；撞键返回 0 行属于异常信号，记 WARN（AuditServiceImpl.java:207-218）。键里含 <code>status</code>：<code>ERROR</code> 与终态结论不共用幂等位，否则一次 AI 超时就会永久堵死这篇笔记的重审（V5 迁移修掉的就是这个）。</p>
         <div class="callout ok">
           <span class="ct">金句：同一招（撞唯一键），四种处置方式按业务语义选</span>
           <b>点赞/收藏</b>（<b>状态确认</b>型）→ <b>静默幂等</b>：重复 = 目标状态已达成，报错反而让前端红心变脏。<br>
@@ -1015,7 +1015,7 @@ public void like(Long noteId, boolean liked) {
         </div>
         <p><b>顺序至关重要：CAS 成功之后才回补库存。</b>顺序反了（先回补再 CAS）→ 输家也会回补 → <b>状态没变但库存加了 = 虚增</b>，这是真实资损。代码注释原话：「<b>只有取消成功者才回补库存——顺序错了 = 状态没变库存却加了（虚增）</b>」。</p>
         <p><b>支付侧自己也有状态机（幂等第二道防线）：</b><code>updateToPaid(..., STATUS_PAYING, ...)</code> 返回 0 时仍返回 success——因为「别人已处理」对第三方来说<b>就是成功</b>；返回失败会让它继续重发（PaymentService.java:194-203）。</p>
-        <p><b>审核侧同一招（防线二）：</b><code>noteMapper.updateStatus(noteId, AUDITING, newStatus, reason)</code>，返回 0 行说明笔记已被别人改过，忽略（AuditServiceImpl.java:134-136）。</p>
+        <p><b>审核侧同一招（审核三防线的<b>第一道</b>，先抢「结论权」）：</b><code>noteMapper.updateStatus(noteId, AUDITING, newStatus, reason)</code>，返回 0 行说明本次审核已有结论或状态已被别人改过——<b>直接返回、不落流水</b>，从机制上保证同一版本最多一条终态流水（AuditServiceImpl.java:199-205）。</p>
         <p><b>为什么状态机 CAS 天然幂等（深层理由）：</b>状态机是<b>单向的、有终态的</b>。<code>PENDING_PAY → CANCELLED</code> 一旦发生，再执行一次「把 PENDING_PAY 改成 CANCELLED」就<b>找不到 PENDING_PAY 的行</b>了 → 自然幂等。<b>「幂等」不是额外加的功能，而是「用旧状态做闸门」的副产品。</b></p>
         <div class="callout warn">
           <span class="ct">诚实边界（两条）</span>
@@ -1597,7 +1597,7 @@ public byte[] synthesize(String text) {
               <tr>
                 <td><code>retryStuckAudits()</code><br><span class="badge badge-gray">10min / 首延 90s</span></td>
                 <td><code>t_note</code>：<code>status='AUDITING' AND created_at &lt; now-10min</code>，<code>LIMIT 100</code></td>
-                <td>逐篇调 <code>auditService.auditOnce(note, note.getAuditVersion())</code>（<b>同一版本重审，幂等键正好保护这个场景</b>）</td>
+                <td>逐篇调 <code>auditService.auditOnce(note, note.getAuditVersion())</code>（<b>同一版本重审</b>：先由状态机 CAS 抢「结论权」，唯一键只作兜底）</td>
                 <td><b>审核消息丢失 / 消费失败被 ACK</b> → 笔记永远「审核中」，作者看不见自己的内容</td>
               </tr>
               <tr>
@@ -1661,7 +1661,7 @@ public void cancelTimeoutOrders() {
           "我有一个补偿任务做三件事，把三条异步链路「没走完」的情况定时收敛：<b>订单超时兜底</b>——扫「本该被延迟消息取消却还是待支付」的单，宽限 35 分钟避免和正常的 30 分钟延迟消息撞车；<b>审核堆积重送</b>——扫「审核中超 10 分钟」的笔记重新送审；<b>支付查单对账</b>——扫「超时仍 PAYING」的支付单，主动向渠道查单，这是资损方向最严重的一条。<br>
           三个方法共享同一个骨架：<b>定时扫描 → LIMIT 100 取一批 → 逐条调「主链路本来就有的那个方法」→ 失败只记日志、下轮再来</b>。<b>最关键的一点是：补偿复用消费端的方法，保证「补偿路径与主链路完全同语义」</b>——如果另写一套取消逻辑，两套会随时间漂移，那才是灾难。<br>
           <b>而且补偿动作全部幂等</b>：都复用状态机 CAS，<code>rows==0</code> 就跳过，所以<b>「扫 100 次和扫 1 次结果一致」</b>——这是它能上生产的前提。多实例重复跑、和主链路撞车，都不会出错。<br>
-          审核这条还依赖幂等键的语义：版本号不变、键里含 <code>status</code>，所以「同一次审核重复跑」仍被挡住，而 AI 失败留下的 <code>ERROR</code> 不会堵住后续补审——补审能把「AI 报错过」的笔记救回来。"
+          审核这条还依赖两道幂等防线的语义：<b>状态机 CAS 先抢「结论权」</b>，所以「同一次审核重复跑」被挡住；<b>唯一键（版本号不变、键里含 <code>status</code>）作兜底</b>，AI 失败留下的 <code>ERROR</code> 不占用终态幂等位，不会堵住后续补审——补审能把「AI 报错过」的笔记救回来。"
         </div>
         <div class="callout warn">
           <span class="ct">别说错</span>

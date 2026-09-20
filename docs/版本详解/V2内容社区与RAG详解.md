@@ -19,7 +19,7 @@
 8. **游标分页与排序键必须配套**——按热度排时游标是 `(hot_score, id)` [二元组](V2内容社区与RAG详解【知识词典】.md#二元组游标)，只用 id 会漏数据。
 9. **MySQL 中文全文检索必须 `WITH PARSER ngram`**——默认解析器按空格分词，中文整句是一个词，检索全失效（[ngram](V2内容社区与RAG详解【知识词典】.md#ngram-解析器)）。
 10. **AI 文案只出草稿绝不自动发布**——"AI 不直写业务数据"是项目红线；未经审核的 AI 内容直接公开是 UGC 平台事故（[AI 不直写](V2内容社区与RAG详解【知识词典】.md#ai-不直写业务数据)）。
-11. **审核幂等三防线**——流水表唯一键（V5 起为 `uk(biz_type, biz_id, biz_version, status)`）+ INSERT IGNORE / 笔记状态机条件更新 / AI 失败只记 ERROR 不误杀；前提是**版本号会随重新送审递增**（`t_note.audit_version`），（[消费端幂等](V2内容社区与RAG详解【知识词典】.md#消费端幂等)）。
+11. **审核幂等三防线（顺序：先抢「结论权」，再落流水）**——① 笔记状态机条件更新（CAS）**先抢结论权**，抢不到就不落流水 / ② 流水表唯一键兜底（V5 起为 `uk(biz_type, biz_id, biz_version, status)`）+ INSERT IGNORE / ③ AI 失败只记 ERROR 不误杀；前提是**版本号会随重新送审递增**（`t_note.audit_version`），（[消费端幂等](V2内容社区与RAG详解【知识词典】.md#消费端幂等)）。
 12. **embedding 默认 local 哈希是诚实降级**——它只能捕获字面重叠捕获不了语义（"续航久"≠"电池耐用"），价值是零依赖跑通全链路；接真实模型后质量升级（[EmbeddingClient](V2内容社区与RAG详解【知识词典】.md#embeddingclient)）。
 13. **双工具分流不写 if-else**——searchProduct/searchDocs 的分流由模型读工具 description 自选，代码零意图判断（[双工具路由](V2内容社区与RAG详解【知识词典】.md#双工具路由)）。
 
@@ -689,8 +689,8 @@ AI 审核一次 3~10 秒。同步做法：用户点"发布"→ 请求挂着 10 �
       ┌───────┴────────┐
    pass=true          pass=false / AI 挂了
       │                 │
-  流水(PASS)+状态机更新   流水(REJECT 带原因 / ERROR)
-  → PUBLISHED            → REJECTED / 停在 AUDITING（不误杀）
+  状态机CAS(抢结论权)+流水(PASS)   流水(REJECT 带原因 / ERROR)
+  → PUBLISHED                     → REJECTED / 停在 AUDITING（不误杀）
   → RAG 索引该笔记
 ```
 
@@ -709,18 +709,25 @@ AI 审核一次 3~10 秒。同步做法：用户点"发布"→ 请求挂着 10 �
 MQ 的语义是 **at-least-once**（至少一次）——重复投递是常态不是异常。`auditOnce` 三防线：
 
 ```java
-// 防线②的 SQL 本体：
+// 防线①（先抢「结论权」）的 SQL 本体：
 UPDATE t_note SET status = #{newStatus}, audit_result = #{auditResult}
 WHERE id = #{id} AND status = #{expectStatus}    -- ★ 只有 AUDITING 才能变
 ```
 
 | 防线 | 机制 | 挡什么 |
 |---|---|---|
-| ① 流水表 uk(biz_type,biz_id,biz_version,**status**) + INSERT IGNORE | 重复消息第二次插入返回 0 行 → 直接跳过 | MQ 重投（最常见） |
-| ② 笔记状态机条件更新（WHERE status='AUDITING'） | 返回 0 行=状态已被别人改过 → 忽略 | 并发审核/编辑后重审 |
+| ① 笔记状态机条件更新（CAS）**先抢「结论权」**（`WHERE status='AUDITING'`） | 返回 0 行=本次审核已有结论、或状态已被别的路径流转 → **不落流水**、直接返回 | MQ 重投（最常见）+ 并发审核 |
+| ② 流水表 uk(biz_type,biz_id,biz_version,**status**) + INSERT IGNORE | 第二道防线：**只有抢到结论权的那一次才落流水**；撞键返回 0 行 → 记 WARN（异常信号） | 状态被重置回 AUDITING 但版本号未递增的新路径 |
 | ③ AI 失败只记 ERROR 不动笔记 | 笔记停留 AUDITING，由补偿任务重审 | **不误杀**（宁可晚发布，不能错杀正常用户） |
 
-> **★ 防线①的两个前提（V5 修复后才完整）**：幂等键保护的是「**同一次审核的 MQ 重投**」，
+> **★ 顺序：先抢「结论权」，再落流水**（2026-09-20 第二轮修复）——反过来（先落流水、再 CAS）时，
+> 两个并发执行的 status 不同、唯一键不同，**PASS 与 REJECT 两条都能插入成功**，而状态流转只有一个赢家
+> → 审计轨迹里出现两条互相矛盾的终态结论。把 CAS 提前后，同一版本最多只有一条终态流水。
+> 代价（诚实说明）：状态与流水**不在同一事务**；若 CAS 成功而流水写入失败，**笔记状态仍正确**
+> （状态才是唯一真相，驳回原因也随 `updateStatus` 写进了 `t_note.audit_result`），只是审核轨迹少一条、会记 WARN 便于发现。
+> 之所以不把两者放进同一个事务：AI 调用耗时长，与写库同事务会长时间占用数据库连接。
+
+> **★ 防线②的两个前提（V5 修复后才完整）**：幂等键保护的是「**同一次审核的 MQ 重投**」，
 > 而不是「这篇内容一生只能被审一次」。所以
 > ① 版本号必须**真的会变**——`t_note.audit_version`（发布=1）由 `resubmit()` / `updateContent` 递增，
 > `auditOnce(Note, int version)` 参数化，不再硬编码 1；

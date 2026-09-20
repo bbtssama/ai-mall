@@ -179,7 +179,7 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 | 项 | 内容 |
 |---|---|
 | **内容社区** | 笔记发布/Feed（游标分页+MySQL ngram 全文检索）/点赞收藏（唯一索引幂等）/种草清单（笔记关联商品） |
-| **AI 审核 + MQ** | 发布秒回→RabbitMQ 异步审核→回写状态；幂等三防线（流水 uk/状态机条件更新/ERROR 不误杀）；MQ 不可用自动降级线程池 |
+| **AI 审核 + MQ** | 发布秒回→RabbitMQ 异步审核→回写状态；幂等三防线（状态机条件更新**先抢结论权**/流水 uk 兜底/ERROR 不误杀）；MQ 不可用自动降级线程池 |
 | **Hybrid RAG** | 语料=商品说明书+种草笔记；BM25+向量双通道，RRF 融合；`searchDocs` 与 `searchProduct` 双工具 Agent 分流（模型自选）；embedding 可插拔（local 哈希默认 / spring-ai 可切） |
 | **AI 种草文案** | RAG 检索真实用户反馈参与创作，只出草稿绝不自动发布 |
 | **模拟数据** | `scripts/gen_mock_data.py` 生成 100 商品 + 500 笔记（幂律分布/含缺点段），`sql/mock_data.sql` 幂等导入 |
@@ -225,6 +225,7 @@ Spring Boot (8080)  VoiceChatController → VoiceEngineImpl
 |---|---|
 | **幂等键版本号递增** | 审核幂等键 `biz_version` 此前在代码里恒为 1 → 幂等键退化成 `(NOTE, noteId)` 常量，第一次 REJECT 占键后「重新送审」永久卡死（笔记停在 AUDITING）→ `t_note` 加 **`audit_version`**（发布=1，每次重送/编辑后重审 +1），随消息传递并做过期消息校验 |
 | **ERROR 不占终态幂等位** | `t_audit_record` 唯一键由 `uk_biz(biz_type, biz_id, biz_version)` 改为 **含 `status`** —— 一次 AI 超时写下的 ERROR 不再堵死后续补审，同结论重投仍被挡住 |
+| **审核幂等防线顺序对调** | 此前是「先 `INSERT IGNORE` 落流水 → 再状态机 CAS」：两个并发执行会各自写下 **PASS 与 REJECT 两条流水**（`status` 不同 ⇒ 唯一键不同 ⇒ 两条都插得进），而状态流转只有一个赢家 ⇒ **审计轨迹出现两条互相矛盾的终态结论**。现改为 **① 先 `updateStatus(AUDITING → x)` CAS 抢「结论权」，`updated==0` 直接 return 不落流水 → ② 只有抢到结论权的那一次才落流水**（流水唯一键降为兜底）。日志文案改为 `审核结论已被占用（重复投递或并发审核），跳过`，新增 WARN `状态已流转但流水已存在（版本号未递增？）` |
 | **消息在事务提交后投递** | 审核消息此前在 `@Transactional` 内投递，消费端（另一条连接）回查不到未提交的笔记 → 丢弃（实测 10 次发布 9 次被丢）→ 新增 `common/tx/AfterCommitExecutor`：全项目唯一的「事务提交后执行副作用」出口，订单延迟消息也重构为复用它 |
 | **鉴权真正生效** | `SaTokenConfig` 此前用 `new SaInterceptor()` 无参构造 ⇒ 认证体是**空的**，加上项目没有任何 `@SaCheck*` 注解 ⇒ **`/api/**` 实际没有服务端鉴权**（写接口靠 Service 层 `StpUtil` 抛异常"意外"被保护，读接口完全裸奔）→ 改为 `/api/**` 默认校验登录 + 白名单 + 商品/笔记 GET 匿名只读 |
 | **匿名浏览 + 移动端** | 前端 `meta.public` 路由标记 + 移动端底部标签栏 + 12 个视图移动端适配；商品与种草社区不登录可浏览，交易/账户/创作类仍需登录 |
