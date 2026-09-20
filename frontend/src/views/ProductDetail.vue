@@ -1,5 +1,6 @@
 <template>
-  <div v-loading="loading">
+  <div class="detail-page" v-loading="loading">
+    <!-- 面包屑：移动端靠系统返回键，这一行 12px 高的层级信息是纯废信息（见媒体查询里隐藏） -->
     <el-breadcrumb separator="/" class="crumb">
       <el-breadcrumb-item :to="{ path: '/' }">首页</el-breadcrumb-item>
       <el-breadcrumb-item>{{ product?.spuName || '商品详情' }}</el-breadcrumb-item>
@@ -12,7 +13,7 @@
           <img :src="activeImage" @error="onImgError" />
         </div>
         <div class="thumb-strip" v-if="currentImages.length > 1">
-          <div v-for="(img, idx) in currentImages" :key="idx" class="thumb-item"
+          <div v-for="(img, idx) in currentImages" :key="idx" class="thumb-item pressable"
                :class="{ active: img === activeImage }" @click="activeImage = img">
             <img :src="img" :alt="'图' + (idx + 1)" loading="lazy" @error="onImgError" />
           </div>
@@ -27,7 +28,7 @@
         <div class="price-box">
           <div class="price-row">
             <span class="label">价格</span>
-            <span class="price">¥{{ selectedSku?.price ?? product.minPrice }}</span>
+            <span class="price">¥{{ formatPrice(selectedSku?.price ?? product.minPrice) }}</span>
           </div>
         </div>
 
@@ -35,10 +36,10 @@
         <div class="sku-section">
           <div class="sku-label">选择规格</div>
           <div class="sku-list">
-            <div v-for="s in product.skus" :key="s.id" class="sku-card"
+            <div v-for="s in product.skus" :key="s.id" class="sku-card pressable"
                  :class="{ active: selectedSku?.id === s.id }" @click="selectedSku = s">
               <div class="sku-name">{{ s.skuName }}</div>
-              <div class="sku-price">¥{{ s.price }}</div>
+              <div class="sku-price">¥{{ formatPrice(s.price) }}</div>
               <div class="sku-stock">库存 {{ s.stock }}</div>
             </div>
           </div>
@@ -48,7 +49,15 @@
         <div class="buy-row">
           <div class="qty">
             <span class="label">数量</span>
-            <el-input-number v-model="quantity" :min="1" :max="selectedSku?.stock || 99" size="default" />
+            <el-input-number class="qty-num" v-model="quantity" :min="1" :max="selectedSku?.stock || 99" size="default" />
+            <!-- 手机端专用：44px 圆角胶囊步进器（el-input-number 的描边方块在触屏上桌面感太重） -->
+            <div class="stepper">
+              <button type="button" class="stp" :disabled="quantity <= 1"
+                      @click="quantity = Math.max(1, quantity - 1)">−</button>
+              <span class="stp-val">{{ quantity }}</span>
+              <button type="button" class="stp" :disabled="quantity >= (selectedSku?.stock || 99)"
+                      @click="quantity = Math.min(selectedSku?.stock || 99, quantity + 1)">+</button>
+            </div>
           </div>
         </div>
         <div class="action-row" v-if="isLoggedIn">
@@ -63,7 +72,7 @@
           <span>登录后即可加入购物车 / 立即购买</span>
           <el-button type="primary" @click="goLogin">去登录</el-button>
         </div>
-        <div class="sold">已售 {{ soldTotal }} 件 · 支持 7 天无理由退换</div>
+        <div class="sold">已售 {{ formatCount(soldTotal) }} 件 · 支持 7 天无理由退换</div>
       </div>
     </div>
 
@@ -86,14 +95,37 @@
     <el-empty v-else-if="!loading" description="商品不存在或已下架">
       <el-button type="primary" @click="$router.push('/')">返回首页</el-button>
     </el-empty>
+
+    <!--
+      吸底购买条（仅手机端渲染）：
+      电商详情页最关键的转化位，不能被"滚到下面才看得见"耽误。
+      位置钉在全局底部标签栏之上（bottom = 标签栏高 + 安全区 + 1px 边框），
+      两条互不遮挡；页面内容另加 padding-bottom 让位。
+    -->
+    <div v-if="product" class="buy-bar">
+      <button type="button" class="bar-mini" @click="$router.push('/chat')">
+        <el-icon class="bar-ico"><Service /></el-icon>
+        <span>客服</span>
+      </button>
+      <button type="button" class="bar-mini" :class="{ 'is-on': favorited }" @click="toggleFav">
+        <el-icon class="bar-ico"><Star /></el-icon>
+        <span>收藏</span>
+      </button>
+      <button type="button" class="bar-btn bar-add" :disabled="!selectedSku || selectedSku.stock <= 0"
+              @click="addCart">加入购物车</button>
+      <button type="button" class="bar-btn bar-buy" :disabled="!selectedSku || selectedSku.stock <= 0"
+              @click="buyNow">立即购买</button>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Service, Star } from '@element-plus/icons-vue'
 import { productApi, cartApi } from '../api'
+import { formatPrice, formatCount } from '../utils/format'
 import { useCartStore } from '../stores/cart'
 import { useAuthStore } from '../stores/auth'
 
@@ -111,6 +143,10 @@ const selectedSku = ref(null)
 const quantity = ref(1)
 const openPanels = ref(['detail'])
 const activeImage = ref('')
+
+// 收藏：后端暂无"商品收藏"接口（只有笔记的 /notes/{id}/collect），
+// 故这里只做本页的即时反馈，不做持久化；接入接口时替换 toggleFav 内部即可。
+const favorited = ref(false)
 
 const CATEGORY = { 101: '数码影音', 102: '数码配件', 103: '美妆护肤', 104: '生活家居' }
 const categoryName = computed(() => (product.value ? (CATEGORY[product.value.categoryId] || '未分类') : ''))
@@ -141,10 +177,32 @@ async function load() {
       if (ok) selectedSku.value = ok
     }
     activeImage.value = currentImages.value[0] || product.value?.mainImg || ''
+    if (product.value) applyBottomReserve()
   } finally {
     loading.value = false
   }
 }
+
+/**
+ * 吸底购买条高 57px（内边距 6+6 + 按钮 44 + 上边框 1），它站在全局标签栏（52 + 安全区）之上。
+ * 但 App.vue 的 .layout 只为标签栏预留了 --pad-bottom —— 滚到底时页脚会被购买条压住。
+ * 不动 App.vue 的前提下，由本页把这个 token 抬高一截；离开本页即还原。
+ * （--pad-bottom 只在 App.vue 的移动端媒体查询里被消费，桌面端完全不受影响。）
+ */
+const PAD_BOTTOM_WITH_BAR = 'calc(var(--tabbar-h) + var(--safe-b) + 8px + 57px)'
+let padBottomBackup = ''
+
+function applyBottomReserve() {
+  const root = document.documentElement
+  if (!padBottomBackup) padBottomBackup = root.style.getPropertyValue('--pad-bottom') || ' '
+  root.style.setProperty('--pad-bottom', PAD_BOTTOM_WITH_BAR)
+}
+
+onBeforeUnmount(() => {
+  const root = document.documentElement
+  if (padBottomBackup.trim()) root.style.setProperty('--pad-bottom', padBottomBackup.trim())
+  else root.style.removeProperty('--pad-bottom')
+})
 
 function goLogin() {
   // 带上当前页路径，登录后回到这个商品详情
@@ -156,6 +214,12 @@ function requireLogin() {
   ElMessage.warning('该操作需要登录')
   goLogin()
   return false
+}
+
+function toggleFav() {
+  if (!isLoggedIn.value) return requireLogin()
+  favorited.value = !favorited.value
+  ElMessage.success(favorited.value ? '已收藏' : '已取消收藏')
 }
 
 async function addCart() {
@@ -236,6 +300,10 @@ onMounted(load)
 .btn-ai { flex: 0 0 auto; }
 .sold { color: var(--clr-text-4); font-size: 13px; }
 
+/* 胶囊步进器 / 吸底购买条：桌面端一律不出现 */
+.stepper { display: none; }
+.buy-bar { display: none; }
+
 .detail-section { margin-top: 18px; padding: 8px 20px; }
 .detail-text { line-height: 1.9; color: var(--clr-text-2); white-space: pre-wrap; }
 .meta-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
@@ -246,10 +314,12 @@ onMounted(load)
 /* =====================================================================
    移动端适配（≤ 768px）
    策略：左图右信息 → 单列堆叠（图在上、信息在下）；
-        规格卡片换行并加大点击区；操作按钮改为两行铺满便于点按。
+        面包屑下线、规格改横向 chips、数量改胶囊步进器；
+        下单入口从文中"抬"到吸底购买条（避开全局标签栏）——这才是详情页的转化位。
    ===================================================================== */
 @media (max-width: 768px) {
-  .crumb { font-size: 12px; margin-bottom: 10px; }
+  /* 面包屑 12px 高，手机上没有可点价值（返回靠系统手势/返回键） */
+  .crumb { display: none; }
 
   .detail-wrap { flex-direction: column; gap: 14px; padding: 12px; }
   .gallery { flex: 0 0 auto; width: 100%; }
@@ -262,20 +332,80 @@ onMounted(load)
   .price-box { padding: 12px; margin-bottom: 14px; }
   .price { font-size: 24px; }
 
+  /* 规格：横向 chips —— 名称 + 价格同一行，库存退成中性灰（此前库存和价格同为红色，
+     抢了价格的重点；且竖排三行 326×85 一屏放不下几个规格） */
   .sku-section { margin-bottom: 14px; }
-  .sku-list { gap: 8px; }
-  /* 允许换行：每行两张，点击区域明显变大 */
-  .sku-card { flex: 1 1 44%; min-width: 0; padding: 10px 12px; }
+  .sku-list { flex-direction: column; gap: 8px; }
+  .sku-card {
+    width: 100%; min-width: 0; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    min-height: 44px; padding: 10px 16px; text-align: left;
+  }
+  .sku-card .sku-name {
+    flex: 1; min-width: 0; font-size: 14px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sku-card .sku-price { margin-top: 0; font-weight: 700; }
+  .sku-card .sku-stock { margin-top: 0; color: #909399; }
 
-  .action-row { gap: 8px; margin-bottom: 10px; }
-  .btn-add, .btn-buy { flex: 1 1 calc(50% - 4px); min-width: 0; }
-  .btn-ai { flex: 1 1 100%; }
+  /* 数量：44px 圆角胶囊 [−] n [+] */
+  .qty { width: 100%; justify-content: space-between; }
+  .qty-num { display: none; }
+  .stepper {
+    display: inline-flex; align-items: center;
+    height: 44px; border-radius: 22px; background: #f4f5f7; overflow: hidden;
+  }
+  .stp {
+    width: 44px; height: 44px; padding: 0; border: 0; background: transparent;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 20px; line-height: 1; color: var(--clr-text); cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .stp:active { background: rgba(0, 0, 0, .07); }
+  .stp:disabled { color: var(--clr-text-4); }
+  .stp-val { min-width: 32px; text-align: center; font-size: 15px; font-weight: 600; }
+
+  /* 文中操作行收掉：手机端的加购/立即购买统一由吸底购买条承担 */
+  .action-row { display: none; }
 
   /* 登录引导块：窄屏竖排居中，占满整行 */
-  .buy-panel > .login-hint { flex-direction: column; text-align: center; padding: 14px 12px; }
+  .buy-panel > .login-hint { flex-direction: column; text-align: center; padding: 14px 12px; gap: 10px; }
 
   .detail-section { margin-top: 14px; padding: 4px 12px; }
   .meta-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+
+  /* ---- 吸底购买条 ---- */
+  .buy-bar {
+    display: flex; align-items: center; gap: 8px;
+    position: fixed; left: 0; right: 0;
+    /* ★ 钉在全局标签栏之上（+1px 是标签栏的上边框），两者互不遮挡 */
+    bottom: calc(var(--tabbar-h) + var(--safe-b) + 1px);
+    z-index: 110;
+    min-height: 52px; padding: 6px 10px;
+    background: rgba(255, 255, 255, .98);
+    backdrop-filter: saturate(180%) blur(10px);
+    border-top: 1px solid var(--clr-border);
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, .06);
+  }
+  .bar-mini {
+    flex: 0 0 46px; height: 44px; padding: 0;
+    border: 0; background: transparent; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+    color: var(--clr-text-2); font-size: 10px; line-height: 1.1;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .bar-mini:active { opacity: .6; }
+  .bar-mini.is-on { color: var(--clr-primary); }
+  .bar-ico { font-size: 18px; }
+  .bar-btn {
+    height: 44px; border: 0; border-radius: 22px;
+    color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .bar-btn:active { opacity: .88; }
+  .bar-btn:disabled { background: #d9d9d9; color: #fff; cursor: not-allowed; }
+  .bar-add { flex: 2 1 0; background: var(--clr-warning); }
+  .bar-buy { flex: 3 1 0; background: var(--clr-primary); }
 }
 
 @media (max-width: 480px) {

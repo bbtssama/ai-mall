@@ -121,3 +121,57 @@
   background: var(--clr-primary-bg); color: var(--clr-text-2); font-size: 14px;
 }
 .login-hint .el-button { flex-shrink: 0; }
+
+/* ============================================================
+   ★ 全局 reset（2026-09-20 补，移动端优化的根因修复）
+   ------------------------------------------------------------
+   项目此前**没有任何全局 box-sizing**，只有 voiceStage.vue 里零星写过一次。
+   于是 `width:100% + padding:12px` 这类写法会按 content-box 计算 →
+   元素比容器宽 24px → 整页横向溢出。实测它连锁引发了：
+     · 笔记详情整页可横向拖动 4px
+     · 聊天页会话列表溢出 → 出现横向滚动条 → ICB 被撑成 393×851
+       → fixed/sticky 元素（底部标签栏、吸底输入区）整体错位 7px
+       → 输入区与标签栏之间露出"消息正文裸奔带"
+   修法取最标准的一条：全局 border-box（Element Plus 官方也建议这么配）。
+   ============================================================ */
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;   /* 横屏/字体放大时别把正文撑爆 */
+  text-size-adjust: 100%;
+}
+
+/*
+  body 默认有 8px margin（浏览器 UA 样式），项目此前没 reset ——
+  后果：所有页面整体下移 8px，且文档高度比视口多 16px，
+  App 型页面（如聊天）会因此多出一段无意义的滚动，吸底元素也跟着错位。
+*/
+body { margin: 0; }
+
+/* 移动端点击反馈：项目此前几乎没有任何 :active 态，点下去毫无反应像卡死 */
+a, button, .clickable { -webkit-tap-highlight-color: rgba(0, 0, 0, .06); }
+
+/* ============================================================
+   移动端设计 token（统一圆角/间距/壳高度/安全区）
+   —— 目的：把此前"4/5/8/12/999px 混用"的圆角收敛成三档
+   ============================================================ */
+:root {
+  /* 圆角三档：卡片/控件/大容器 */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+
+  /* 移动端壳尺寸（顶栏与底部标签栏，页面靠它算可用高度） */
+  --hdr-h: 48px;                      /* 移动端单行顶栏 */
+  --tabbar-h: 52px;
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+  /* 页面内容需要为固定底栏让出的高度 */
+  --pad-bottom: calc(var(--tabbar-h) + var(--safe-b) + 8px);
+}
+
+/* 统一的可点元素按压反馈（:active 在触屏上由触摸触发） */
+.pressable { transition: transform .12s ease, opacity .12s ease, background-color .12s ease; }
+.pressable:active { transform: scale(.985); opacity: .86; }

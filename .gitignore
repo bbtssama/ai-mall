@@ -16,6 +16,9 @@
 # ===== Node / 前端 =====
 frontend/node_modules/
 frontend/dist/
+# 子代理排查时用 --outDir 生成的临时构建产物（沙箱的删除守卫拦住了删除，故先忽略）
+frontend/dist-verify/
+frontend/.tmp-dist-verify/
 frontend/.vite/
 npm-debug.log*
 

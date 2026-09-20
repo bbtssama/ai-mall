@@ -1,5 +1,5 @@
 <template>
-  <div class="layout">
+  <div class="layout" :class="{ 'is-blank': isBlank }">
     <!-- ===== Header ===== -->
     <header class="site-header">
       <div class="container header-inner">
@@ -8,16 +8,23 @@
           <span class="logo-text">AI 种草商城</span>
         </div>
 
-        <div class="search-box">
-          <el-input v-model="keyword" placeholder="搜索商品 / 关键词" clearable
+        <!--
+          搜索：桌面用「输入框 + 提交按钮」的输入组；移动端换成内嵌图标的紧凑输入框
+          （append 的灰块在手机上会贴在全圆角 pill 右端露出尖角，是典型"桌面控件移植"痕迹）。
+          两者共用 keyword，按断点显隐。
+        -->
+        <div v-if="!isBlank" class="search-box">
+          <el-input class="search-desktop" v-model="keyword" placeholder="搜索商品 / 关键词" clearable
                     @keyup.enter="doSearch" @clear="doSearch">
             <template #append>
               <el-button :icon="Search" @click="doSearch" />
             </template>
           </el-input>
+          <el-input class="search-mobile" v-model="keyword" placeholder="搜索商品 / 关键词" clearable
+                    :prefix-icon="Search" @keyup.enter="doSearch" @clear="doSearch" />
         </div>
 
-        <nav class="nav nav-desktop">
+        <nav v-if="!isBlank" class="nav nav-desktop">
           <router-link to="/" class="nav-link">首页</router-link>
           <router-link to="/notes" class="nav-link">种草</router-link>
           <router-link to="/cart" class="nav-link nav-cart">
@@ -28,7 +35,7 @@
           <router-link to="/chat" class="nav-link">AI 助手</router-link>
         </nav>
 
-        <div class="user-area">
+        <div v-if="!isBlank" class="user-area">
           <!-- 已登录：个人中心 + 下拉 -->
           <template v-if="auth.token">
             <router-link to="/mine" class="nav-link user-entry">我的</router-link>
@@ -44,7 +51,7 @@
             </el-dropdown>
           </template>
           <!-- 未登录：登录入口（匿名用户可自由浏览商品与社区） -->
-          <router-link v-else to="/login" class="nav-link login-entry">登录 / 注册</router-link>
+          <router-link v-else to="/login" class="nav-link login-entry">登录</router-link>
         </div>
       </div>
     </header>
@@ -60,8 +67,8 @@
       </div>
     </main>
 
-    <!-- ===== Footer ===== -->
-    <footer class="site-footer">
+    <!-- ===== Footer（App 型页面 / blank 页面不渲染） ===== -->
+    <footer v-if="showFooter" class="site-footer">
       <div class="container footer-inner">
         <span>🧬 AI 种草商城 — 内容社区 · 电商交易 · AI 引擎</span>
         <span class="footer-sub">Java 求职实战项目 · V1</span>
@@ -73,7 +80,7 @@
       移动端把主导航从顶栏移到拇指可达的底部，顶栏只留 Logo / 搜索 / 登录态。
       需要登录的标签（购物车/订单/AI）不做特殊处理：路由守卫会自动带去登录页。
     -->
-    <nav class="tabbar">
+    <nav v-if="!isBlank" class="tabbar">
       <router-link v-for="t in tabs" :key="t.to" :to="t.to" class="tab-item"
                    :class="{ 'is-active': isActive(t.to) }">
         <span class="tab-icon">
@@ -99,6 +106,20 @@ const route = useRoute()
 const auth = useAuthStore()
 const cartStore = useCartStore()
 const keyword = ref('')
+
+/**
+ * blank 布局：登录等"任务型页面"不需要全局壳
+ * —— 顶部搜索框与底部标签栏都收掉，避免出现"在登录页还挂着搜索商品"
+ *   以及"未登录却露出购物车/订单入口（点了又弹回登录）"这两类荒谬感。
+ */
+const isBlank = computed(() => route.meta.blank === true)
+
+/**
+ * 是否渲染全站页脚。
+ * App 型页面（如 /chat，occupies 整屏、自身滚动）不该有页脚——它会把页面撑成长文档，
+ * 让吸底元素（聊天输入区）跟着错位。这类页面用 `meta.hideFooter` 声明。
+ */
+const showFooter = computed(() => !isBlank.value && route.meta.hideFooter !== true)
 
 /** 底部标签栏配置（仅移动端渲染） */
 const tabs = [
@@ -158,7 +179,8 @@ watch(() => route.path, () => {
 .logo-icon { font-size: 24px; }
 .logo-text { font-size: 20px; font-weight: 800; color: var(--clr-primary); letter-spacing: 0.5px; }
 
-.search-box { flex: 1; max-width: 380px; }
+.search-box { flex: 1; max-width: 380px; min-width: 0; }
+.search-mobile { display: none; }
 .search-box :deep(.el-input__wrapper) { border-radius: var(--radius-full); padding-left: 14px; }
 .search-box :deep(.el-input-group__append) { border-radius: 0 var(--radius-full) var(--radius-full) 0; }
 
@@ -190,56 +212,85 @@ watch(() => route.path, () => {
 
 /* =====================================================================
    移动端适配（≤ 768px）
-   策略：顶栏压缩为两行（Logo + 登录态 / 搜索），主导航下沉到底部标签栏；
-        底部为固定定位，主内容与页脚预留相应安全间距。
+   ★ 2026-09-20 重构：顶栏由"两行 97px"压成"单行 48px"。
+     此前顶栏 = Logo 行 + 整行搜索框 = 97px，占掉首屏 11%~21%
+     （个人中心页因为头像区被顶到下方，实测 21%）。
+     现改为移动端电商的通行范式：一行里塞下
+       [Logo 图标] [搜索框占中间] [登录/我的]
+     并把字面 Logo 收成一个图标，把搜索框做成内嵌图标的紧凑 pill。
    ===================================================================== */
 @media (max-width: 768px) {
-  .site-header { position: sticky; }
   .header-inner {
-    height: auto; flex-wrap: wrap;
-    gap: 8px; padding: 8px 0 10px;
+    height: var(--hdr-h);
+    flex-wrap: nowrap;            /* 单行 */
+    gap: 10px;
+    padding: 0;
   }
-  /* 第一行：Logo 占左，登录态占右 */
-  .logo { order: 1; }
-  .logo-text { font-size: 17px; }
-  .logo-icon { font-size: 20px; }
-  .user-area { order: 2; margin-left: auto; gap: 4px; }
-  .user-area .nav-link { padding: 5px 10px; font-size: 13px; }
+  /* 字面 Logo 在手机上省掉，只留图标 —— 把宽度让给搜索框 */
+  .logo-text { display: none; }
+  .logo-icon { font-size: 22px; }
+
   .nav-desktop { display: none; }
-  /* 第二行：搜索框占满整行 */
-  .search-box { order: 3; flex: 1 1 100%; max-width: none; }
 
-  .site-main { padding: 12px 0 16px; }
-  /* 给固定底栏让位，避免最后一条内容被遮住 */
-  .layout { padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+  /* 搜索框占中间，可压缩（min-width:0 很关键，否则 flex 项不会收缩） */
+  .search-desktop { display: none; }
+  .search-mobile { display: block; }
+  .search-box { flex: 1 1 auto; max-width: none; min-width: 0; }
+  .search-box :deep(.el-input__wrapper) {
+    border-radius: var(--radius-full);
+    background: #f4f5f7;
+    box-shadow: none !important;
+    padding-left: 10px;
+  }
+  .search-box :deep(.el-input__inner) { font-size: 16px; }  /* ≥16px 防 iOS 聚焦缩放 */
+  .search-box :deep(.el-input__prefix) { color: var(--clr-text-3); }
 
-  .site-footer { margin-top: 16px; padding: 16px 0; font-size: 12px; }
+  /* 右侧登录态：只留最要紧的一个入口 */
+  .user-area { gap: 0; margin-left: 0; flex: 0 0 auto; }
+  .user-area .nav-link { padding: 4px 6px; font-size: 14px; }
+  .user-entry { display: none; }        /* "我的"入口由底部标签栏承担 */
+  .nick { padding: 4px 2px; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  .site-main { padding: 10px 0 12px; }
+
+  .site-footer { margin-top: 12px; padding: 14px 0; font-size: 12px; }
+
+  /* ---- 底部标签栏 ---- */
   .tabbar {
     display: flex;
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 120;
-    background: #fff;
+    background: rgba(255, 255, 255, .96);
+    backdrop-filter: saturate(180%) blur(12px);
     border-top: 1px solid var(--clr-border);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: var(--safe-b);          /* ★ 刘海机 home indicator 避让 */
     box-shadow: 0 -1px 6px rgba(0, 0, 0, .04);
   }
   .tab-item {
     flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 2px; padding: 7px 0 6px;
+    gap: 2px; padding: 6px 0 5px; min-height: var(--tabbar-h);
     color: var(--clr-text-3); text-decoration: none;
     font-size: 11px; line-height: 1.2;
     -webkit-tap-highlight-color: transparent;
+    transition: color .15s;
   }
   .tab-item.is-active { color: var(--clr-primary); }
-  .tab-icon { position: relative; font-size: 20px; display: inline-flex; }
-  .tab-icon .el-icon { font-size: 20px; }
+  .tab-item:active { opacity: .7; }         /* 触摸反馈 */
+  .tab-icon { position: relative; display: inline-flex; }
+  .tab-icon .el-icon { font-size: 24px; }   /* 此前 20px，偏小 */
   .tab-dot {
-    position: absolute; top: -4px; right: -10px;
-    min-width: 15px; height: 15px; padding: 0 4px;
+    position: absolute; top: -5px; right: -11px;
+    min-width: 18px; height: 18px; padding: 0 5px;
     background: var(--clr-danger); color: #fff;
-    border-radius: 999px; font-size: 10px; line-height: 15px; text-align: center;
-    font-weight: 700;
+    border-radius: 999px; font-size: 11px; line-height: 18px; text-align: center;
+    font-weight: 700; box-shadow: 0 0 0 2px #fff;
   }
   .tab-label { font-weight: 500; }
+
+  /* 内容为固定底栏让位（用统一 token，避免各页各写一套 mags） */
+  .layout:not(.is-blank) { padding-bottom: var(--pad-bottom); }
+
+  /* blank 布局（登录等）：只有一行极简顶栏，没有标签栏 */
+  .is-blank .header-inner { justify-content: center; }
+  .is-blank .logo-text { display: inline; }
 }
 </style>

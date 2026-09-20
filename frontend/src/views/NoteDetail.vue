@@ -19,7 +19,7 @@
           <el-avatar :size="32" :src="note.authorAvatar">{{ note.authorName?.[0] }}</el-avatar>
           <div>
             <div class="author">{{ note.authorName }}</div>
-            <div class="time">{{ note.createdAt }}</div>
+            <div class="time">{{ formatTime(note.createdAt) }}</div>
           </div>
         </div>
         <img v-if="note.cover" :src="note.cover" class="hero" />
@@ -33,13 +33,13 @@
 
         <!-- 互动条 -->
         <div class="actions">
-          <el-button round :type="note.liked ? 'danger' : ''" @click="toggleLike">
-            <el-icon><Pointer /></el-icon>{{ note.likeCount }}
+          <el-button round class="act-btn" :type="note.liked ? 'danger' : ''" @click="toggleLike">
+            <el-icon><Pointer /></el-icon>{{ formatCount(note.likeCount) }}
           </el-button>
-          <el-button round :type="note.collected ? 'warning' : ''" @click="toggleCollect">
-            <el-icon><Star /></el-icon>{{ note.collectCount }}
+          <el-button round class="act-btn" :type="note.collected ? 'warning' : ''" @click="toggleCollect">
+            <el-icon><Star /></el-icon>{{ formatCount(note.collectCount) }}
           </el-button>
-          <span class="views"><el-icon><View /></el-icon>{{ note.viewCount }} 浏览</span>
+          <span class="views"><el-icon><View /></el-icon>{{ formatCount(note.viewCount) }} 浏览</span>
           <el-button v-if="note.mine" round type="danger" plain style="margin-left:auto" @click="offline">下架</el-button>
         </div>
       </div>
@@ -47,15 +47,33 @@
       <!-- 右：种草清单（关联商品） -->
       <div class="side" v-if="note.products?.length">
         <div class="side-title">文中好物</div>
-        <div v-for="p in note.products" :key="p.productId" class="product-card" @click="$router.push(`/product/${p.productId}`)">
+        <div v-for="p in note.products" :key="p.productId" class="product-card" @click="openProduct(p.productId)">
           <img :src="p.mainImg" />
           <div class="p-info">
             <div class="p-name">{{ p.productName }}</div>
             <div v-if="p.remark" class="p-remark">“{{ p.remark }}”</div>
-            <el-button size="small" type="primary" plain>去购买</el-button>
+            <el-button size="small" type="primary" plain class="buy-btn">去购买</el-button>
           </div>
         </div>
       </div>
+    </div>
+
+    <!--
+      移动端吸底转化条：正文很长时「文中好物」会被埋在两屏之外，
+      这里把主推好物 + 去购买常驻在拇指区（避让底部标签栏与 home indicator）。
+      桌面端不渲染（display:none），保持原有右侧清单的形态。
+    -->
+    <div v-if="note.products?.length" class="buy-bar">
+      <img class="buy-bar-img" :src="note.products[0].mainImg" alt="" />
+      <div class="buy-bar-info">
+        <div class="buy-bar-name">{{ note.products[0].productName }}</div>
+        <div class="buy-bar-sub">
+          文中好物{{ note.products.length > 1 ? ` · 共 ${note.products.length} 件` : '' }}
+        </div>
+      </div>
+      <button class="buy-bar-btn pressable" type="button" @click="openProduct(note.products[0].productId)">
+        去购买
+      </button>
     </div>
   </div>
 </template>
@@ -66,6 +84,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { noteApi } from '../api'
 import { useAuthStore } from '../stores/auth'
+import { formatTime, formatCount } from '../utils/format'
 import { Pointer, Star, View } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -74,6 +93,8 @@ const auth = useAuthStore()
 const note = ref(null)
 const loading = ref(false)
 const submitting = ref(false)
+
+function openProduct (id) { router.push(`/product/${id}`) }
 
 async function load () {
   loading.value = true
@@ -149,18 +170,23 @@ onMounted(load)
 .p-info { flex: 1; min-width: 0; }
 .p-name { font-size: 13px; font-weight: 500; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-remark { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 6px; }
+/* 吸底转化条：仅移动端渲染 */
+.buy-bar { display: none; }
 @media (max-width: 900px) { .layout { flex-direction: column; } .side { width: 100%; position: static; } }
 
 /* =====================================================================
    移动端适配（≤ 768px）
-   策略：布局已由 900px 断点降为单列，这里只做正文可读性 + 元素缩放的收口；
-        页面自身 padding 归零，交给全局 .container 的 12px 边距。
+   策略：布局已由 900px 断点降为单列，这里做「可读性 + 转化 + 触摸目标」收口。
+        ① 时间戳走 formatTime（不再是裸 ISO）；
+        ② 唯一转化入口「去购买」从 70×34 浅色描边升为 44px 主色按钮，并加吸底转化条；
+        ③ 互动条触摸目标 ≥44px + 按压反馈。
+   桌面端（>768px）视觉未改动（时间戳格式化除外，见报告）。
    ===================================================================== */
 @media (max-width: 768px) {
-  .note-detail { padding: 0; }
+  .note-detail { padding: 0 0 72px; }   /* 给吸底转化条让位（标签栏高度由全局 layout 让出） */
   .reject-tip { margin-bottom: 10px; }
 
-  .main { padding: 14px; }
+  .main { padding: 14px; border-radius: var(--r-md); }
   .title { font-size: 18px; margin-bottom: 10px; }
   .author-bar { margin-bottom: 12px; }
   .author { font-size: 13px; }
@@ -171,15 +197,60 @@ onMounted(load)
   .content { font-size: 15px; line-height: 1.9; }
   .imgs { grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 12px; }
 
+  /* ---- ③ 互动条：触摸目标 ≥44px，按下有反馈 ---- */
   .actions { flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 12px; }
+  .actions :deep(.act-btn) { min-height: 44px; min-width: 84px; }
+  .actions :deep(.act-btn:active) { transform: scale(.96); }
   .views { font-size: 12px; }
 
-  /* 文中好物：单列铺满，商品行紧凑排列 */
-  .side { width: 100%; position: static; padding: 12px; }
+  /* ---- 文中好物：单列铺满，商品行紧凑排列 ---- */
+  .side { width: 100%; position: static; padding: 12px; border-radius: var(--r-md); }
   .side-title { margin-bottom: 8px; }
-  .product-card { padding: 8px; gap: 8px; }
+  .product-card { padding: 8px; gap: 8px; border-radius: var(--r-sm); }
+  .product-card:active { background: var(--el-fill-color-light); }
   .product-card img { width: 56px; height: 56px; }
   .p-name { font-size: 13px; }
+
+  /* ②「去购买」：浅色描边 → 醒目主色按钮（≥44px）。
+     type/plain 保留给桌面，这里用更高优先级的选择器在窄屏覆盖成实心。 */
+  .product-card :deep(.buy-btn.is-plain) {
+    width: 100%; height: 44px; margin-top: 6px; padding: 0;
+    border-radius: var(--radius-full); font-size: 15px; font-weight: 600;
+    background-color: var(--clr-primary); border-color: var(--clr-primary); color: #fff;
+  }
+  .product-card :deep(.buy-btn.is-plain:hover) {
+    background-color: var(--clr-primary-hover); border-color: var(--clr-primary-hover); color: #fff;
+  }
+  .product-card :deep(.buy-btn.is-plain:active) {
+    background-color: var(--clr-primary-active); border-color: var(--clr-primary-active); color: #fff;
+  }
+
+  /* ---- ② 吸底转化条 ---- */
+  .buy-bar {
+    display: flex; align-items: center; gap: 10px;
+    position: fixed; left: 0; right: 0; z-index: 110;
+    /* 避让底部标签栏与 home indicator */
+    bottom: calc(var(--tabbar-h) + var(--safe-b));
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, .97);
+    backdrop-filter: saturate(180%) blur(12px);
+    border-top: 1px solid var(--clr-border);
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, .05);
+  }
+  .buy-bar-img { width: 40px; height: 40px; flex: 0 0 40px; border-radius: var(--r-sm); object-fit: cover; }
+  .buy-bar-info { flex: 1; min-width: 0; }
+  .buy-bar-name {
+    font-size: 13px; font-weight: 600; color: var(--clr-text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .buy-bar-sub { font-size: 11px; color: var(--clr-text-3); margin-top: 1px; }
+  .buy-bar-btn {
+    flex: 0 0 auto; height: 44px; min-width: 104px; padding: 0 20px;
+    border: none; border-radius: var(--radius-full);
+    background: linear-gradient(90deg, #ff6a2b, var(--clr-primary));
+    color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
 }
 
 @media (max-width: 480px) {

@@ -3,6 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    图标：内联 SVG（data URI），零外部依赖、离线可用，与顶栏 🧬 Logo 一致。
+    此前没有 favicon 也没声明 icon，浏览器每次都会去请求 /favicon.ico 拿 404，
+    控制台因此每页都留一条红字报错。
+  -->
+  <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧬</text></svg>" />
   <title>AI 种草商城</title>
 </head>
 <body>

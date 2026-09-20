@@ -2,11 +2,13 @@
   <div>
     <div class="cart-head">
       <h2 class="page-title">购物车</h2>
-      <el-button text type="danger" @click="clearCart">清空购物车</el-button>
+      <!-- 空购物车不显示"清空购物车"：没有东西可清，留着只会让空态更空 -->
+      <el-button v-if="items.length" text type="danger" @click="clearCart">清空购物车</el-button>
     </div>
 
     <div v-loading="loading">
-      <el-empty v-if="!items.length && !loading" description="购物车空空如也">
+      <el-empty v-if="!items.length && !loading" description="购物车还是空的">
+        <div class="empty-tip">把心仪的宝贝加进来，随时回来一起结算</div>
         <el-button type="primary" @click="$router.push('/')">去逛逛</el-button>
       </el-empty>
 
@@ -20,12 +22,20 @@
             <div class="goods-sku">{{ row.skuName }}</div>
             <div class="stock-line">库存 {{ row.skuStock }} 件</div>
           </div>
-          <div class="col-price">¥{{ row.price }}</div>
+          <div class="col-price">¥{{ formatPrice(row.price) }}</div>
           <div class="col-qty">
-            <el-input-number v-model="row.quantity" :min="1" :max="99" size="small"
+            <!-- 桌面：Element 步进器；手机：自绘 [−] N [+]（见下方 @media，桌面端不受影响） -->
+            <el-input-number class="qty-desk" v-model="row.quantity" :min="1" :max="99" size="small"
                              @change="updateQty(row)" />
+            <div class="qty-step mobile-only">
+              <button class="step-btn pressable" :disabled="Number(row.quantity) <= 1"
+                      aria-label="减少数量" @click="stepQty(row, -1)">−</button>
+              <span class="step-num">{{ row.quantity }}</span>
+              <button class="step-btn pressable" :disabled="Number(row.quantity) >= 99"
+                      aria-label="增加数量" @click="stepQty(row, 1)">＋</button>
+            </div>
           </div>
-          <div class="col-subtotal">¥{{ subtotalOf(row) }}</div>
+          <div class="col-subtotal"><span class="lbl">小计</span>¥{{ formatPrice(subtotalOf(row)) }}</div>
           <el-button class="del" text type="danger" @click="remove(row)">删除</el-button>
         </div>
       </div>
@@ -47,13 +57,13 @@
               ⚠ 库存不足（最多 {{ row.maxBuyable }} 件）
             </div>
           </div>
-          <div class="col-price">¥{{ row.price }}</div>
+          <div class="col-price">¥{{ formatPrice(row.price) }}</div>
           <div class="col-qty">
             <span class="qty-text">×{{ row.quantity }}</span>
             <el-button v-if="row.productStatus === 1 && row.outOfStock && row.maxBuyable > 0"
                        size="small" type="warning" plain @click="fixQty(row)">设为 {{ row.maxBuyable }}</el-button>
           </div>
-          <div class="col-subtotal off">¥{{ subtotalOf(row) }}</div>
+          <div class="col-subtotal off"><span class="lbl">小计</span>¥{{ formatPrice(subtotalOf(row)) }}</div>
           <el-button class="del" text type="danger" @click="remove(row)">删除</el-button>
         </div>
       </div>
@@ -67,13 +77,13 @@
         </div>
         <div class="settle-total">
           <template v-if="checkedCount > 0">
-            已选 <b>{{ checkedCount }}</b> 件，合计：
-            <span class="total-price">¥{{ checkedAmount }}</span>
+            共 <b>{{ checkedCount }}</b> 件，合计
+            <span class="total-price">¥{{ formatAmount(checkedAmount) }}</span>
           </template>
           <span v-else class="empty-check">请勾选要结算的商品</span>
         </div>
-        <el-button type="danger" size="large" :disabled="selectedItems.length === 0"
-                   @click="checkoutVisible = true">去结算（{{ selectedItems.length }}）</el-button>
+        <el-button type="primary" size="large" :disabled="selectedItems.length === 0"
+                   @click="checkoutVisible = true">去结算</el-button>
       </div>
     </div>
 
@@ -83,7 +93,7 @@
         <div v-for="i in selectedItems" :key="i.id" class="checkout-row">
           <span class="co-name">{{ i.productName }}（{{ i.skuName }}）</span>
           <span class="co-qty">×{{ i.quantity }}</span>
-          <span class="co-price">¥{{ subtotalOf(i) }}</span>
+          <span class="co-price">¥{{ formatPrice(subtotalOf(i)) }}</span>
         </div>
       </div>
       <el-divider />
@@ -124,8 +134,8 @@
       </div>
       <template #footer>
         <el-button @click="checkoutVisible = false">取消</el-button>
-        <el-button type="danger" :loading="submitting" :disabled="!selectedAddrId" @click="submitOrder">
-          提交订单（¥{{ checkedAmount }}）
+        <el-button type="primary" :loading="submitting" :disabled="!selectedAddrId" @click="submitOrder">
+          提交订单（¥{{ formatAmount(checkedAmount) }}）
         </el-button>
       </template>
     </el-dialog>
@@ -133,12 +143,13 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, h } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cartApi, orderApi, addressApi } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { useCartStore } from '../stores/cart'
+import { formatAmount, formatPrice } from '../utils/format'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -244,6 +255,14 @@ async function updateQty(row) {
   }
 }
 
+// 移动端自绘步进器：±1 后复用同一套 updateQty（含超库存拦截 / 失败回滚）
+function stepQty(row, delta) {
+  const next = Number(row.quantity) + delta
+  if (next < 1 || next > 99) return
+  row.quantity = next
+  updateQty(row)
+}
+
 // ---------- 收货地址簿 ----------
 async function loadAddresses(selectDefault = true) {
   addressLoading.value = true
@@ -299,21 +318,51 @@ async function fixQty(row) {
 }
 
 async function remove(row) {
+  // 删除不可逆：与"清空购物车"保持同一道确认（此前单击即删，同页两套标准）
+  try {
+    await ElMessageBox.confirm(`确定把「${row.productName}」移出购物车吗？`, '提示',
+      { type: 'warning', confirmButtonText: '移出', cancelButtonText: '再想想' })
+  } catch {
+    return
+  }
   await cartApi.remove(row.id)
   checkedIds.value.delete(row.id)
   persistChecked()
   cartStore.refresh()
-  ElMessage.success('已删除')
+  ElMessage.success('已移出购物车')
   load()
 }
 
 async function clearCart() {
-  await ElMessageBox.confirm('确定清空购物车吗？', '提示', { type: 'warning' })
+  try {
+    await ElMessageBox.confirm('确定清空购物车吗？', '提示', { type: 'warning' })
+  } catch {
+    return
+  }
   await cartApi.clear()
   checkedIds.value.clear()
   persistChecked()
   cartStore.refresh()
   load()
+}
+
+/**
+ * 结果提示 + 一个明确的下一步入口。
+ * 此前把 23 位订单号塞进顶部绿条：既盖住品牌栏，用户也读不出任何信息。
+ * 订单号属于"订单详情里能随时翻到"的东西，收据式的提示只需要「结果 + 去哪」。
+ */
+function toastWithAction(text, actionText, onAction) {
+  ElMessage({
+    type: 'success',
+    duration: 2600,
+    message: h('span', { style: 'display:inline-flex;align-items:center;gap:12px' }, [
+      h('span', text),
+      h('a', {
+        style: 'color:var(--clr-primary);font-weight:600;cursor:pointer',
+        onClick: (e) => { e.preventDefault(); onAction() }
+      }, actionText)
+    ])
+  })
 }
 
 async function submitOrder() {
@@ -328,14 +377,14 @@ async function submitOrder() {
   }
   submitting.value = true
   try {
-    const order = await orderApi.create({
+    await orderApi.create({
       items: selectedItems.value.map(i => ({ skuId: i.skuId, quantity: i.quantity })),
       receiverName: addr.receiver,
       receiverPhone: addr.phone,
       receiverAddress: addr.fullAddress,
       idempotentToken: orderToken.value || undefined
     })
-    ElMessage.success(`下单成功：${order.orderNo}`)
+    toastWithAction('下单成功', '查看订单', () => router.push('/orders'))
     selectedItems.value.forEach(i => checkedIds.value.delete(i.id))
     persistChecked()
     cartStore.refresh()
@@ -362,6 +411,10 @@ onMounted(() => {
 <style scoped>
 .cart-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .page-title { font-size: 20px; font-weight: 700; color: var(--clr-text); margin: 0; }
+/* 移动端才出现的"小计"标签：桌面端保持原样（display:none 不影响布局） */
+.lbl { display: none; }
+/* 自绘步进器只在手机端出现（.mobile-only 桌面 display:none，手机端由 @media 覆盖为 flex） */
+.qty-step { display: none; }
 
 /* 商品行（横向紧凑） */
 .item-list, .blocked-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
@@ -426,70 +479,128 @@ onMounted(() => {
 
 /* =====================================================================
    移动端适配（≤ 768px）
-   桌面端商品行是「勾选/图/名称/单价/数量/小计/删除」横向 7 列并排一行，
-   窄屏无法容纳，降级为电商 App 通用的两行商品卡：
-     行 1：[勾选] [图]  商品名 / 规格 / 库存            [删除]
-     行 2：单价            数量步进器              小计
-   实现要点：商品名 flex-basis:100% 占满首行剩余空间，迫使后面的
-   单价/数量/小计自动换到第二行——纯样式实现，DOM 顺序与桌面端完全一致。
+   ★ 要点：桌面端一行 7 列的「勾选/图/名称/单价/数量/小计/删除」在 390px 下
+     放不下，此前用 flex-wrap + flex-basis:100% 硬挤，结果名称被顶到图片下方，
+     单条高达 197px（首屏只放得下 2.8 条）。
+   现改为电商 App 通用的两行网格（DOM 顺序不变，仅用 grid-area 重新布点）：
+     行 1：[勾选] [图 80]  商品名 / 规格 / 库存              [删除]
+     行 2：[勾选] [图 80]  小计                      [−  N  +]
+   勾选框与图片跨两行 → 单条 ≈ 118px，首屏 4 条以上。
    ===================================================================== */
 @media (max-width: 768px) {
-  .cart-head { margin-bottom: 10px; }
+  .cart-head { margin-bottom: 8px; }
   .page-title { font-size: 18px; }
 
-  .item-list, .blocked-group { gap: 12px; }
+  .item-list, .blocked-group { gap: 8px; }
 
   .cart-item {
-    position: relative;              /* 供右上角「删除」定位 */
-    flex-wrap: wrap;
+    position: relative;                    /* 供右上角「删除」定位 */
+    display: grid;
+    grid-template-columns: 40px 80px minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
     align-items: center;
-    padding: 12px;
-    column-gap: 10px; row-gap: 10px;
+    column-gap: 6px; row-gap: 4px;
+    padding: 8px 10px;
   }
 
-  /* 勾选框：EP 默认 height:32px + margin-right:30px。
-     窄屏改为 40px 高（触摸目标）并收回那 30px 间距，把宽度让给商品名。
-     用 height 而非 padding —— EP 的 height 是显式的，加竖向 padding 会撑开内容盒。 */
-  .ck { height: 40px; min-height: 40px; padding: 0 4px; margin: 0 -4px; }
+  /* 勾选框：整格 40×44 触摸区（EP 默认 22×40 且带 30px 右外边距，一并收回） */
+  .ck, .ck-placeholder {
+    grid-area: 1 / 1 / 3 / 2;
+    width: 40px; height: 44px; min-height: 44px;
+    padding: 0; margin: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ck :deep(.el-checkbox__inner) { width: 20px; height: 20px; border-radius: var(--r-sm); }
+  .ck :deep(.el-checkbox__inner::after) { height: 10px; left: 7px; top: 3px; }
 
-  .thumb { width: 56px; height: 56px; }
+  .thumb { grid-area: 1 / 2 / 3 / 3; width: 80px; height: 80px; border-radius: var(--r-sm); }
 
-  /* 首行信息区：占满剩余宽度并强制换行；右侧留出「删除」的位置 */
-  .goods-info { flex: 1 1 100%; padding-right: 48px; }
-  .goods-name { font-size: 14px; line-height: 1.35; }
+  /* 商品名/规格/库存：跨 3、4 两列（右侧留 46px 给绝对定位的删除） */
+  .goods-info { grid-area: 1 / 3 / 2 / 5; padding-right: 46px; }
+  .goods-name {
+    font-size: 14px; line-height: 1.3;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .goods-sku, .stock-line, .stock-warn { font-size: 12px; }
 
-  /* 第二行：单价 / 数量 / 小计 */
-  .col-price { width: auto; flex: 0 0 auto; text-align: left; font-size: 13px; }
-  .col-qty { width: auto; flex: 0 0 auto; margin-left: auto; }
-  .col-subtotal { width: auto; flex: 0 0 auto; font-size: 15px; }
+  /* 行 2：左「小计 / ¥x」（标签在上、金额在下，宽度只需取两者较大值），
+     右「[−] N [+]」。单价在窄屏让位——两个无标签数字并排本来就读不懂。
+     标签换行不会加高卡片：该行高度由 44px 的步进器决定。 */
+  .col-price { display: none; }
+  .col-subtotal {
+    grid-area: 2 / 3 / 3 / 4; justify-self: start; align-self: center;
+    display: flex; flex-direction: column; align-items: flex-start;
+    width: auto; min-width: 0; text-align: left;
+    font-size: 14px; color: var(--clr-primary);
+    white-space: nowrap; overflow: hidden;
+  }
+  .col-subtotal .lbl {
+    display: block; font-size: 11px; font-weight: 400; line-height: 1.25;
+    color: var(--clr-text-3);
+  }
+  .col-subtotal.off { color: var(--clr-text-4); }
+  .col-qty { grid-area: 2 / 4 / 3 / 5; justify-self: end; width: auto; margin: 0; }
 
-  /* 删除挪到卡片右上角，把第二行留给价格/数量/小计，避免窄屏硬挤溢出 */
-  .del { position: absolute; top: 8px; right: 6px; margin: 0; padding: 0 8px; }
+  /* 手机端抛弃 el-input-number：EP 的 ± 实际点击区只有 25px 宽、数字 12px */
+  .col-qty :deep(.el-input-number) { display: none; }
+  .qty-step {
+    display: flex; align-items: center;
+    border: 1px solid var(--clr-border); border-radius: var(--r-sm);
+    overflow: hidden; background: #fff;
+  }
+  .step-btn {
+    width: 44px; height: 44px; flex: 0 0 44px;
+    border: 0; background: #fafafa; color: var(--clr-text);
+    font-size: 20px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-btn:disabled { color: var(--clr-text-4); background: #fdfdfd; }
+  .step-num {
+    min-width: 32px; text-align: center;
+    font-size: 15px; font-variant-numeric: tabular-nums;
+  }
 
-  /* 数量步进器：全局已抬高内部输入框，这里补齐根节点高度与宽度 */
-  .col-qty :deep(.el-input-number) { width: 108px; height: 40px; }
-  .col-qty :deep(.el-input-number .el-input) { height: 100%; }
+  /* 删除挪到卡片右上角：不占正文行，触摸目标 44px */
+  .del {
+    position: absolute; top: 0; right: 0;
+    min-width: 44px; min-height: 44px; margin: 0; padding: 0;
+  }
 
-  /* 结算栏吸底：贴在底部标签栏之上。
-     用 sticky 而非 fixed —— 吸底期间不遮挡列表最后一条，
-     滚到底时回到文档流末尾，也不会盖住页脚。 */
+  /* 失效分组 */
+  .blocked-group .blocked-title { font-size: 12px; }
+  .blocked-group .qty-text { font-size: 13px; }
+
+  /* 结算栏吸底：紧贴底部标签栏（bottom = 标签栏高度），视觉上连成一条双行操作区。
+     用 sticky 而非 fixed —— 吸底期间不遮挡列表最后一条，滚到底时回到文档流末尾。 */
   .settle-bar {
     position: sticky;
-    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(var(--tabbar-h) + var(--safe-b));
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    column-gap: 8px; row-gap: 6px;
-    padding: 10px 12px;
-    box-shadow: var(--shadow-md);
+    column-gap: 8px; row-gap: 4px;
+    padding: 8px 10px;
+    margin-top: 6px;
+    border-radius: var(--r-md);
+    box-shadow: 0 -2px 12px rgba(0, 0, 0, .08);
+    z-index: 10;
   }
   .settle-tip { grid-column: 1 / -1; grid-row: 1; }
   .settle-tip:empty { display: none; }          /* 无失效商品时不占行 */
-  .settle-bar > .el-checkbox { grid-column: 1; grid-row: 2; min-height: 40px; margin: 0; }
-  .settle-total { grid-column: 2; grid-row: 2; text-align: right; font-size: 13px; }
-  .settle-bar > .el-button { grid-column: 3; grid-row: 2; margin: 0; }
-  .total-price { font-size: 18px; }
+  .settle-bar > .el-checkbox {
+    grid-column: 1; grid-row: 2;
+    min-height: 44px; margin: 0; padding: 0 2px;
+  }
+  .settle-bar > .el-checkbox :deep(.el-checkbox__inner) { width: 20px; height: 20px; border-radius: var(--r-sm); }
+  .settle-bar > .el-checkbox :deep(.el-checkbox__inner::after) { height: 10px; left: 7px; top: 3px; }
+  .settle-total { grid-column: 2; grid-row: 2; text-align: left; font-size: 12px; color: var(--clr-text-3); }
+  .settle-total b { color: var(--clr-primary); }
+  .settle-bar > .el-button { grid-column: 3; grid-row: 2; margin: 0; min-height: 44px; }
+  .total-price { font-size: 18px; color: var(--clr-primary); }
   .empty-check { font-size: 12px; }
+
+  /* 空态：不再留一大片纯白 */
+  .empty-tip { color: var(--clr-text-3); font-size: 13px; margin: -4px 0 12px; }
 
   /* 结算弹窗：清单/地址簿限高，窄屏不至于把弹窗撑到视口外 */
   .checkout-list { max-height: 30vh; }
@@ -508,5 +619,17 @@ onMounted(() => {
   }
   .addr-form :deep(.el-form-item__content) { display: block; margin-left: 0 !important; }
   .addr-form .el-button { width: 100%; }
+  /* 弹窗内输入框 ≥16px 防 iOS 聚焦缩放 */
+  .addr-form :deep(.el-input__inner) { font-size: 16px; }
+}
+
+/* 360px 级窄屏（Galaxy S8 一类）：图片与步进器各收一档，
+   保证「小计 / ¥1,299」仍有完整显示宽度。± 保持 40×44 可点面积。 */
+@media (max-width: 375px) {
+  .cart-item { grid-template-columns: 40px 72px minmax(0, 1fr) auto; }
+  .thumb { width: 72px; height: 72px; }
+  .step-btn { width: 40px; flex: 0 0 40px; }
+  .step-num { min-width: 28px; }
+  .col-subtotal { font-size: 13px; }
 }
 </style>

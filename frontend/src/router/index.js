@@ -13,9 +13,14 @@ import { createRouter, createWebHistory } from 'vue-router'
  *
  * 注意：标记为 public 只是"不强制跳登录"，不代表该页所有操作都免登录——
  * 例如笔记详情页上的点赞/收藏仍需登录，由页面自己引导（见各视图的空态/提示）。
+ *
+ * ★ meta.blank = true 表示【任务型页面】：不渲染全局搜索框与底部标签栏
+ *   （当前只有 /login——在登录页挂"搜索商品"、以及露出未登录不可用的
+ *     购物车/订单入口，都会显得没做完）。
  */
 const routes = [
-  { path: '/login', name: 'login', component: () => import('../views/Login.vue'), meta: { public: true } },
+  // blank: 任务型页面（登录）——不渲染全局搜索框与底部标签栏
+  { path: '/login', name: 'login', component: () => import('../views/Login.vue'), meta: { public: true, blank: true } },
 
   // ---- 公开浏览：商品 ----
   { path: '/', name: 'home', component: () => import('../views/Home.vue'), meta: { public: true } },
@@ -30,7 +35,9 @@ const routes = [
   // ---- 需要登录：交易 / 账户 / 创作 / AI ----
   { path: '/cart', name: 'cart', component: () => import('../views/Cart.vue') },
   { path: '/orders', name: 'orders', component: () => import('../views/Orders.vue') },
-  { path: '/chat', name: 'chat', component: () => import('../views/Chat.vue') },
+  // hideFooter: App 型页面（占满一屏、自身滚动），不该渲染全站页脚——
+  // 否则它会被撑成长文档，吸底元素（聊天输入区）跟着错位。
+  { path: '/chat', name: 'chat', component: () => import('../views/Chat.vue'), meta: { hideFooter: true } },
   { path: '/mine', name: 'mine', component: () => import('../views/Mine.vue') },
   { path: '/mine/addresses', name: 'addresses', component: () => import('../views/AddressManage.vue') },
   // V3：模拟收银台（MOCK 渠道）
