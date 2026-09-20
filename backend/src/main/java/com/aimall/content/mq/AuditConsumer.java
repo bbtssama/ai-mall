@@ -40,11 +40,25 @@ public class AuditConsumer {
             // 消息只带 id：消费时回查最新内容（消息在队列里期间笔记可能已被编辑）
             Note note = noteMapper.selectById(msg.noteId());
             if (note == null) {
-                log.warn("笔记不存在，丢弃消息 noteId={}", msg.noteId());
+                // ★ 走到这里说明真的异常了：发送侧已改为「事务提交后投递」，
+                // 正常情况下事务已提交、笔记必然存在。
+                // 若出现本条 WARN，说明 ①发送侧又被改回事务内直发，或 ②笔记被物理删除（本项目无此路径）。
+                log.warn("笔记不存在，丢弃消息 noteId={} version={}（发送侧已 afterCommit，出现即代表异常）",
+                        msg.noteId(), msg.bizVersion());
                 return;   // 正常 ACK：不存在的笔记重试一万次也不存在
             }
+            // ★ 版本校验：消息可能是「过期消息」——ACK 丢失被 Broker 重投，而用户期间已重新送审。
+            //   若不校验，会用【旧版本号】去审【最新内容】，把结论记到错误的版本上；
+            //   更糟的是它可能凭 status='AUDITING' 抢先把笔记流转掉，让真正的新版本结论被丢弃。
+            int currentVersion = note.getAuditVersion() == null ? 1 : note.getAuditVersion();
+            if (msg.bizVersion() != currentVersion) {
+                log.info("过期审核消息，丢弃 noteId={} msgVersion={} currentVersion={}",
+                        msg.noteId(), msg.bizVersion(), currentVersion);
+                return;   // 正常 ACK：过期消息重试一万次也还是过期
+            }
             // 幂等防线在 auditOnce 内部（版本唯一键 + 状态机条件更新）
-            auditService.auditOnce(note);
+            // ★ 版本号必须从消息带下去，不能硬编码：它决定「重复投递」与「新一次审核」的区分
+            auditService.auditOnce(note, msg.bizVersion());
         } catch (Exception e) {
             // 吞掉异常 = 消息 ACK 不重入队（防毒消息循环）。
             // 失败已有 ERROR 流水兜底，可在管理后台/定时任务补处理。

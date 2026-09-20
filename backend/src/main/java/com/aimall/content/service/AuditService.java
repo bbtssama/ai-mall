@@ -23,6 +23,10 @@ public interface AuditService {
     /**
      * 提交审核：优先走 MQ，不可用时降级为本地线程池异步执行。
      * <b>无论哪条路径，本方法都应快速返回</b>（发布接口不等待 AI）。
+     *
+     * <p><b>投递时机</b>：消息<b>不在事务内直发</b>，而是注册到「当前事务提交后」执行
+     * （见 {@code AfterCommitExecutor}）。否则消费端可能先于事务提交回查数据库，
+     * 读不到刚插入的笔记而丢弃消息。</p>
      */
     void submit(Note note);
 
@@ -31,12 +35,17 @@ public interface AuditService {
      *
      * <p>幂等保障三层：</p>
      * <ol>
-     *   <li>t_audit_record 的 uk(biz_type,biz_id,biz_version)——INSERT IGNORE 撞键返回 0 直接跳过；</li>
+     *   <li>t_audit_record 的 {@code uk(biz_type,biz_id,biz_version,status)}——INSERT IGNORE 撞键返回 0 直接跳过；
+     *       键里含 status，因此 ERROR（审核没得出结论）不会占用终态幂等位；</li>
      *   <li>t_note.updateStatus 带 WHERE status='AUDITING'——重复回写自然失效；</li>
-     *   <li>审核失败(ERROR)不改动笔记状态——笔记停在 AUDITING，人工兜底。</li>
+     *   <li>审核失败(ERROR)不改动笔记状态——笔记停在 AUDITING，由补偿任务重试，人工兜底。</li>
      * </ol>
+     *
+     * @param version 本次审核的版本号（来自 {@code t_note.audit_version}，随消息传递）。
+     *                <b>不可硬编码</b>：它决定了「MQ 重复投递」与「用户改完后的新一次审核」
+     *                能否被幂等键正确区分。
      */
-    void auditOnce(Note note);
+    void auditOnce(Note note, int version);
 
     /**
      * 查询某次审核的流水（详情页展示"为什么被驳回"用）。

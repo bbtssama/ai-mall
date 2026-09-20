@@ -1,13 +1,12 @@
 package com.aimall.order.mq;
 
+import com.aimall.common.tx.AfterCommitExecutor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 订单延迟消息发送器 —— 「30 分钟未支付自动取消」消息的唯一出口。
@@ -37,21 +36,13 @@ public class OrderDelayMessageSender {
 
     /**
      * 在<b>当前事务提交后</b>投递延迟取消消息。
-     * 必须在事务内调用（否则退化为立即发送并记 WARN）。
+     * 必须在事务内调用（无事务时退化为立即发送并记 WARN）。
+     *
+     * <p>实现委托给 {@link AfterCommitExecutor}：事务边界处理、无事务退化、
+     * commit 后异常吞咽这套逻辑全项目只应有一份，避免各处各写一遍又写漏。</p>
      */
     public void sendAfterCommit(Long orderId) {
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            // 没有事务直接发：极端场景（手动触发），比静默丢消息好
-            log.warn("sendAfterCommit 在无事务上下文调用，退化为立即发送 orderId={}", orderId);
-            sendNow(orderId);
-            return;
-        }
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                sendNow(orderId);
-            }
-        });
+        AfterCommitExecutor.run("订单延迟取消消息 orderId=" + orderId, () -> sendNow(orderId));
     }
 
     /** 直接投递（MQ 不可用时静默降级：不投递，由补偿任务兜底） */

@@ -50,6 +50,21 @@ public interface NoteMapper {
                      @Param("newStatus") String newStatus,
                      @Param("auditResult") String auditResult);
 
+    /**
+     * 「重新送审」：把被驳回的笔记回到 AUDITING，并<b>把审核版本号 +1</b>。
+     *
+     * <p><b>版本号 +1 是本次修复的核心。</b>审核幂等键是
+     * {@code uk(biz_type, biz_id, biz_version, status)}：若不递增版本号，
+     * 重提后的新一次审核会撞上第一次留下的流水、被 INSERT IGNORE 静默挡掉，
+     * 笔记就永久停在 AUDITING（这正是修复前的真实缺陷）。</p>
+     *
+     * <p>用 {@code WHERE status='REJECTED'} 做条件更新，与 {@link #updateStatus} 同款 CAS 语义：
+     * 并发重提只会有一个成功，返回 0 行说明状态已被别人改过。</p>
+     *
+     * @return 影响行数；0 表示当前已不是 REJECTED（无需重提或已被并发处理）
+     */
+    int resubmit(@Param("id") Long id);
+
     /** 浏览数 +1（自增，避免并发丢失更新） */
     int incrViewCount(@Param("id") Long id);
 

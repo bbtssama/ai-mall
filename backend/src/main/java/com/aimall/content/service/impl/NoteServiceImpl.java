@@ -75,6 +75,16 @@ public class NoteServiceImpl implements NoteService {
      *
      * <p>图片/标签/关联商品与主表同事务写入：要么全成功要么全回滚，
      * 避免"主表有了但图片丢了"的脏数据。</p>
+     *
+     * <p><b>★ 审核消息的投递时机（2026-09-20 修复）</b></p>
+     * 本方法整体在事务内，但审核消息<b>不在这里直发</b>——
+     * {@code auditService.submit()} 内部会把它注册到「本事务提交后」才执行
+     * （见 {@code AfterCommitExecutor}）。
+     *
+     * <p>早期版本的注释写着"审核提交放在事务边界外（Controller 层事务已提交）"，
+     * 但 Controller 层<b>根本没有事务</b>，实际仍在事务内直发 ——
+     * 消费端另一条连接读不到未提交的行，判定"笔记不存在"丢弃消息，
+     * 日志实据 10 次发布有 9 次被丢弃。现已修正注释与实现。</p>
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -87,13 +97,12 @@ public class NoteServiceImpl implements NoteService {
         note.setContent(req.getContent().trim());
         note.setCover(firstImage(req.getImages()));
         note.setStatus(Note.STATUS_AUDITING);   // 发布即审核中，秒回
+        note.setAuditVersion(1);                // 首次审核版本号；重新送审时递增（见 resubmit）
         noteMapper.insert(note);
 
         saveExtras(note.getId(), req);
 
-        // 事务提交后再发审核消息：避免"消费者先于事务提交读到空笔记"的竞态。
-        // @Transactional 方法内直接发消息的坑：MQ 消费者立刻回查，事务还没 commit → 查不到。
-        // 这里用最简单的做法：审核提交放在事务边界外（Controller 层事务已提交）。
+        // 提交审核：内部用 AfterCommitExecutor 推迟到事务提交后投递，避免消费端读不到数据
         auditService.submit(note);
 
         return detail(note.getId());
@@ -105,8 +114,20 @@ public class NoteServiceImpl implements NoteService {
 
     @Override
     public PageResult<NoteVO> page(NoteQuery query) {
-        // Feed 默认只展示已发布内容；个人主页（带 userId）在 Controller 决定是否放开状态
-        if (!StringUtils.hasText(query.getStatus())) {
+        // ★ 访问控制：status 与 userId 都是客户端可传的参数，绝不能直接信任。
+        //   只有"查自己"时才允许看到非已发布内容；其余情况（匿名 / 查别人）
+        //   一律强制 PUBLISHED 并忽略传入的 userId。
+        //   否则匿名用户可以 GET /api/v1/notes?status=AUDITING 读到未发布、被驳回笔记的
+        //   标题/摘要/作者/计数 —— 这是把"匿名可浏览"做成"匿名可窥私"的漏洞。
+        Long me = currentUserIdOrNull();
+        boolean querySelf = me != null && me.equals(query.getUserId());
+        if (querySelf) {
+            // 自己的主页：默认仍只看已发布，显式传了状态才放开
+            if (!StringUtils.hasText(query.getStatus())) {
+                query.setStatus(Note.STATUS_PUBLISHED);
+            }
+        } else {
+            query.setUserId(null);
             query.setStatus(Note.STATUS_PUBLISHED);
         }
         List<Note> notes = noteMapper.selectPage(query);
@@ -114,19 +135,23 @@ public class NoteServiceImpl implements NoteService {
             return PageResult.of(List.of(), 0, query.getPage(), query.getPageSize());
         }
         List<NoteVO> vos = assembleList(notes);
-        // 游标分页的"下一页"判断：本次拿满 pageSize 条即视为还有下一页（简单可靠）
-        boolean hasMore = notes.size() >= query.getPageSize();
-        return PageResult.of(hasMore ? vos : vos, notes.size(), query.getPage(), query.getPageSize());
+        // 游标分页不返回总页数：records 即本次数据，total 记本次条数，
+        // 前端用"是否拿满一页（records.length == pageSize）"判断还有没有下一页。
+        // 注：原实现是 `hasMore ? vos : vos` —— 三元两侧相同，hasMore 从未生效，属无效表达式，已清理。
+        return PageResult.of(vos, notes.size(), query.getPage(), query.getPageSize());
     }
 
     @Override
     public NoteVO detail(Long id) {
-        Long userId = StpUtil.getLoginIdAsLong();
+        // ★ 匿名可读（2026-09-20）：用 currentUserIdOrNull 而非 StpUtil.getLoginIdAsLong。
+        // 未登录时 userId = null：只有 PUBLISHED 内容可见（未发布/驳回内容仍仅作者本人可见），
+        // 浏览计数照常 +1。这样"不登录也能浏览种草社区"与"审核中内容不外泄"两个约束同时成立。
+        Long userId = currentUserIdOrNull();
         Note note = noteMapper.selectById(id);
         if (note == null) {
             throw new BusinessException(ResultCode.NOT_FOUND, "笔记不存在");
         }
-        boolean mine = note.getUserId().equals(userId);
+        boolean mine = userId != null && note.getUserId().equals(userId);
         // 未发布内容只有作者本人可见（防审核中/驳回内容外泄）
         if (!Note.STATUS_PUBLISHED.equals(note.getStatus()) && !mine) {
             throw new BusinessException(ResultCode.NOT_FOUND, "笔记不存在");
@@ -214,7 +239,21 @@ public class NoteServiceImpl implements NoteService {
         }
     }
 
+    /**
+     * 重新送审：被驳回的笔记回到 AUDITING 并重新触发审核。
+     *
+     * <p><b>★ 必须走 {@link NoteMapper#resubmit}（而不是 updateStatus）</b>：
+     * 它除改状态外还会把 {@code audit_version} +1。审核幂等键含版本号，
+     * 不递增的话新一次审核会撞上第一次留下的流水、被 INSERT IGNORE 静默挡掉，
+     * 笔记永久卡在 AUDITING —— 这正是修复前的真实缺陷（且日志只有一行
+     * "重复审核消息（幂等跳过）"，看起来像正常行为）。</p>
+     *
+     * <p>补上 {@code @Transactional} 与 {@link #offline} 保持一致：
+     * "状态流转 + 版本号递增"必须同生共死；同时让 {@code submit()} 拿到事务上下文，
+     * 走 afterCommit 投递。</p>
+     */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void resubmit(Long noteId) {
         Long userId = StpUtil.getLoginIdAsLong();
         Note note = noteMapper.selectById(noteId);
@@ -224,7 +263,15 @@ public class NoteServiceImpl implements NoteService {
         if (!Note.STATUS_REJECTED.equals(note.getStatus())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "仅被驳回的笔记可重新送审");
         }
-        noteMapper.updateStatus(noteId, Note.STATUS_REJECTED, Note.STATUS_AUDITING, null);
+        int rows = noteMapper.resubmit(noteId);
+        if (rows == 0) {
+            // 并发重提：状态已被别人改走。幂等处理，不报错。
+            log.info("重新送审跳过（状态已变更）noteId={}", noteId);
+            return;
+        }
+        // 让 Java 对象与库中一致（状态回 AUDITING、版本号 +1），再交给 submit 投递审核消息
+        note.setStatus(Note.STATUS_AUDITING);
+        note.setAuditVersion((note.getAuditVersion() == null ? 1 : note.getAuditVersion()) + 1);
         auditService.submit(note);
     }
 

@@ -24,4 +24,23 @@
         AND biz_version = #{bizVersion}
     </select>
 
+    <!--
+      取"最新一次审核"的流水：
+        · 版本号大的优先  —— 重新送审后 biz_version 会递增，必须取最新的那次
+        · 同版本优先终态  —— 同一版本可能同时存在 ERROR 与 PASS/REJECT 两条，
+                             ERROR 表示"没审出结论"，不该被当成审核结果展示。
+                             MySQL 中 (status='ERROR') 求值为 1/0，升序即"终态在前"。
+        · 最后按 id 倒序  —— 同版本同类型取最后写入的那条
+      早期实现是 selectByBiz(bizType, bizId, 1) 硬编码版本 1，重新送审后会取到过期流水。
+    -->
+    <select id="selectLatestByBiz" resultType="com.aimall.content.bean.AuditRecord">
+        SELECT id, biz_type, biz_id, biz_version, ai_result_json, status,
+               reviewer, reviewed_at, created_at
+        FROM t_audit_record
+        WHERE biz_type = #{bizType}
+        AND biz_id = #{bizId}
+        ORDER BY (status = 'ERROR') ASC, biz_version DESC, id DESC
+        LIMIT 1
+    </select>
+
 </mapper>

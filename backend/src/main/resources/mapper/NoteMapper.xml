@@ -4,10 +4,14 @@
 <mapper namespace="com.aimall.content.mapper.NoteMapper">
 
     <sql id="Base_Column_List">
-        id, user_id, title, cover, content, status, audit_result,
+        id, user_id, title, cover, content, status, audit_version, audit_result,
         hot_score, like_count, collect_count, view_count, created_at, updated_at
     </sql>
 
+    <!--
+      audit_version 故意不出现在 INSERT 列表里：由 DDL 的 DEFAULT 1 兜底，
+      避免任何"忘了设置"的插入写出 NULL。Service 侧仍会显式赋 1，保持 Java 对象与库一致。
+    -->
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO t_note (user_id, title, cover, content, status,
                             hot_score, like_count, collect_count, view_count)
@@ -122,11 +126,35 @@
         AND status = #{expectStatus}
     </update>
 
+    <!--
+      重新送审：REJECTED → AUDITING，同时【审核版本号 +1】。
+        版本号必须递增，否则新一次审核会撞上第一次的审核流水、被 INSERT IGNORE 挡掉，
+        笔记永久停在 AUDITING（修复前的真实缺陷）。
+      audit_result 一并清空：上一次的驳回原因不该挂在新一轮审核上。
+      WHERE status='REJECTED' 是条件更新（CAS），并发重提只会有一个成功。
+    -->
+    <update id="resubmit">
+        UPDATE t_note
+        SET status        = 'AUDITING',
+            audit_version = audit_version + 1,
+            audit_result  = NULL
+        WHERE id = #{id}
+        AND status = 'REJECTED'
+    </update>
+
+    <!--
+      编辑正文：本项目 V2 简化版「编辑后需重新审核」——
+      所以这里同时把状态打回 AUDITING 并把审核版本号 +1，
+      语义与 resubmit 一致（新一次审核必须拿到新的版本号）。
+    -->
     <update id="updateContent">
         UPDATE t_note
-        SET title    = #{title},
-            content  = #{content},
-            cover    = #{cover}
+        SET title         = #{title},
+            content       = #{content},
+            cover         = #{cover},
+            status        = 'AUDITING',
+            audit_version = audit_version + 1,
+            audit_result  = NULL
         WHERE id = #{id}
         AND user_id = #{userId}
     </update>

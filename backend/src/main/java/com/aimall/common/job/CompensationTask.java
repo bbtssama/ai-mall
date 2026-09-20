@@ -77,7 +77,16 @@ public class CompensationTask {
 
     /**
      * 审核堆积兜底：扫描"审核中超 10 分钟"的笔记重新送审。
-     * auditOnce 自带三层幂等（版本唯一键 + 状态机 CAS），重复审核无副作用。
+     *
+     * <p><b>为什么这条补偿能生效</b>（2026-09-20 修复后确认）：</p>
+     * <ul>
+     *   <li>重审用的是<b>同一个版本号</b>（{@code t_note.audit_version} 未变），
+     *       所以它对「同一次审核」的重复执行——这正是幂等键要保护的场景；</li>
+     *   <li>而 t_audit_record 的唯一键含 {@code status}，AI 失败留下的 ERROR 流水
+     *       <b>不会占用终态幂等位</b>，因此补审拿到 PASS/REJECT 时能正常落库并流转。
+     *       修复前唯一键不含 status，ERROR 会把后续所有补审挡在 INSERT IGNORE 之外——
+     *       那正是"永久卡在 AUDITING"的真正成因。</li>
+     * </ul>
      */
     @Scheduled(fixedDelay = 10 * 60 * 1000, initialDelay = 90 * 1000)
     public void retryStuckAudits() {
@@ -89,7 +98,8 @@ public class CompensationTask {
         log.info("[补偿] 发现 {} 篇审核堆积笔记，重新送审", stuck.size());
         for (Note n : stuck) {
             try {
-                auditService.auditOnce(n);
+                int version = n.getAuditVersion() == null ? 1 : n.getAuditVersion();
+                auditService.auditOnce(n, version);
             } catch (Exception e) {
                 log.error("[补偿] 笔记重审失败 noteId={}: {}", n.getId(), e.getMessage());
             }

@@ -43,6 +43,14 @@ public class Note {
     private String cover;
     private String content;
     private String status;
+    /**
+     * 审核版本号：发布 = 1，每次「重新送审」/「编辑后重审」+1。
+     *
+     * <p>它是审核幂等键 {@code uk(biz_type,biz_id,biz_version,status)} 的第三个分量，
+     * 用来区分「同一次审核的 MQ 重复投递」（应跳过）与「用户改完后的新一次审核」（应执行）。
+     * 早期版本该值被硬编码为 1，导致幂等键退化成常量、重新送审永久失效。</p>
+     */
+    private Integer auditVersion;
     /** 审核结果说明（驳回原因），展示给作者 */
     private String auditResult;
     private Integer hotScore;
